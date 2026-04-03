@@ -10,3 +10,4 @@ requires-python = ">=3.9"
 
 [project.scripts]
 openclaw-remote = "openclaw_remote.cli:main"
+agent-manage-v2 = "agent_manage_v2.cli:main"
