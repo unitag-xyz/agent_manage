@@ -1,7 +1,7 @@
 # OpenClaw Agent Manage Commands
 
 > Deprecated: 本文档描述的是 `v1` 命令集，仅保留作历史参考。
-> 当前仓库后续只维护 `v2`，入口为 `python3 scripts/agentctl_v2.py`。
+> 当前仓库后续只维护当前版本，入口为 `python3 scripts/agentctl.py`。
 
 这个工具当前只有 2 个命令。
 
@@ -15,7 +15,7 @@
 
 ## 补充说明
 
-- 脚本入口是 `python3 scripts/agentctl.py`
+- 脚本入口是 `python3 scripts/agentctl_Deprecated.py`
 - 当前没有独立的“修改模型”命令
 - 修改模型目前是 `create` 的一部分：当 agent 已存在且传入新的 `--model` 时，会更新该 agent 的模型配置
 

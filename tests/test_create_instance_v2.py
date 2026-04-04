@@ -4,12 +4,12 @@ import zipfile
 import json
 from pathlib import Path
 
-from agent_manage_v2.models import (
+from agent_manage.models import (
     AddTelegramBotRequest,
     CreateInstanceRequest,
     DeleteTelegramBotRequest,
 )
-from agent_manage_v2.orchestrator import InstanceManagerV2
+from agent_manage.orchestrator import InstanceManagerV2
 
 
 class FakeRunner:

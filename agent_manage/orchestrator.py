@@ -7,7 +7,7 @@ import uuid
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from openclaw_remote.local import CommandError, LocalRunner
+from .local import CommandError, LocalRunner
 
 from .models import AddTelegramBotRequest, CreateInstanceRequest, DeleteTelegramBotRequest
 

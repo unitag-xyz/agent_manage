@@ -1,192 +1,340 @@
-# OpenClaw Agent Script
+# Agent Manage
 
-> Deprecated: 本文档对应 `v1` 方案，仅保留作历史参考。
-> 当前仓库后续只维护 `agent_manage_v2/` 和 `scripts/agentctl_v2.py`。
-
-这套脚本现在只保留两个命令：
-
-- `create`
-- `delete`
-
-## SSH 调用示例
-
-你可以直接从本机通过 SSH 调服务器上的脚本：
-
-```bash
-ssh deploy@your-server 'cd /srv/openclaw && python3 scripts/agentctl.py create \
-  --tg-id 123456789 \
-  --model openai-codex/gpt-5.4 \
-  --tg-bot unipaytgbot \
-  --tg-bot-token 123456:abc'
-```
-
-删除示例：
-
-```bash
-ssh deploy@your-server 'cd /srv/openclaw && python3 scripts/agentctl.py delete \
-  --tg-id 123456789'
-```
-
-它默认你的场景是：
-
-- 一个 Telegram bot 可以服务多个 agent
-- 不同 Telegram 私聊用户按 `peer.id` 路由到不同 agent
-- 用户的 Telegram 账号 ID 默认直接作为 `agentId`
-- 如果传了 `--agent-name`，则优先用它作为 `agentId`
-- workspace 固定为 `/data/openclaw/{agent_id}`
-
-配置写入方式：
-
-- agent 创建和删除走 `openclaw agents add/delete`
-- Telegram bot 配置和 `bindings` 不再走 `gateway call`
-- 脚本直接读写 `~/.openclaw/openclaw.json`
-- 每次写回前会自动备份一份 `openclaw.json.bak`
-
-脚本入口：
+入口：
 
 ```bash
 python3 scripts/agentctl.py
 ```
 
-## create
+通用说明：
 
-`create` 的输入核心是用户 `tg_id`。
+- `stdout` 只输出标准 JSON，供 `.NET`、HTTP API 或其他上层程序解析
+- `stderr` 只输出执行日志
+- 成功退出码为 `0`
+- 失败退出码为非 `0`，但 `stdout` 仍会返回结构化错误 JSON
+- 默认配置文件路径为 `~/.openclaw/openclaw.json`
+- `create-instance` 默认模板目录为 `~/template`
 
-- `tg_id` 就是 Telegram DM 用户 ID
-- 默认 `agentId = tg_id`
-- 如果传了 `--agent-name`，则 `agentId = agent_name`
-- `workspace = /data/openclaw/{agent_id}`
+## create-instance
+
+### 行为说明
+
+- `template_name` 直接作为 `agent_name`
+- workspace 默认创建在 `~/data/{templateName}`，也可通过参数覆盖
+- 从 `~/template/{templateName}.zip` 解压到 `~/template/{templateName}/`
+- 再把 `~/template/{templateName}/` 整体复制到 workspace
+- 如执行失败，默认按当前实现做回滚
+
+前置要求：
+
+```bash
+~/template/unipay-claw-base.zip
+```
+
+### 远程执行
+
+```bash
+cd ~/data/agent_manage && python3 scripts/agentctl.py create-instance \
+  --template-name unipay-claw-base
+```
+
+可选参数：
+
+- `--model`
+- `--workspace-root`
+- `--no-rollback`
+- `--template-root`
+- `--config-path`
+- `--openclaw-bin`
+- `--project-dir`
+- `--dry-run`
+
+### Output
+
+成功时 `result` 里主要返回：
+
+- `template_name`
+- `agent_name`
+- `workspace`
+- `archive_path`
+- `template_dir`
+- `steps`
 
 示例：
 
-```bash
-python3 scripts/agentctl.py create \
-  --tg-id 123456789 \
-  --model openai-codex/gpt-5.4 \
-  --tg-bot unipaytgbot \
-  --tg-bot-token 123456:abc
-```
-
-指定自定义 agent 名字：
-
-```bash
-python3 scripts/agentctl.py create \
-  --tg-id 123456789 \
-  --agent-name alice \
-  --model openai-codex/gpt-5.4 \
-  --tg-bot unipaytgbot
-```
-
-创建逻辑：
-
-1. 如果 agent 不存在，执行 `openclaw agents add`
-2. 如果 agent 已存在，继续走后续流程
-3. 如果传了 `--model` 且 agent 已存在，更新这个 agent 的模型
-4. 如果传了 `--tg-bot-token`，就创建或更新这个 Telegram bot
-   同时自动把当前 `tg-id` 写进这个 bot 的白名单
-5. 自动写入一条 DM peer binding：
-
 ```json
 {
-  "agentId": "alice",
-  "match": {
-    "channel": "telegram",
-    "accountId": "unipaytgbot",
-    "peer": { "kind": "dm", "id": "123456789" }
-  }
+  "result": {
+    "ok": true,
+    "template_name": "unipay-claw-base",
+    "agent_name": "unipay-claw-base",
+    "workspace": "/root/data/unipay-claw-base",
+    "archive_path": "/root/template/unipay-claw-base.zip",
+    "template_dir": "/root/template/unipay-claw-base",
+    "steps": [
+      {"step": "template.prepare", "result": {}},
+      {"step": "agents.add", "result": {}},
+      {"step": "workspace.populate", "result": {}}
+    ]
+  },
+  "error": null,
+  "typeCode": 1,
+  "message": "OK",
+  "serverTimeStamp": "2026-04-04 09:36:50"
 }
 ```
 
-如果 Telegram bot 已经存在：
+## add-tg-bot
 
-- 可以不传 `--tg-bot-token`
-- 如果系统里只有一个 bot，也可以不传 `--tg-bot`
+### 行为说明
 
-如果系统里有多个 bot，则必须显式传 `--tg-bot`。
+- 要求目标 agent 已存在
+- 新增或覆盖一个 Telegram bot 账号配置
+- 当前 bot 按公开模式写入：
+  `dmPolicy = open`，`allowFrom = ["*"]`
+- 会删除该 bot 名下旧的 Telegram binding，再写入一条新的 binding 指向指定 agent
+- 不传 `--bot-name` 时自动生成 `tgbot-xxxxxxxx`
 
-## delete
-
-`delete` 按 `tg_id` 删除整组资源：
-
-```bash
-python3 scripts/agentctl.py delete \
-  --tg-id 123456789
-```
-
-如果你创建时传了 `--agent-name`，删除时也要传同一个名字：
+### 远程执行
 
 ```bash
-python3 scripts/agentctl.py delete \
-  --tg-id 123456789 \
-  --agent-name alice
+cd ~/data/agent_manage && python3 scripts/agentctl.py add-tg-bot \
+  --agent unipay-claw-base \
+  --tg-token 123456:abc
 ```
 
-删除逻辑：
-
-1. 删除这个 `tg_id` 对应的 Telegram DM binding
-2. 删除对应 agent，默认 `agentId = tg_id`，或者你传入的 `agent-name`
-3. 默认保留 `/data/openclaw/{agent_id}` 目录
-
-如果你明确要删除 workspace，再加：
+指定 bot 名：
 
 ```bash
---purge-workspace
+cd ~/data/agent_manage && python3 scripts/agentctl.py add-tg-bot \
+  --agent unipay-claw-base \
+  --tg-token 123456:abc \
+  --bot-name publicbot
 ```
 
-## Telegram bot 配置
+可选参数：
 
-Telegram bot 现在写成共享 bot 模式：
+- `--bot-name`
+- `--config-path`
+- `--openclaw-bin`
+- `--project-dir`
+- `--dry-run`
+
+### Output
+
+成功时 `result` 里主要返回：
+
+- `agent_name`
+- `bot_name`
+- `config_write`
+
+示例：
 
 ```json
 {
-  "channels": {
-    "telegram": {
-      "enabled": true,
-      "accounts": {
-        "unipaytgbot": {
-          "botToken": "你的_bot_token",
-          "dmPolicy": "allowlist",
-          "allowFrom": ["123456789"]
-        }
-      }
+  "result": {
+    "ok": true,
+    "agent_name": "unipay-claw-base",
+    "bot_name": "publicbot",
+    "config_write": {
+      "config_path": "/root/.openclaw/openclaw.json",
+      "changed_paths": [
+        "channels.telegram.accounts.publicbot",
+        "bindings"
+      ]
     }
-  }
+  },
+  "error": null,
+  "typeCode": 1,
+  "message": "OK",
+  "serverTimeStamp": "2026-04-04 09:36:50"
 }
 ```
 
-然后不同用户通过顶层 `bindings` 分流到不同 agent。
+## check-server-status
 
-每次执行 `create` 时，脚本都会把当前 `tg-id` 追加进对应 bot 的 `allowFrom` 白名单里，不会覆盖已有用户。
+### 行为说明
 
-## 通用参数
+- 用一个尽量轻量的 `openclaw agents list --bindings --json` 做探活
+- 默认 10 秒超时，避免等待太久同时减少误判
+- 只要该命令正常返回，就认为服务器和 `openclaw` 处于可工作状态
+- 这个命令不做深度巡检，不检查每个 agent 的业务状态
 
-- `--openclaw-bin`: OpenClaw 可执行文件名，默认 `openclaw`
-- `--project-dir`: 在哪个目录执行命令，默认当前目录
-- `--config-path`: OpenClaw 配置文件路径，默认 `~/.openclaw/openclaw.json`
-- `--dry-run`: 只输出将执行的 OpenClaw 命令，不真的执行
-
-注意：这些全局参数要写在子命令前面，例如：
+### 远程执行
 
 ```bash
-python3 scripts/agentctl.py \
-  --openclaw-bin /home/ubuntu/.nvm/versions/node/v22.22.0/bin/openclaw \
-  --config-path /home/ubuntu/.openclaw/openclaw.json \
-  create \
-  --tg-id 123456789 \
-  --model openai-codex/gpt-5.4 \
-  --tg-bot unipaytgbot
+cd ~/data/agent_manage && python3 scripts/agentctl.py check-server-status
+```
+
+可选参数：
+
+- `--config-path`
+- `--openclaw-bin`
+- `--project-dir`
+- `--dry-run`
+
+### Output
+
+成功时 `result` 里主要返回：
+
+- `server_status`
+- `openclaw_status`
+- `check`
+- `timeout_seconds`
+- `agent_count`
+- `config_path`
+- `config_exists`
+- `skipped`
+
+示例：
+
+```json
+{
+  "result": {
+    "ok": true,
+    "server_status": "ok",
+    "openclaw_status": "running",
+    "check": "openclaw agents list --bindings --json",
+    "timeout_seconds": 10,
+    "agent_count": 2,
+    "config_path": "/root/.openclaw/openclaw.json",
+    "config_exists": true,
+    "skipped": false
+  },
+  "error": null,
+  "typeCode": 1,
+  "message": "OK",
+  "serverTimeStamp": "2026-04-04 09:36:50"
+}
+```
+
+## tg-bot-status
+
+### 行为说明
+
+- 读取当前 `~/.openclaw/openclaw.json`
+- 返回当前 bot 总数 `tg_bot_count`
+- 返回当前已绑定 bot 数 `bound_tg_bot_count`
+- 返回所有 Telegram bindings 总数 `total_binding_count`
+- 同时返回每个 bot 的绑定情况，便于上层直接展示
+
+### 远程执行
+
+```bash
+cd ~/data/agent_manage && python3 scripts/agentctl.py tg-bot-status
+```
+
+可选参数：
+
+- `--config-path`
+- `--openclaw-bin`
+- `--project-dir`
+- `--dry-run`
+
+### Output
+
+成功时 `result` 里主要返回：
+
+- `telegram_enabled`
+- `tg_bot_count`
+- `bound_tg_bot_count`
+- `total_binding_count`
+- `bots`
+
+示例：
+
+```json
+{
+  "result": {
+    "ok": true,
+    "telegram_enabled": true,
+    "tg_bot_count": 3,
+    "bound_tg_bot_count": 2,
+    "total_binding_count": 3,
+    "bots": [
+      {
+        "bot_name": "idlebot",
+        "enabled": true,
+        "binding_count": 0,
+        "is_bound": false,
+        "dm_policy": "open"
+      },
+      {
+        "bot_name": "publicbot",
+        "enabled": true,
+        "binding_count": 2,
+        "is_bound": true,
+        "dm_policy": "open"
+      }
+    ]
+  },
+  "error": null,
+  "typeCode": 1,
+  "message": "OK",
+  "serverTimeStamp": "2026-04-04 09:36:50"
+}
+```
+
+## delete-tg-bot
+
+### 行为说明
+
+- 按 bot 名删除 `channels.telegram.accounts.{bot_name}`
+- 同时删除所有引用该 bot 的 Telegram bindings
+- 返回删除了多少条 bindings，以及剩余 bot 数量
+- 如果删完后没有剩余 bot，会把 `channels.telegram.enabled` 设为 `false`
+
+### 远程执行
+
+```bash
+cd ~/data/agent_manage && python3 scripts/agentctl.py delete-tg-bot \
+  --bot-name publicbot
+```
+
+可选参数：
+
+- `--config-path`
+- `--openclaw-bin`
+- `--project-dir`
+- `--dry-run`
+
+### Output
+
+成功时 `result` 里主要返回：
+
+- `deleted_bot_name`
+- `removed_bindings`
+- `remaining_tg_bot_count`
+- `config_write`
+
+示例：
+
+```json
+{
+  "result": {
+    "ok": true,
+    "deleted_bot_name": "publicbot",
+    "removed_bindings": 2,
+    "remaining_tg_bot_count": 1,
+    "config_write": {
+      "config_path": "/root/.openclaw/openclaw.json",
+      "changed_paths": [
+        "channels.telegram.accounts.publicbot",
+        "bindings",
+        "channels.telegram.enabled"
+      ]
+    }
+  },
+  "error": null,
+  "typeCode": 1,
+  "message": "OK",
+  "serverTimeStamp": "2026-04-04 09:36:50"
+}
 ```
 
 ## 标准返回结构
 
-脚本现在统一约定：
-
-- `stdout` 只输出一段标准 JSON，供上层程序读取
-- `stderr` 只输出日志
-- 成功退出码为 `0`
-- 失败退出码为非 `0`，但 `stdout` 仍会返回结构化错误 JSON
-
-统一返回格式：
+所有命令统一返回以下结构：
 
 ```json
 {
@@ -204,34 +352,51 @@ python3 scripts/agentctl.py \
 {
   "result": null,
   "error": {
-    "code": "AGENT_NOT_FOUND",
+    "code": "TELEGRAM_ACCOUNT_NOT_FOUND",
     "details": {},
     "steps": [],
     "rollback": []
   },
   "typeCode": 10,
-  "message": "Agent 'alice' not found",
+  "message": "Telegram account 'publicbot' not found",
   "serverTimeStamp": "2026-04-04 09:37:57"
 }
 ```
 
-字段规则：
+字段说明：
 
-- `result`：成功结果体
-- `error`：失败详情，成功时为 `null`
-- `typeCode`：供上层系统判断的稳定分类码
-- `message`：给人读的摘要文案
-- `serverTimeStamp`：服务器响应时间
+- `result`
+  成功结果体，保留具体命令的业务数据
+- `error`
+  失败详情；成功时固定为 `null`
+- `typeCode`
+  响应类别码，供上游程序稳定判断
+- `message`
+  给人读的摘要文案，不建议上游用它做规则判断
+- `serverTimeStamp`
+  服务端生成响应的时间戳
 
-当前 `typeCode` 约定：
+当前 `typeCode` 规则：
 
 - `1`：成功
 - `2`：已受理，异步处理中
-- `10`：资源不存在
+- `10`：资源不存在，例如模板、Agent、Telegram account、配置文件不存在
 - `11`：参数错误或校验失败
-- `12`：状态冲突
+- `12`：状态冲突，例如 Agent 已存在、workspace 非空
 - `20`：底层命令执行失败
-- `21`：执行失败且带回滚信息
-- `50`：内部错误
+- `21`：执行失败且已经发生回滚或返回了回滚信息
+- `50`：未分类内部错误
 
-建议上层系统优先依赖 `typeCode` 和 `error.code` 做程序判断，不要依赖 `message` 文案匹配。
+当前常用 `error.code` 包括：
+
+- `TEMPLATE_ARCHIVE_NOT_FOUND`
+- `CONFIG_FILE_NOT_FOUND`
+- `AGENT_NOT_FOUND`
+- `TELEGRAM_ACCOUNT_NOT_FOUND`
+- `AGENT_ALREADY_EXISTS`
+- `WORKSPACE_NOT_EMPTY`
+- `INVALID_ARGUMENT`
+- `VALIDATION_ERROR`
+- `COMMAND_EXECUTION_FAILED`
+- `OPERATION_FAILED_WITH_ROLLBACK`
+- `INTERNAL_ERROR`

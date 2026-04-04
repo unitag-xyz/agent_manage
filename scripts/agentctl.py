@@ -1,6 +1,4 @@
 #!/usr/bin/env python3
-"""Deprecated v1 entrypoint. Use scripts/agentctl_v2.py instead."""
-
 from pathlib import Path
 import sys
 
@@ -8,7 +6,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from openclaw_remote.cli import main
+from agent_manage.cli import main
 
 
 if __name__ == "__main__":

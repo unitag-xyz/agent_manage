@@ -4,8 +4,8 @@ import argparse
 import sys
 from typing import List, Optional
 
-from openclaw_remote.local import LocalRunner
-from openclaw_remote.response import (
+from .local import LocalRunner
+from .response import (
     JsonArgumentParser,
     build_error_response,
     build_success_response,
@@ -17,7 +17,7 @@ from .orchestrator import InstanceManagerV2
 
 
 def main(argv: Optional[List[str]] = None) -> int:
-    parser = JsonArgumentParser(prog="agent-manage-v2")
+    parser = JsonArgumentParser(prog="agent-manage")
     parser.add_argument("--openclaw-bin", default="openclaw")
     parser.add_argument("--project-dir")
     parser.add_argument("--template-root")

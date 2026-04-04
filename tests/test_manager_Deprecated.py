@@ -3,13 +3,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from openclaw_remote.local import LocalRunner
-from openclaw_remote.models import (
+from openclaw_remote_Deprecated.local import LocalRunner
+from openclaw_remote_Deprecated.models import (
     CreateAgentRequest,
     DeleteAgentRequest,
     TelegramAccountConfig,
 )
-from openclaw_remote.orchestrator import OpenClawManager
+from openclaw_remote_Deprecated.orchestrator import OpenClawManager
 
 
 class FakeRunner:

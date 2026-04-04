@@ -9,5 +9,5 @@ description = "Local agent management script for OpenClaw servers."
 requires-python = ">=3.9"
 
 [project.scripts]
-openclaw-remote = "openclaw_remote.cli:main"
-agent-manage-v2 = "agent_manage_v2.cli:main"
+openclaw-remote = "openclaw_remote_Deprecated.cli:main"
+agent-manage = "agent_manage.cli:main"
