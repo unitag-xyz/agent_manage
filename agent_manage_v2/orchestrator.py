@@ -9,10 +9,12 @@ from typing import Dict, List, Optional
 
 from openclaw_remote.local import CommandError, LocalRunner
 
-from .models import AddTelegramBotRequest, CreateInstanceRequest
+from .models import AddTelegramBotRequest, CreateInstanceRequest, DeleteTelegramBotRequest
 
 
 class InstanceManagerV2:
+    SERVER_STATUS_TIMEOUT_SECONDS = 10
+
     def __init__(
         self,
         runner: LocalRunner,
@@ -154,6 +156,113 @@ class InstanceManagerV2:
             "ok": True,
             "agent_name": request.agent_name,
             "bot_name": account_id,
+            "config_write": write_result,
+        }
+
+    def check_server_status(self) -> Dict[str, object]:
+        openclaw_result = self.runner.run_json(
+            [self.bin, "agents", "list", "--bindings", "--json"],
+            timeout=self.SERVER_STATUS_TIMEOUT_SECONDS,
+        )
+        skipped = bool(openclaw_result.get("skipped")) if isinstance(openclaw_result, dict) else False
+        agent_count = None
+        if not skipped:
+            agent_count = len(self._extract_agent_list(openclaw_result))
+
+        return {
+            "ok": True,
+            "server_status": "ok",
+            "openclaw_status": "running",
+            "check": "openclaw agents list --bindings --json",
+            "timeout_seconds": self.SERVER_STATUS_TIMEOUT_SECONDS,
+            "agent_count": agent_count,
+            "config_path": str(self.config_path),
+            "config_exists": self.config_path.exists(),
+            "command": openclaw_result.get("command") if isinstance(openclaw_result, dict) else None,
+            "skipped": skipped,
+        }
+
+    def get_tg_bot_status(self) -> Dict[str, object]:
+        config = self._load_config()
+        telegram = config.get("channels", {}).get("telegram", {})
+        accounts = telegram.get("accounts", {})
+        bindings = list(config.get("bindings", []))
+
+        binding_counts: Dict[str, int] = {}
+        for item in bindings:
+            match = item.get("match", {})
+            if match.get("channel") != "telegram":
+                continue
+            account_id = match.get("accountId")
+            if not account_id:
+                continue
+            binding_counts[account_id] = binding_counts.get(account_id, 0) + 1
+
+        bots: List[Dict[str, object]] = []
+        for account_id in sorted(accounts.keys()):
+            account = accounts.get(account_id, {})
+            bound_count = binding_counts.get(account_id, 0)
+            bots.append(
+                {
+                    "bot_name": account_id,
+                    "enabled": bool(telegram.get("enabled", False)),
+                    "binding_count": bound_count,
+                    "is_bound": bound_count > 0,
+                    "dm_policy": account.get("dmPolicy"),
+                }
+            )
+
+        return {
+            "ok": True,
+            "telegram_enabled": bool(telegram.get("enabled", False)),
+            "tg_bot_count": len(accounts),
+            "bound_tg_bot_count": sum(1 for item in bots if item["is_bound"]),
+            "total_binding_count": sum(binding_counts.values()),
+            "bots": bots,
+        }
+
+    def delete_tg_bot(self, request: DeleteTelegramBotRequest) -> Dict[str, object]:
+        config = self._load_config()
+        telegram = config.setdefault("channels", {}).setdefault("telegram", {})
+        accounts = telegram.setdefault("accounts", {})
+        if request.bot_name not in accounts:
+            raise FileNotFoundError(f"Telegram account '{request.bot_name}' not found")
+
+        accounts.pop(request.bot_name, None)
+        bindings = list(config.get("bindings", []))
+        filtered = []
+        removed_bindings = 0
+        for item in bindings:
+            match = item.get("match", {})
+            if (
+                match.get("channel") == "telegram"
+                and match.get("accountId") == request.bot_name
+            ):
+                removed_bindings += 1
+                continue
+            filtered.append(item)
+        config["bindings"] = filtered
+        telegram["enabled"] = bool(accounts)
+
+        write_result = self._write_config(
+            config,
+            note=f"delete telegram bot {request.bot_name}",
+            changed_paths=[
+                f"channels.telegram.accounts.{request.bot_name}",
+                "bindings",
+                "channels.telegram.enabled",
+            ],
+            extra={
+                "deleted_bot_name": request.bot_name,
+                "removed_bindings": removed_bindings,
+                "remaining_tg_bot_count": len(accounts),
+            },
+        )
+        return {
+            "ok": True,
+            "deleted_bot_name": request.bot_name,
+            "removed_bindings": removed_bindings,
+            "remaining_tg_bot_count": len(accounts),
             "config_write": write_result,
         }
 

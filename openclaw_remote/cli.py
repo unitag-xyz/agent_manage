@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+"""Deprecated v1 CLI. Only kept for history/reference."""
+
 import argparse
-import json
 import sys
 from typing import List, Optional
 
@@ -12,10 +13,16 @@ from .models import (
     TelegramAccountConfig,
 )
 from .orchestrator import OpenClawManager
+from .response import (
+    JsonArgumentParser,
+    build_error_response,
+    build_success_response,
+    print_json,
+)
 
 
 def main(argv: Optional[List[str]] = None) -> int:
-    parser = argparse.ArgumentParser(prog="openclaw-remote")
+    parser = JsonArgumentParser(prog="openclaw-remote")
     parser.add_argument("--openclaw-bin", default="openclaw")
     parser.add_argument("--project-dir")
     parser.add_argument("--config-path")
@@ -37,19 +44,19 @@ def main(argv: Optional[List[str]] = None) -> int:
     delete.add_argument("--no-force", action="store_true")
     delete.add_argument("--purge-workspace", action="store_true")
 
-    args = parser.parse_args(argv)
-    client = OpenClawManager(
-        LocalRunner(
-            openclaw_bin=args.openclaw_bin,
-            project_dir=args.project_dir,
-            dry_run=args.dry_run,
-        ),
-        config_path=args.config_path,
-    )
+    try:
+        args = parser.parse_args(argv)
+        client = OpenClawManager(
+            LocalRunner(
+                openclaw_bin=args.openclaw_bin,
+                project_dir=args.project_dir,
+                dry_run=args.dry_run,
+            ),
+            config_path=args.config_path,
+        )
 
-    if args.command == "create":
-        print_json(
-            client.create(
+        if args.command == "create":
+            result = client.create(
                 CreateAgentRequest(
                     tg_id=args.tg_id,
                     agent_name=args.agent_name,
@@ -59,11 +66,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                     telegram=telegram_from_args(args),
                 )
             )
-        )
-        return 0
-    if args.command == "delete":
-        print_json(
-            client.delete(
+            print_json(build_success_response(result))
+            return 0
+        if args.command == "delete":
+            result = client.delete(
                 DeleteAgentRequest(
                     tg_id=args.tg_id,
                     agent_name=args.agent_name,
@@ -71,24 +77,25 @@ def main(argv: Optional[List[str]] = None) -> int:
                     purge_workspace=args.purge_workspace,
                 )
             )
-        )
-        return 0
+            print_json(build_success_response(result))
+            return 0
 
-    parser.print_help(sys.stderr)
-    return 1
+        parser.print_help(sys.stderr)
+        return 1
+    except SystemExit:
+        raise
+    except Exception as exc:
+        print_json(build_error_response(exc))
+        return 1
 
 
-def telegram_from_args(args: argparse.Namespace) -> TelegramAccountConfig:
+def telegram_from_args(args: argparse.Namespace) -> Optional[TelegramAccountConfig]:
     if not args.tg_bot:
         return None
     return TelegramAccountConfig(
         account_id=args.tg_bot,
         bot_token=getattr(args, "tg_bot_token", None),
     )
-
-
-def print_json(value: object) -> None:
-    print(json.dumps(value, indent=2, ensure_ascii=False))
 
 
 if __name__ == "__main__":

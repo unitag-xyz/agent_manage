@@ -1,5 +1,8 @@
 # OpenClaw Agent Script
 
+> Deprecated: 本文档对应 `v1` 方案，仅保留作历史参考。
+> 当前仓库后续只维护 `agent_manage_v2/` 和 `scripts/agentctl_v2.py`。
+
 这套脚本现在只保留两个命令：
 
 - `create`
@@ -173,3 +176,62 @@ python3 scripts/agentctl.py \
   --model openai-codex/gpt-5.4 \
   --tg-bot unipaytgbot
 ```
+
+## 标准返回结构
+
+脚本现在统一约定：
+
+- `stdout` 只输出一段标准 JSON，供上层程序读取
+- `stderr` 只输出日志
+- 成功退出码为 `0`
+- 失败退出码为非 `0`，但 `stdout` 仍会返回结构化错误 JSON
+
+统一返回格式：
+
+```json
+{
+  "result": {},
+  "error": null,
+  "typeCode": 1,
+  "message": "OK",
+  "serverTimeStamp": "2026-04-04 09:36:50"
+}
+```
+
+失败时：
+
+```json
+{
+  "result": null,
+  "error": {
+    "code": "AGENT_NOT_FOUND",
+    "details": {},
+    "steps": [],
+    "rollback": []
+  },
+  "typeCode": 10,
+  "message": "Agent 'alice' not found",
+  "serverTimeStamp": "2026-04-04 09:37:57"
+}
+```
+
+字段规则：
+
+- `result`：成功结果体
+- `error`：失败详情，成功时为 `null`
+- `typeCode`：供上层系统判断的稳定分类码
+- `message`：给人读的摘要文案
+- `serverTimeStamp`：服务器响应时间
+
+当前 `typeCode` 约定：
+
+- `1`：成功
+- `2`：已受理，异步处理中
+- `10`：资源不存在
+- `11`：参数错误或校验失败
+- `12`：状态冲突
+- `20`：底层命令执行失败
+- `21`：执行失败且带回滚信息
+- `50`：内部错误
+
+建议上层系统优先依赖 `typeCode` 和 `error.code` 做程序判断，不要依赖 `message` 文案匹配。

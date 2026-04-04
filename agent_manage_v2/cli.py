@@ -1,18 +1,23 @@
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from typing import List, Optional
 
 from openclaw_remote.local import LocalRunner
+from openclaw_remote.response import (
+    JsonArgumentParser,
+    build_error_response,
+    build_success_response,
+    print_json,
+)
 
-from .models import AddTelegramBotRequest, CreateInstanceRequest
+from .models import AddTelegramBotRequest, CreateInstanceRequest, DeleteTelegramBotRequest
 from .orchestrator import InstanceManagerV2
 
 
 def main(argv: Optional[List[str]] = None) -> int:
-    parser = argparse.ArgumentParser(prog="agent-manage-v2")
+    parser = JsonArgumentParser(prog="agent-manage-v2")
     parser.add_argument("--openclaw-bin", default="openclaw")
     parser.add_argument("--project-dir")
     parser.add_argument("--template-root")
@@ -31,20 +36,27 @@ def main(argv: Optional[List[str]] = None) -> int:
     add_tg_bot.add_argument("--tg-token", required=True)
     add_tg_bot.add_argument("--bot-name")
 
-    args = parser.parse_args(argv)
-    client = InstanceManagerV2(
-        LocalRunner(
-            openclaw_bin=args.openclaw_bin,
-            project_dir=args.project_dir,
-            dry_run=args.dry_run,
-        ),
-        template_root=args.template_root,
-        config_path=args.config_path,
-    )
+    check_server_status = subparsers.add_parser("check-server-status")
 
-    if args.command == "create-instance":
-        print_json(
-            client.create_instance(
+    tg_bot_status = subparsers.add_parser("tg-bot-status")
+
+    delete_tg_bot = subparsers.add_parser("delete-tg-bot")
+    delete_tg_bot.add_argument("--bot-name", required=True)
+
+    try:
+        args = parser.parse_args(argv)
+        client = InstanceManagerV2(
+            LocalRunner(
+                openclaw_bin=args.openclaw_bin,
+                project_dir=args.project_dir,
+                dry_run=args.dry_run,
+            ),
+            template_root=args.template_root,
+            config_path=args.config_path,
+        )
+
+        if args.command == "create-instance":
+            result = client.create_instance(
                 CreateInstanceRequest(
                     template_name=args.template_name,
                     model=args.model,
@@ -52,26 +64,42 @@ def main(argv: Optional[List[str]] = None) -> int:
                     rollback_on_fail=not args.no_rollback,
                 )
             )
-        )
-        return 0
-    if args.command == "add-tg-bot":
-        print_json(
-            client.add_tg_bot(
+            print_json(build_success_response(result))
+            return 0
+        if args.command == "add-tg-bot":
+            result = client.add_tg_bot(
                 AddTelegramBotRequest(
                     agent_name=args.agent,
                     bot_token=args.tg_token,
                     bot_name=args.bot_name,
                 )
             )
-        )
-        return 0
+            print_json(build_success_response(result))
+            return 0
+        if args.command == "check-server-status":
+            result = client.check_server_status()
+            print_json(build_success_response(result))
+            return 0
+        if args.command == "tg-bot-status":
+            result = client.get_tg_bot_status()
+            print_json(build_success_response(result))
+            return 0
+        if args.command == "delete-tg-bot":
+            result = client.delete_tg_bot(
+                DeleteTelegramBotRequest(
+                    bot_name=args.bot_name,
+                )
+            )
+            print_json(build_success_response(result))
+            return 0
 
-    parser.print_help(sys.stderr)
-    return 1
-
-
-def print_json(value: object) -> None:
-    print(json.dumps(value, indent=2, ensure_ascii=False))
+        parser.print_help(sys.stderr)
+        return 1
+    except SystemExit:
+        raise
+    except Exception as exc:
+        print_json(build_error_response(exc))
+        return 1
 
 
 if __name__ == "__main__":

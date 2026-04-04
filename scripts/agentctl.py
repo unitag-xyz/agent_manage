@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+"""Deprecated v1 entrypoint. Use scripts/agentctl_v2.py instead."""
+
 from pathlib import Path
 import sys
 

@@ -16,3 +16,8 @@ class AddTelegramBotRequest:
     agent_name: str
     bot_token: str
     bot_name: str | None = None
+
+
+@dataclass
+class DeleteTelegramBotRequest:
+    bot_name: str

@@ -4,7 +4,11 @@ import zipfile
 import json
 from pathlib import Path
 
-from agent_manage_v2.models import AddTelegramBotRequest, CreateInstanceRequest
+from agent_manage_v2.models import (
+    AddTelegramBotRequest,
+    CreateInstanceRequest,
+    DeleteTelegramBotRequest,
+)
 from agent_manage_v2.orchestrator import InstanceManagerV2
 
 
@@ -15,7 +19,7 @@ class FakeRunner:
         self.dry_run = dry_run
         self.openclaw_bin = "openclaw"
 
-    def run_json(self, args):
+    def run_json(self, args, timeout=None):
         key = tuple(args)
         self.calls.append(list(args))
         return self.responses.get(key, {"ok": True})
@@ -25,11 +29,11 @@ class FakeRunner:
 
 
 class WorkspaceCreatingRunner(FakeRunner):
-    def run_json(self, args):
+    def run_json(self, args, timeout=None):
         if list(args[:3]) == ["openclaw", "agents", "add"]:
             workspace = Path(args[args.index("--workspace") + 1])
             workspace.mkdir(parents=True, exist_ok=True)
-        return super().run_json(args)
+        return super().run_json(args, timeout=timeout)
 
 
 class FailingPrepareManager(InstanceManagerV2):
@@ -584,6 +588,147 @@ class CreateInstanceV2Test(unittest.TestCase):
                         bot_token="123:abc",
                     )
                 )
+
+    def test_check_server_status_uses_lightweight_openclaw_check(self):
+        runner = FakeRunner(
+            responses={
+                ("openclaw", "agents", "list", "--bindings", "--json"): {
+                    "agents": [{"id": "base"}, {"id": "demo"}]
+                }
+            }
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "openclaw.json"
+            config_path.write_text(json.dumps({"bindings": []}), encoding="utf-8")
+
+            manager = InstanceManagerV2(runner, config_path=str(config_path))
+            result = manager.check_server_status()
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["openclaw_status"], "running")
+            self.assertEqual(result["agent_count"], 2)
+            self.assertEqual(result["timeout_seconds"], 10)
+            self.assertEqual(
+                runner.calls[0],
+                ["openclaw", "agents", "list", "--bindings", "--json"],
+            )
+
+    def test_get_tg_bot_status_returns_bound_bot_count(self):
+        runner = FakeRunner()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "openclaw.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "bindings": [
+                            {
+                                "agentId": "base",
+                                "match": {"channel": "telegram", "accountId": "publicbot"},
+                            },
+                            {
+                                "agentId": "demo",
+                                "match": {"channel": "telegram", "accountId": "publicbot"},
+                            },
+                            {
+                                "agentId": "other",
+                                "match": {"channel": "telegram", "accountId": "otherbot"},
+                            },
+                        ],
+                        "channels": {
+                            "telegram": {
+                                "enabled": True,
+                                "accounts": {
+                                    "publicbot": {"dmPolicy": "open"},
+                                    "otherbot": {"dmPolicy": "open"},
+                                    "idlebot": {"dmPolicy": "open"},
+                                },
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            manager = InstanceManagerV2(runner, config_path=str(config_path))
+            result = manager.get_tg_bot_status()
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["tg_bot_count"], 3)
+            self.assertEqual(result["bound_tg_bot_count"], 2)
+            self.assertEqual(result["total_binding_count"], 3)
+            self.assertEqual(
+                [item["bot_name"] for item in result["bots"]],
+                ["idlebot", "otherbot", "publicbot"],
+            )
+
+    def test_delete_tg_bot_removes_account_and_bindings(self):
+        runner = FakeRunner()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "openclaw.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "bindings": [
+                            {
+                                "agentId": "base",
+                                "match": {"channel": "telegram", "accountId": "publicbot"},
+                            },
+                            {
+                                "agentId": "other",
+                                "match": {"channel": "telegram", "accountId": "otherbot"},
+                            },
+                        ],
+                        "channels": {
+                            "telegram": {
+                                "enabled": True,
+                                "accounts": {
+                                    "publicbot": {"botToken": "123:abc"},
+                                    "otherbot": {"botToken": "456:def"},
+                                },
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            manager = InstanceManagerV2(runner, config_path=str(config_path))
+            result = manager.delete_tg_bot(DeleteTelegramBotRequest(bot_name="publicbot"))
+
+            saved = json.loads(config_path.read_text(encoding="utf-8"))
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["removed_bindings"], 1)
+            self.assertEqual(result["remaining_tg_bot_count"], 1)
+            self.assertNotIn("publicbot", saved["channels"]["telegram"]["accounts"])
+            self.assertEqual(
+                saved["bindings"],
+                [
+                    {
+                        "agentId": "other",
+                        "match": {
+                            "channel": "telegram",
+                            "accountId": "otherbot",
+                        },
+                    }
+                ],
+            )
+
+    def test_delete_tg_bot_requires_existing_bot(self):
+        runner = FakeRunner()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "openclaw.json"
+            config_path.write_text(
+                json.dumps({"channels": {"telegram": {"accounts": {}}}}),
+                encoding="utf-8",
+            )
+
+            manager = InstanceManagerV2(runner, config_path=str(config_path))
+            with self.assertRaises(FileNotFoundError):
+                manager.delete_tg_bot(DeleteTelegramBotRequest(bot_name="missingbot"))
 
     def _write_archive(self, archive_path: Path, files):
         with zipfile.ZipFile(archive_path, "w") as archive:

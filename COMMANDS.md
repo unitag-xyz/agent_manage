@@ -1,5 +1,8 @@
 # OpenClaw Agent Manage Commands
 
+> Deprecated: 本文档描述的是 `v1` 命令集，仅保留作历史参考。
+> 当前仓库后续只维护 `v2`，入口为 `python3 scripts/agentctl_v2.py`。
+
 这个工具当前只有 2 个命令。
 
 ## 命令列表
@@ -15,6 +18,55 @@
 - 脚本入口是 `python3 scripts/agentctl.py`
 - 当前没有独立的“修改模型”命令
 - 修改模型目前是 `create` 的一部分：当 agent 已存在且传入新的 `--model` 时，会更新该 agent 的模型配置
+
+## 标准输出协议
+
+所有 CLI 命令统一遵循以下规则：
+
+- `stdout` 只输出标准 JSON
+- `stderr` 只输出日志
+- 成功退出码为 `0`
+- 失败退出码为非 `0`，但仍需在 `stdout` 输出结构化错误
+
+标准结构：
+
+```json
+{
+  "result": {},
+  "error": null,
+  "typeCode": 1,
+  "message": "OK",
+  "serverTimeStamp": "2026-04-04 09:36:50"
+}
+```
+
+失败结构：
+
+```json
+{
+  "result": null,
+  "error": {
+    "code": "COMMAND_EXECUTION_FAILED",
+    "details": {},
+    "steps": [],
+    "rollback": []
+  },
+  "typeCode": 20,
+  "message": "Command failed with exit code 1",
+  "serverTimeStamp": "2026-04-04 09:37:57"
+}
+```
+
+`typeCode` 规则：
+
+- `1`：成功
+- `2`：已受理，异步处理中
+- `10`：资源不存在
+- `11`：参数错误或校验失败
+- `12`：状态冲突
+- `20`：底层命令执行失败
+- `21`：执行失败且包含回滚信息
+- `50`：内部错误
 
 
 ## 建议后续补充的端口

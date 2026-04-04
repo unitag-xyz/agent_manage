@@ -19,6 +19,7 @@ class CommandResult:
     stdout: str
     stderr: str
     skipped: bool = False
+    timed_out: bool = False
 
 
 class CommandError(RuntimeError):
@@ -38,7 +39,7 @@ class LocalRunner:
         self.project_dir = Path(project_dir).expanduser().resolve() if project_dir else None
         self.dry_run = dry_run
 
-    def run(self, args: Sequence[str]) -> CommandResult:
+    def run(self, args: Sequence[str], timeout: Optional[float] = None) -> CommandResult:
         argv = list(args)
         command_text = " ".join(shlex.quote(part) for part in argv)
         self._log(f"run: {command_text}")
@@ -53,13 +54,29 @@ class LocalRunner:
                 skipped=True,
             )
 
-        completed = subprocess.run(
-            argv,
-            text=True,
-            capture_output=True,
-            cwd=str(self.project_dir) if self.project_dir else None,
-            check=False,
-        )
+        try:
+            completed = subprocess.run(
+                argv,
+                text=True,
+                capture_output=True,
+                cwd=str(self.project_dir) if self.project_dir else None,
+                check=False,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired as exc:
+            result = CommandResult(
+                argv=argv,
+                command_text=command_text,
+                returncode=124,
+                stdout=exc.stdout or "",
+                stderr=(exc.stderr or "") + f"\nCommand timed out after {timeout} seconds",
+                timed_out=True,
+            )
+            self._log(f"timeout after {timeout}s: {command_text}")
+            raise CommandError(
+                f"Command timed out after {timeout} seconds",
+                result,
+            ) from exc
         result = CommandResult(
             argv=argv,
             command_text=command_text,
@@ -80,8 +97,8 @@ class LocalRunner:
         self._log(f"done ({completed.returncode}): {command_text}")
         return result
 
-    def run_json(self, args: Sequence[str]):
-        result = self.run(args)
+    def run_json(self, args: Sequence[str], timeout: Optional[float] = None):
+        result = self.run(args, timeout=timeout)
         if result.skipped:
             return {"skipped": True, "command": result.command_text}
         if not result.stdout.strip():
