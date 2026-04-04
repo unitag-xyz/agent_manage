@@ -2,6 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+MANAGED_MODEL_IDS = [
+    "gpt-4.1-mini",
+    "gpt-5.4",
+    "gpt-5.4-mini",
+    "gpt-5.3-codex",
+]
+
 SUPPORTED_MODEL_REFS = {
     "gpt-5.4": "unipay-fun/gpt-5.4",
     "gpt-5.4-mini": "unipay-fun/gpt-5.4-mini",
@@ -13,6 +20,7 @@ SUPPORTED_MODEL_REFS = {
 @dataclass
 class CreateInstanceRequest:
     template_name: str
+    model_key: str
     model: str | None = None
     workspace_root: str = "~/data"
     rollback_on_fail: bool = True

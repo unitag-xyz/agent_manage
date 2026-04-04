@@ -100,6 +100,24 @@ class CreateInstanceV2Test(unittest.TestCase):
                     "base/app/main.py": "print('hello')\n",
                     "base/SOUL.md": "old soul\n",
                     "base/skills/weather/SKILL.md": "old weather\n",
+                    "base/openclaw.json": json.dumps(
+                        {
+                            "agents": {
+                                "defaults": {
+                                    "models": {"legacy/model": {}},
+                                    "model": {"primary": "legacy/model"},
+                                }
+                            },
+                            "models": {
+                                "providers": {
+                                    "legacy": {
+                                        "apiKey": "old-key",
+                                    }
+                                }
+                            },
+                        }
+                    )
+                    + "\n",
                 },
             )
 
@@ -135,6 +153,7 @@ class CreateInstanceV2Test(unittest.TestCase):
             result = manager.create_instance(
                 CreateInstanceRequest(
                     template_name="base",
+                    model_key="test-key",
                     model="openai/gpt-5",
                     workspace_root=str(workspace_root),
                 )
@@ -150,6 +169,25 @@ class CreateInstanceV2Test(unittest.TestCase):
                 (workspace / "skills" / "weather" / "SKILL.md").read_text(encoding="utf-8"),
                 "old weather\n",
             )
+            workspace_config = json.loads((workspace / "openclaw.json").read_text(encoding="utf-8"))
+            self.assertEqual(
+                workspace_config["agents"]["defaults"]["model"]["primary"],
+                "unipay-fun/gpt-4.1-mini",
+            )
+            self.assertEqual(
+                list(workspace_config["agents"]["defaults"]["models"].keys()),
+                [
+                    "unipay-fun/gpt-4.1-mini",
+                    "unipay-fun/gpt-5.4",
+                    "unipay-fun/gpt-5.4-mini",
+                    "unipay-fun/gpt-5.3-codex",
+                ],
+            )
+            self.assertEqual(
+                workspace_config["models"]["providers"]["unipay-fun"]["apiKey"],
+                "test-key",
+            )
+            self.assertNotIn("legacy", workspace_config["models"]["providers"])
             self.assertEqual(result["template_dir"], str(template_dir.resolve()))
 
     def test_create_instance_unzips_to_same_named_template_dir_then_copies_to_workspace(self):
@@ -212,6 +250,7 @@ class CreateInstanceV2Test(unittest.TestCase):
             result = manager.create_instance(
                 CreateInstanceRequest(
                     template_name="unipay-claw-base",
+                    model_key="test-key",
                     workspace_root=str(workspace_root),
                 )
             )
@@ -251,6 +290,7 @@ class CreateInstanceV2Test(unittest.TestCase):
                 manager.create_instance(
                     CreateInstanceRequest(
                         template_name="base",
+                        model_key="test-key",
                         workspace_root=str(tmp_path / "data"),
                     )
                 )
@@ -309,6 +349,7 @@ class CreateInstanceV2Test(unittest.TestCase):
             result = manager.create_instance(
                 CreateInstanceRequest(
                     template_name="base",
+                    model_key="test-key",
                     workspace_root=str(workspace_root),
                 )
             )
@@ -338,6 +379,7 @@ class CreateInstanceV2Test(unittest.TestCase):
                 manager.create_instance(
                     CreateInstanceRequest(
                         template_name="base",
+                        model_key="test-key",
                         workspace_root=str(workspace_root),
                     )
                 )
@@ -357,6 +399,7 @@ class CreateInstanceV2Test(unittest.TestCase):
                 manager.create_instance(
                     CreateInstanceRequest(
                         template_name="base",
+                        model_key="test-key",
                         workspace_root=str(tmp_path / "data"),
                     )
                 )
@@ -419,6 +462,7 @@ class CreateInstanceV2Test(unittest.TestCase):
                 manager.create_instance(
                     CreateInstanceRequest(
                         template_name="base",
+                        model_key="test-key",
                         workspace_root=str(workspace_root),
                     )
                 )
@@ -438,6 +482,7 @@ class CreateInstanceV2Test(unittest.TestCase):
             result = manager.create_instance(
                 CreateInstanceRequest(
                     template_name="base",
+                    model_key="test-key",
                     workspace_root=str(tmp_path / "data"),
                 )
             )

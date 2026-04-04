@@ -16,6 +16,7 @@ from .models import (
     CreateInstanceRequest,
     DeleteTelegramBotRequest,
     DeleteWeixinBotRequest,
+    MANAGED_MODEL_IDS,
     SUPPORTED_MODEL_REFS,
     SetModelRequest,
 )
@@ -26,6 +27,7 @@ class InstanceManagerV2:
     WEIXIN_PLUGIN_ID = "openclaw-weixin"
     WEIXIN_PLUGIN_PACKAGE = "@tencent-weixin/openclaw-weixin"
     WEIXIN_DEFAULT_BASE_URL = "https://ilinkai.weixin.qq.com"
+    MANAGED_MODEL_PROVIDER = "unipay-fun"
 
     def __init__(
         self,
@@ -47,6 +49,8 @@ class InstanceManagerV2:
         )
 
     def create_instance(self, request: CreateInstanceRequest) -> Dict[str, object]:
+        if not request.model_key.strip():
+            raise ValueError("model_key is required")
         steps: List[Dict[str, object]] = []
         agent_name = self.resolve_agent_name(request)
         workspace = self.default_workspace(agent_name, request.workspace_root)
@@ -83,6 +87,12 @@ class InstanceManagerV2:
             )
             created_workspace = not workspace_result.get("skipped", False)
             steps.append({"step": "workspace.populate", "result": workspace_result})
+
+            models_result = self._configure_workspace_models(
+                workspace=workspace,
+                model_key=request.model_key,
+            )
+            steps.append({"step": "workspace.configure_models", "result": models_result})
 
             return {
                 "ok": True,
@@ -671,6 +681,50 @@ class InstanceManagerV2:
             "copied_from_template_dir": copied,
         }
 
+    def _configure_workspace_models(self, workspace: Path, model_key: str) -> Dict[str, object]:
+        config_path = workspace / "openclaw.json"
+        if self.runner.dry_run:
+            return {
+                "skipped": True,
+                "config_path": str(config_path),
+                "primary_model": self._managed_primary_model_ref(),
+                "managed_models": self._managed_model_refs(),
+            }
+
+        if config_path.exists():
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            if not isinstance(config, dict):
+                raise ValueError(f"Workspace config must be a JSON object: {config_path}")
+        else:
+            config = {}
+
+        agents = config.setdefault("agents", {})
+        defaults = agents.setdefault("defaults", {})
+        defaults["models"] = {model_ref: {} for model_ref in self._managed_model_refs()}
+        defaults["model"] = {"primary": self._managed_primary_model_ref()}
+
+        config["models"] = {
+            "mode": "merge",
+            "providers": {
+                self.MANAGED_MODEL_PROVIDER: {
+                    "baseUrl": "https://unitag.dola.fi/aigateway/v1",
+                    "api": "openai-completions",
+                    "apiKey": model_key,
+                    "models": [self._managed_model_definition(model_id) for model_id in MANAGED_MODEL_IDS],
+                }
+            },
+        }
+
+        config_path.write_text(
+            json.dumps(config, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        return {
+            "config_path": str(config_path),
+            "primary_model": self._managed_primary_model_ref(),
+            "managed_models": self._managed_model_refs(),
+        }
+
     def _resolve_unpacked_root(self, extract_dir: Path) -> Path:
         candidates = [item for item in extract_dir.iterdir() if item.name != "__MACOSX"]
         directories = [item for item in candidates if item.is_dir()]
@@ -740,6 +794,28 @@ class InstanceManagerV2:
 
     def _generate_tg_bot_name(self) -> str:
         return f"tgbot-{uuid.uuid4().hex[:8]}"
+
+    def _managed_primary_model_ref(self) -> str:
+        return f"{self.MANAGED_MODEL_PROVIDER}/{MANAGED_MODEL_IDS[0]}"
+
+    def _managed_model_refs(self) -> List[str]:
+        return [f"{self.MANAGED_MODEL_PROVIDER}/{model_id}" for model_id in MANAGED_MODEL_IDS]
+
+    def _managed_model_definition(self, model_id: str) -> Dict[str, object]:
+        return {
+            "id": model_id,
+            "name": f"{model_id} (Custom Provider)",
+            "contextWindow": 16000,
+            "maxTokens": 4096,
+            "input": ["text"],
+            "cost": {
+                "input": 0,
+                "output": 0,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+            },
+            "reasoning": True,
+        }
 
     def _normalize_weixin_account_id(self, account_id: str) -> str:
         normalized = []

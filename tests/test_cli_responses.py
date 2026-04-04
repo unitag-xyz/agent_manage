@@ -25,7 +25,7 @@ class CliResponseTest(unittest.TestCase):
             stdout = io.StringIO()
             with redirect_stdout(stdout):
                 exit_code = agent_manage_main(
-                    ["create-instance", "--template-name", "base"]
+                    ["create-instance", "--template-name", "base", "--model-key", "test-key"]
                 )
 
         payload = json.loads(stdout.getvalue())
@@ -45,7 +45,7 @@ class CliResponseTest(unittest.TestCase):
             stdout = io.StringIO()
             with redirect_stdout(stdout):
                 exit_code = agent_manage_main(
-                    ["create-instance", "--template-name", "base"]
+                    ["create-instance", "--template-name", "base", "--model-key", "test-key"]
                 )
 
         payload = json.loads(stdout.getvalue())
