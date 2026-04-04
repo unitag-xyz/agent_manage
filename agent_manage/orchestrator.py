@@ -264,6 +264,8 @@ class InstanceManagerV2:
             timeout=self.SERVER_STATUS_TIMEOUT_SECONDS,
         )
         tg_bot_status = self.get_tg_bot_status()
+        weixin_bot_status = self.get_weixin_bot_status()
+        current_model_status = self.get_current_model()
 
         return {
             "ok": True,
@@ -273,6 +275,8 @@ class InstanceManagerV2:
             "config_exists": self.config_path.exists(),
             "gateway_status": self._summarize_gateway_status(gateway_status),
             "tg_bot_status": tg_bot_status,
+            "weixin_bot_status": weixin_bot_status,
+            "current_model_status": current_model_status,
         }
 
     def get_tg_bot_status(self) -> Dict[str, object]:

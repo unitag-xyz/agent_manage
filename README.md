@@ -158,7 +158,7 @@ cd ~/data/agent_manage && python3 scripts/agentctl.py add-tg-bot \
 - 执行 `openclaw gateway status --require-rpc --json`
 - 默认 10 秒超时，避免等待太久同时减少误判
 - 只有当 gateway 服务和 RPC probe 都正常时，才认为服务器和 `openclaw` 可工作
-- 同时读取一次当前 TG bot 状态，一并放进返回体
+- 同时读取一次当前 TG bot 状态、当前微信 bot 状态、当前配置模型，一并放进返回体
 
 ### 远程执行
 
@@ -183,6 +183,8 @@ cd ~/data/agent_manage && python3 scripts/agentctl.py check-server-status
 - `config_exists`
 - `gateway_status`
 - `tg_bot_status`
+- `weixin_bot_status`
+- `current_model_status`
 
 示例：
 
@@ -221,6 +223,34 @@ cd ~/data/agent_manage && python3 scripts/agentctl.py check-server-status
           "dm_policy": "open"
         }
       ]
+    },
+    "weixin_bot_status": {
+      "ok": true,
+      "weixin_bot_count": 1,
+      "bound_weixin_bot_count": 1,
+      "total_binding_count": 1,
+      "bots": [
+        {
+          "account_id": "bot-a-im-bot",
+          "bot_name": "客服A",
+          "enabled": true,
+          "binding_count": 1,
+          "is_bound": true,
+          "route_tag": null,
+          "cdn_base_url": null,
+          "has_state_file": true,
+          "state_baseurl": "https://ilinkai.weixin.qq.com",
+          "ilink_user_id": "wx-user-1"
+        }
+      ]
+    },
+    "current_model_status": {
+      "ok": true,
+      "current_model": "unipay-fun/gpt-4.1-mini",
+      "configured_default_model": "unipay-fun/gpt-4.1-mini",
+      "agent_overrides": [],
+      "config_path": "/root/.openclaw/openclaw.json",
+      "config_exists": true
     }
   },
   "error": null,

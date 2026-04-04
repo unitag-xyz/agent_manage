@@ -623,14 +623,40 @@ class CreateInstanceV2Test(unittest.TestCase):
                 json.dumps(
                     {
                         "bindings": [],
+                        "agents": {
+                            "defaults": {
+                                "model": {
+                                    "primary": "unipay-fun/gpt-4.1-mini",
+                                }
+                            }
+                        },
                         "channels": {
                             "telegram": {
                                 "enabled": True,
                                 "accounts": {
                                     "publicbot": {"dmPolicy": "open"},
-                                },
-                            }
+                                }
+                            },
+                            "openclaw-weixin": {
+                                "accounts": {
+                                    "bot-a-im-bot": {
+                                        "enabled": True,
+                                        "name": "客服A",
+                                    }
+                                }
+                            },
                         },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            accounts_dir = Path(tmpdir) / "openclaw-weixin" / "accounts"
+            accounts_dir.mkdir(parents=True)
+            (accounts_dir / "bot-a-im-bot.json").write_text(
+                json.dumps(
+                    {
+                        "baseUrl": "https://ilinkai.weixin.qq.com",
+                        "userId": "wx-user-1",
                     }
                 ),
                 encoding="utf-8",
@@ -642,6 +668,11 @@ class CreateInstanceV2Test(unittest.TestCase):
             self.assertTrue(result["ok"])
             self.assertEqual(result["gateway_status"]["rpc"]["ok"], True)
             self.assertEqual(result["tg_bot_status"]["tg_bot_count"], 1)
+            self.assertEqual(result["weixin_bot_status"]["weixin_bot_count"], 1)
+            self.assertEqual(
+                result["current_model_status"]["current_model"],
+                "unipay-fun/gpt-4.1-mini",
+            )
             self.assertEqual(result["timeout_seconds"], 10)
             self.assertEqual(
                 runner.calls[0],
