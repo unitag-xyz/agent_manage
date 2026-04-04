@@ -355,11 +355,9 @@ cd ~/data/agent_manage && python3 scripts/agentctl.py tg-bot-status
 ```bash
 cd ~/data/agent_manage && python3 scripts/agentctl.py add-weixin-bot \
   --agent unipay-claw-base \
-  --ilink-bot-id B0F5860FDECB@im.bot \
-  --bot-token wx-token \
-  --baseurl https://ilinkai.weixin.qq.com \
-  --ilink-user-id wx-user-1 \
-  --bot-name 客服微信
+  --ilink-bot-id caf8d0cd98a9@im.bot \
+  --bot-token 'caf8d0cd98a9@im.bot:0600006dbf2f19d3a8f958823xxxxx' \
+  --ilink-user-id 'o9cq80-cXVWniFqxxxx_5GWg@im.wechat'
 ```
 
 可选参数：
