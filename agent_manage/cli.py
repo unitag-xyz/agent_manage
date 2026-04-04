@@ -14,6 +14,7 @@ from .response import (
 
 from .models import (
     AddTelegramBotRequest,
+    AddWeixinBotRequest,
     CreateInstanceRequest,
     DeleteTelegramBotRequest,
     SetModelRequest,
@@ -41,6 +42,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     add_tg_bot.add_argument("--agent", required=True)
     add_tg_bot.add_argument("--tg-token", required=True)
     add_tg_bot.add_argument("--bot-name")
+
+    add_weixin_bot = subparsers.add_parser("add-weixin-bot")
+    add_weixin_bot.add_argument("--agent", required=True)
+    add_weixin_bot.add_argument("--ilink-bot-id", required=True)
+    add_weixin_bot.add_argument("--bot-token", required=True)
+    add_weixin_bot.add_argument("--baseurl")
+    add_weixin_bot.add_argument("--ilink-user-id")
+    add_weixin_bot.add_argument("--bot-name")
+    add_weixin_bot.add_argument("--route-tag")
+    add_weixin_bot.add_argument("--cdn-base-url")
 
     check_server_status = subparsers.add_parser("check-server-status")
 
@@ -85,6 +96,21 @@ def main(argv: Optional[List[str]] = None) -> int:
                     agent_name=args.agent,
                     bot_token=args.tg_token,
                     bot_name=args.bot_name,
+                )
+            )
+            print_json(build_success_response(result))
+            return 0
+        if args.command == "add-weixin-bot":
+            result = client.add_weixin_bot(
+                AddWeixinBotRequest(
+                    agent_name=args.agent,
+                    ilink_bot_id=args.ilink_bot_id,
+                    bot_token=args.bot_token,
+                    baseurl=args.baseurl,
+                    ilink_user_id=args.ilink_user_id,
+                    bot_name=args.bot_name,
+                    route_tag=args.route_tag,
+                    cdn_base_url=args.cdn_base_url,
                 )
             )
             print_json(build_success_response(result))

@@ -7,6 +7,7 @@ from pathlib import Path
 from agent_manage.local import CommandResult
 from agent_manage.models import (
     AddTelegramBotRequest,
+    AddWeixinBotRequest,
     CreateInstanceRequest,
     DeleteTelegramBotRequest,
     SetModelRequest,
@@ -29,7 +30,7 @@ class FakeRunner:
     def log(self, message):
         return None
 
-    def run(self, args, timeout=None):
+    def run(self, args, timeout=None, stream_output=False):
         argv = list(args)
         self.calls.append(argv)
         return CommandResult(
@@ -693,6 +694,118 @@ class CreateInstanceV2Test(unittest.TestCase):
             self.assertEqual(
                 [item["bot_name"] for item in result["bots"]],
                 ["idlebot", "otherbot", "publicbot"],
+            )
+
+    def test_add_weixin_bot_writes_state_config_and_binding(self):
+        runner = FakeRunner(
+            responses={
+                ("openclaw", "agents", "list", "--bindings", "--json"): {
+                    "agents": [{"id": "unipay-claw-base"}]
+                },
+                ("openclaw", "plugins", "list", "--json"): {
+                    "plugins": [{"id": "openclaw-weixin"}]
+                },
+            }
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_dir = Path(tmpdir)
+            config_path = state_dir / "openclaw.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "plugins": {"entries": {"openclaw-weixin": {"enabled": True}}},
+                        "bindings": [],
+                        "channels": {},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            manager = InstanceManagerV2(runner, config_path=str(config_path))
+            result = manager.add_weixin_bot(
+                AddWeixinBotRequest(
+                    agent_name="unipay-claw-base",
+                    ilink_bot_id="B0F5860FDECB@im.bot",
+                    bot_token="wx-token",
+                    baseurl="https://ilinkai.weixin.qq.com",
+                    ilink_user_id="wx-user-1",
+                    bot_name="客服微信",
+                    route_tag="route-a",
+                )
+            )
+
+            saved_config = json.loads(config_path.read_text(encoding="utf-8"))
+            account_id = "b0f5860fdecb-im-bot"
+            account_path = state_dir / "openclaw-weixin" / "accounts" / f"{account_id}.json"
+            index_path = state_dir / "openclaw-weixin" / "accounts.json"
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["account_id"], account_id)
+            self.assertEqual(result["plugin_prepare"]["installed"], True)
+            self.assertEqual(result["plugin_prepare"]["restart_required"], False)
+            self.assertTrue(account_path.exists())
+            self.assertTrue(index_path.exists())
+            self.assertEqual(
+                json.loads(account_path.read_text(encoding="utf-8"))["token"],
+                "wx-token",
+            )
+            self.assertEqual(
+                saved_config["channels"]["openclaw-weixin"]["accounts"][account_id]["name"],
+                "客服微信",
+            )
+            self.assertEqual(
+                saved_config["channels"]["openclaw-weixin"]["accounts"][account_id]["routeTag"],
+                "route-a",
+            )
+            self.assertEqual(
+                saved_config["bindings"],
+                [
+                    {
+                        "agentId": "unipay-claw-base",
+                        "match": {
+                            "channel": "openclaw-weixin",
+                            "accountId": account_id,
+                        },
+                    }
+                ],
+            )
+
+    def test_add_weixin_bot_installs_and_restarts_plugin_when_missing(self):
+        runner = FakeRunner(
+            responses={
+                ("openclaw", "agents", "list", "--bindings", "--json"): {
+                    "agents": [{"id": "unipay-claw-base"}]
+                },
+                ("openclaw", "plugins", "list", "--json"): {"plugins": []},
+            }
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "openclaw.json"
+            config_path.write_text(
+                json.dumps({"plugins": {"entries": {}}, "bindings": [], "channels": {}}),
+                encoding="utf-8",
+            )
+
+            manager = InstanceManagerV2(runner, config_path=str(config_path))
+            result = manager.add_weixin_bot(
+                AddWeixinBotRequest(
+                    agent_name="unipay-claw-base",
+                    ilink_bot_id="wx@im.bot",
+                    bot_token="wx-token",
+                )
+            )
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(
+                runner.calls[:4],
+                [
+                    ["openclaw", "agents", "list", "--bindings", "--json"],
+                    ["openclaw", "plugins", "list", "--json"],
+                    ["openclaw", "plugins", "install", "@tencent-weixin/openclaw-weixin"],
+                    ["openclaw", "gateway", "restart"],
+                ],
             )
 
     def test_delete_tg_bot_removes_account_and_bindings(self):

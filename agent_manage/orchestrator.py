@@ -4,6 +4,7 @@ import json
 import shutil
 import tempfile
 import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -11,6 +12,7 @@ from .local import CommandError, LocalRunner
 
 from .models import (
     AddTelegramBotRequest,
+    AddWeixinBotRequest,
     CreateInstanceRequest,
     DeleteTelegramBotRequest,
     SUPPORTED_MODEL_REFS,
@@ -20,6 +22,9 @@ from .models import (
 
 class InstanceManagerV2:
     SERVER_STATUS_TIMEOUT_SECONDS = 10
+    WEIXIN_PLUGIN_ID = "openclaw-weixin"
+    WEIXIN_PLUGIN_PACKAGE = "@tencent-weixin/openclaw-weixin"
+    WEIXIN_DEFAULT_BASE_URL = "https://ilinkai.weixin.qq.com"
 
     def __init__(
         self,
@@ -162,6 +167,84 @@ class InstanceManagerV2:
             "ok": True,
             "agent_name": request.agent_name,
             "bot_name": account_id,
+            "config_write": write_result,
+        }
+
+    def add_weixin_bot(self, request: AddWeixinBotRequest) -> Dict[str, object]:
+        self._ensure_agent_exists(request.agent_name)
+        normalized_account_id = self._normalize_weixin_account_id(request.ilink_bot_id)
+        plugin_prepare = self._ensure_weixin_plugin_ready()
+        stale_accounts = self._clear_stale_weixin_accounts_for_user(
+            current_account_id=normalized_account_id,
+            user_id=request.ilink_user_id,
+        )
+        state_result = self._write_weixin_account_state(
+            account_id=normalized_account_id,
+            bot_token=request.bot_token,
+            base_url=request.baseurl or self.WEIXIN_DEFAULT_BASE_URL,
+            user_id=request.ilink_user_id,
+        )
+
+        config = self._load_config()
+        channels = config.setdefault("channels", {})
+        weixin = channels.setdefault(self.WEIXIN_PLUGIN_ID, {})
+        accounts = weixin.setdefault("accounts", {})
+        account_config = dict(accounts.get(normalized_account_id, {}))
+        account_config["enabled"] = True
+        if request.bot_name:
+            account_config["name"] = request.bot_name
+        if request.route_tag:
+            account_config["routeTag"] = request.route_tag
+        if request.cdn_base_url:
+            account_config["cdnBaseUrl"] = request.cdn_base_url
+        accounts[normalized_account_id] = account_config
+        weixin["channelConfigUpdatedAt"] = self._channel_timestamp()
+
+        bindings = list(config.get("bindings", []))
+        filtered = []
+        removed = 0
+        for item in bindings:
+            match = item.get("match", {})
+            if (
+                match.get("channel") == self.WEIXIN_PLUGIN_ID
+                and match.get("accountId") == normalized_account_id
+            ):
+                removed += 1
+                continue
+            filtered.append(item)
+        filtered.append(
+            {
+                "agentId": request.agent_name,
+                "match": {
+                    "channel": self.WEIXIN_PLUGIN_ID,
+                    "accountId": normalized_account_id,
+                },
+            }
+        )
+        config["bindings"] = filtered
+
+        write_result = self._write_config(
+            config,
+            note=f"add weixin bot {normalized_account_id} for agent {request.agent_name}",
+            changed_paths=[
+                f"channels.{self.WEIXIN_PLUGIN_ID}.accounts.{normalized_account_id}",
+                f"channels.{self.WEIXIN_PLUGIN_ID}.channelConfigUpdatedAt",
+                "bindings",
+            ],
+            extra={
+                "binding_agent": request.agent_name,
+                "removed_existing_bindings": removed,
+            },
+        )
+
+        return {
+            "ok": True,
+            "agent_name": request.agent_name,
+            "account_id": normalized_account_id,
+            "raw_account_id": request.ilink_bot_id,
+            "plugin_prepare": plugin_prepare,
+            "stale_accounts_cleared": stale_accounts,
+            "state_write": state_result,
             "config_write": write_result,
         }
 
@@ -386,6 +469,21 @@ class InstanceManagerV2:
                     return nested
         return []
 
+    def _extract_plugin_list(self, payload: Dict[str, object]) -> List[Dict[str, object]]:
+        if isinstance(payload, list):
+            return [item for item in payload if isinstance(item, dict)]
+        if not isinstance(payload, dict):
+            return []
+        for key in ("plugins", "list", "items", "payload"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                return [item for item in value if isinstance(item, dict)]
+            if isinstance(value, dict):
+                nested = value.get("plugins") or value.get("list") or value.get("items")
+                if isinstance(nested, list):
+                    return [item for item in nested if isinstance(item, dict)]
+        return []
+
     def _summarize_gateway_status(self, payload: Dict[str, object]) -> Dict[str, object]:
         if not isinstance(payload, dict):
             return {}
@@ -533,6 +631,178 @@ class InstanceManagerV2:
 
     def _generate_tg_bot_name(self) -> str:
         return f"tgbot-{uuid.uuid4().hex[:8]}"
+
+    def _normalize_weixin_account_id(self, account_id: str) -> str:
+        normalized = []
+        last_dash = False
+        for char in account_id.strip().lower():
+            if char.isalnum():
+                normalized.append(char)
+                last_dash = False
+                continue
+            if char in {"-", "_"}:
+                normalized.append(char)
+                last_dash = False
+                continue
+            if not last_dash:
+                normalized.append("-")
+                last_dash = True
+        value = "".join(normalized).strip("-")
+        if not value:
+            raise ValueError("Invalid Weixin account id")
+        return value
+
+    def _ensure_weixin_plugin_ready(self) -> Dict[str, object]:
+        config = self._load_config()
+        installed = self._is_weixin_plugin_installed()
+        steps: List[Dict[str, object]] = []
+        restart_required = False
+        if not installed:
+            install_result = self.runner.run(
+                [self.bin, "plugins", "install", self.WEIXIN_PLUGIN_PACKAGE],
+                stream_output=True,
+            )
+            steps.append(self._command_step("plugins.install", install_result))
+            installed = True
+            restart_required = True
+
+        plugin_entry = (
+            config.setdefault("plugins", {})
+            .setdefault("entries", {})
+            .setdefault(self.WEIXIN_PLUGIN_ID, {})
+        )
+        enabled_before = plugin_entry.get("enabled") is True
+        if not enabled_before:
+            plugin_entry["enabled"] = True
+            self._write_config(
+                config,
+                note=f"enable plugin {self.WEIXIN_PLUGIN_ID}",
+                changed_paths=[f"plugins.entries.{self.WEIXIN_PLUGIN_ID}.enabled"],
+            )
+            restart_required = True
+
+        if restart_required:
+            restart_result = self.runner.run(
+                [self.bin, "gateway", "restart"],
+                stream_output=True,
+            )
+            steps.append(self._command_step("gateway.restart", restart_result))
+
+        return {
+            "plugin_id": self.WEIXIN_PLUGIN_ID,
+            "installed": installed,
+            "enabled": True,
+            "restart_required": restart_required,
+            "steps": steps,
+        }
+
+    def _is_weixin_plugin_installed(self) -> bool:
+        payload = self.runner.run_json([self.bin, "plugins", "list", "--json"])
+        for item in self._extract_plugin_list(payload):
+            plugin_id = item.get("id")
+            package_name = item.get("packageName") or item.get("package")
+            if plugin_id == self.WEIXIN_PLUGIN_ID or package_name == self.WEIXIN_PLUGIN_PACKAGE:
+                return True
+        return False
+
+    def _write_weixin_account_state(
+        self,
+        account_id: str,
+        bot_token: str,
+        base_url: str,
+        user_id: Optional[str],
+    ) -> Dict[str, object]:
+        state_root = self.config_path.parent / self.WEIXIN_PLUGIN_ID
+        accounts_dir = state_root / "accounts"
+        accounts_dir.mkdir(parents=True, exist_ok=True)
+        account_path = accounts_dir / f"{account_id}.json"
+        index_path = state_root / "accounts.json"
+
+        payload = {
+            "token": bot_token,
+            "savedAt": datetime.now().isoformat(),
+            "baseUrl": base_url,
+        }
+        if user_id:
+            payload["userId"] = user_id
+        account_path.write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        try:
+            account_path.chmod(0o600)
+        except OSError:
+            pass
+
+        existing_ids: List[str] = []
+        if index_path.exists():
+            try:
+                parsed = json.loads(index_path.read_text(encoding="utf-8"))
+                if isinstance(parsed, list):
+                    existing_ids = [item for item in parsed if isinstance(item, str)]
+            except json.JSONDecodeError:
+                existing_ids = []
+        if account_id not in existing_ids:
+            existing_ids.append(account_id)
+        index_path.write_text(
+            json.dumps(existing_ids, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+
+        return {
+            "state_dir": str(state_root),
+            "account_path": str(account_path),
+            "index_path": str(index_path),
+        }
+
+    def _clear_stale_weixin_accounts_for_user(
+        self,
+        current_account_id: str,
+        user_id: Optional[str],
+    ) -> List[str]:
+        value = (user_id or "").strip()
+        if not value:
+            return []
+        state_root = self.config_path.parent / self.WEIXIN_PLUGIN_ID
+        accounts_dir = state_root / "accounts"
+        index_path = state_root / "accounts.json"
+        if not accounts_dir.exists():
+            return []
+
+        removed: List[str] = []
+        for account_path in sorted(accounts_dir.glob("*.json")):
+            account_id = account_path.stem
+            if account_id == current_account_id:
+                continue
+            try:
+                payload = json.loads(account_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(payload, dict):
+                continue
+            if (payload.get("userId") or "").strip() != value:
+                continue
+            removed.append(account_id)
+            for suffix in (".json", ".sync.json", ".context-tokens.json"):
+                target = accounts_dir / f"{account_id}{suffix}"
+                if target.exists():
+                    target.unlink()
+
+        if removed and index_path.exists():
+            try:
+                parsed = json.loads(index_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                parsed = []
+            if isinstance(parsed, list):
+                updated = [item for item in parsed if item not in removed]
+                index_path.write_text(
+                    json.dumps(updated, indent=2, ensure_ascii=False) + "\n",
+                    encoding="utf-8",
+                )
+        return removed
+
+    def _channel_timestamp(self) -> str:
+        return datetime.now().isoformat()
 
     def _load_config(self) -> Dict[str, object]:
         self.runner.log(f"config: load {self.config_path}")

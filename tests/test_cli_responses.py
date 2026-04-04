@@ -71,6 +71,31 @@ class CliResponseTest(unittest.TestCase):
         self.assertEqual(payload["typeCode"], TYPE_CODE_SUCCESS)
         self.assertEqual(payload["result"]["bound_tg_bot_count"], 2)
 
+    def test_agent_manage_add_weixin_bot_dispatches_correctly(self):
+        with patch("agent_manage.cli.InstanceManagerV2") as manager_cls:
+            manager_cls.return_value.add_weixin_bot.return_value = {
+                "ok": True,
+                "account_id": "b0f5860fdecb-im-bot",
+            }
+
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                exit_code = agent_manage_main(
+                    [
+                        "add-weixin-bot",
+                        "--agent",
+                        "unipay-claw-base",
+                        "--ilink-bot-id",
+                        "B0F5860FDECB@im.bot",
+                        "--bot-token",
+                        "wx-token",
+                    ]
+                )
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["result"]["account_id"], "b0f5860fdecb-im-bot")
+
     def test_agent_manage_delete_tg_bot_dispatches_correctly(self):
         with patch("agent_manage.cli.InstanceManagerV2") as manager_cls:
             manager_cls.return_value.delete_tg_bot.return_value = {

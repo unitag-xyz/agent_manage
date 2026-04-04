@@ -297,6 +297,96 @@ cd ~/data/agent_manage && python3 scripts/agentctl.py tg-bot-status
 }
 ```
 
+## add-weixin-bot
+
+### 行为说明
+
+- 用前端已经拿到的微信登录成功结果补齐本机接入流程
+- 要求传入前端拿到的登录成功字段：
+  `ilink_bot_id`、`bot_token`，可选 `baseurl`、`ilink_user_id`
+- 检查 `openclaw-weixin` 插件是否已安装；如果未安装，会自动执行
+  `openclaw plugins install @tencent-weixin/openclaw-weixin`
+- 确保 `plugins.entries.openclaw-weixin.enabled = true`
+- 如插件是本次新安装或首次启用，会自动执行一次 `openclaw gateway restart`
+- 将微信账号状态写入 `~/.openclaw/openclaw-weixin/accounts/<accountId>.json`
+- 将账号索引写入 `~/.openclaw/openclaw-weixin/accounts.json`
+- 将 `channels.openclaw-weixin.accounts.<accountId>` 和绑定关系写入 `openclaw.json`
+- 更新 `channels.openclaw-weixin.channelConfigUpdatedAt`，与插件扫码登录后的刷新逻辑保持一致
+
+### 远程执行
+
+```bash
+cd ~/data/agent_manage && python3 scripts/agentctl.py add-weixin-bot \
+  --agent unipay-claw-base \
+  --ilink-bot-id B0F5860FDECB@im.bot \
+  --bot-token wx-token \
+  --baseurl https://ilinkai.weixin.qq.com \
+  --ilink-user-id wx-user-1 \
+  --bot-name 客服微信
+```
+
+可选参数：
+
+- `--baseurl`
+- `--ilink-user-id`
+- `--bot-name`
+- `--route-tag`
+- `--cdn-base-url`
+- `--config-path`
+- `--openclaw-bin`
+- `--project-dir`
+- `--dry-run`
+
+### Output
+
+成功时 `result` 里主要返回：
+
+- `agent_name`
+- `account_id`
+- `raw_account_id`
+- `plugin_prepare`
+- `stale_accounts_cleared`
+- `state_write`
+- `config_write`
+
+示例：
+
+```json
+{
+  "result": {
+    "ok": true,
+    "agent_name": "unipay-claw-base",
+    "account_id": "b0f5860fdecb-im-bot",
+    "raw_account_id": "B0F5860FDECB@im.bot",
+    "plugin_prepare": {
+      "plugin_id": "openclaw-weixin",
+      "installed": true,
+      "enabled": true,
+      "restart_required": false,
+      "steps": []
+    },
+    "stale_accounts_cleared": [],
+    "state_write": {
+      "state_dir": "/root/.openclaw/openclaw-weixin",
+      "account_path": "/root/.openclaw/openclaw-weixin/accounts/b0f5860fdecb-im-bot.json",
+      "index_path": "/root/.openclaw/openclaw-weixin/accounts.json"
+    },
+    "config_write": {
+      "config_path": "/root/.openclaw/openclaw.json",
+      "changed_paths": [
+        "channels.openclaw-weixin.accounts.b0f5860fdecb-im-bot",
+        "channels.openclaw-weixin.channelConfigUpdatedAt",
+        "bindings"
+      ]
+    }
+  },
+  "error": null,
+  "typeCode": 1,
+  "message": "OK",
+  "serverTimeStamp": "2026-04-04 09:36:50"
+}
+```
+
 ## delete-tg-bot
 
 ### 行为说明

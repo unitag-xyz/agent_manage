@@ -26,6 +26,18 @@ class AddTelegramBotRequest:
 
 
 @dataclass
+class AddWeixinBotRequest:
+    agent_name: str
+    ilink_bot_id: str
+    bot_token: str
+    baseurl: str | None = None
+    ilink_user_id: str | None = None
+    bot_name: str | None = None
+    route_tag: str | None = None
+    cdn_base_url: str | None = None
+
+
+@dataclass
 class DeleteTelegramBotRequest:
     bot_name: str
 

@@ -39,7 +39,12 @@ class LocalRunner:
         self.project_dir = Path(project_dir).expanduser().resolve() if project_dir else None
         self.dry_run = dry_run
 
-    def run(self, args: Sequence[str], timeout: Optional[float] = None) -> CommandResult:
+    def run(
+        self,
+        args: Sequence[str],
+        timeout: Optional[float] = None,
+        stream_output: bool = False,
+    ) -> CommandResult:
         argv = list(args)
         command_text = " ".join(shlex.quote(part) for part in argv)
         self._log(f"run: {command_text}")
@@ -53,6 +58,9 @@ class LocalRunner:
                 stderr="",
                 skipped=True,
             )
+
+        if stream_output:
+            return self._run_streaming(argv, command_text)
 
         try:
             completed = subprocess.run(
@@ -95,6 +103,41 @@ class LocalRunner:
                 result,
             )
         self._log(f"done ({completed.returncode}): {command_text}")
+        return result
+
+    def _run_streaming(self, argv: List[str], command_text: str) -> CommandResult:
+        process = subprocess.Popen(
+            argv,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            cwd=str(self.project_dir) if self.project_dir else None,
+            bufsize=1,
+        )
+        output_lines: List[str] = []
+        assert process.stdout is not None
+        for line in process.stdout:
+            output_lines.append(line)
+            self._log(f"output: {line.rstrip()}")
+        process.stdout.close()
+        returncode = process.wait()
+        stdout = "".join(output_lines)
+        result = CommandResult(
+            argv=argv,
+            command_text=command_text,
+            returncode=returncode,
+            stdout=stdout,
+            stderr="",
+        )
+        if returncode != 0:
+            self._log(f"failed ({returncode}): {command_text}")
+            if stdout.strip():
+                self._log(f"stdout: {stdout.strip()}")
+            raise CommandError(
+                f"Command failed with exit code {returncode}",
+                result,
+            )
+        self._log(f"done ({returncode}): {command_text}")
         return result
 
     def run_json(self, args: Sequence[str], timeout: Optional[float] = None):
