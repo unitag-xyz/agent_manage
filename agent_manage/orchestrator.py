@@ -237,6 +237,15 @@ class InstanceManagerV2:
             },
         )
 
+        if plugin_prepare.get("restart_required"):
+            restart_result = self.runner.run(
+                [self.bin, "gateway", "restart"],
+                stream_output=True,
+            )
+            plugin_prepare.setdefault("steps", []).append(
+                self._command_step("gateway.restart", restart_result)
+            )
+
         return {
             "ok": True,
             "agent_name": request.agent_name,
@@ -653,7 +662,6 @@ class InstanceManagerV2:
         return value
 
     def _ensure_weixin_plugin_ready(self) -> Dict[str, object]:
-        config = self._load_config()
         installed = self._is_weixin_plugin_installed()
         steps: List[Dict[str, object]] = []
         restart_required = False
@@ -666,6 +674,7 @@ class InstanceManagerV2:
             installed = True
             restart_required = True
 
+        config = self._load_config()
         plugin_entry = (
             config.setdefault("plugins", {})
             .setdefault("entries", {})
@@ -680,13 +689,6 @@ class InstanceManagerV2:
                 changed_paths=[f"plugins.entries.{self.WEIXIN_PLUGIN_ID}.enabled"],
             )
             restart_required = True
-
-        if restart_required:
-            restart_result = self.runner.run(
-                [self.bin, "gateway", "restart"],
-                stream_output=True,
-            )
-            steps.append(self._command_step("gateway.restart", restart_result))
 
         return {
             "plugin_id": self.WEIXIN_PLUGIN_ID,
