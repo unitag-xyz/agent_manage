@@ -71,6 +71,22 @@ class CliResponseTest(unittest.TestCase):
         self.assertEqual(payload["typeCode"], TYPE_CODE_SUCCESS)
         self.assertEqual(payload["result"]["bound_tg_bot_count"], 2)
 
+    def test_agent_manage_weixin_bot_status_uses_result_envelope(self):
+        with patch("agent_manage.cli.InstanceManagerV2") as manager_cls:
+            manager_cls.return_value.get_weixin_bot_status.return_value = {
+                "ok": True,
+                "weixin_bot_count": 2,
+                "bound_weixin_bot_count": 1,
+            }
+
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                exit_code = agent_manage_main(["weixin-bot-status"])
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["result"]["weixin_bot_count"], 2)
+
     def test_agent_manage_add_weixin_bot_dispatches_correctly(self):
         with patch("agent_manage.cli.InstanceManagerV2") as manager_cls:
             manager_cls.return_value.add_weixin_bot.return_value = {
@@ -95,6 +111,27 @@ class CliResponseTest(unittest.TestCase):
         payload = json.loads(stdout.getvalue())
         self.assertEqual(exit_code, 0)
         self.assertEqual(payload["result"]["account_id"], "b0f5860fdecb-im-bot")
+
+    def test_agent_manage_delete_weixin_bot_dispatches_correctly(self):
+        with patch("agent_manage.cli.InstanceManagerV2") as manager_cls:
+            manager_cls.return_value.delete_weixin_bot.return_value = {
+                "ok": True,
+                "deleted_account_id": "caf8d0cd98a9-im-bot",
+            }
+
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                exit_code = agent_manage_main(
+                    [
+                        "delete-weixin-bot",
+                        "--ilink-bot-id",
+                        "caf8d0cd98a9@im.bot",
+                    ]
+                )
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["result"]["deleted_account_id"], "caf8d0cd98a9-im-bot")
 
     def test_agent_manage_delete_tg_bot_dispatches_correctly(self):
         with patch("agent_manage.cli.InstanceManagerV2") as manager_cls:

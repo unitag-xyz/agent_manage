@@ -129,6 +129,8 @@ def _error_code_for_exception(exc: Exception, payload: Dict[str, Any]) -> str:
             return "AGENT_NOT_FOUND"
         if message.startswith("Telegram account '"):
             return "TELEGRAM_ACCOUNT_NOT_FOUND"
+        if message.startswith("Weixin account '"):
+            return "WEIXIN_ACCOUNT_NOT_FOUND"
         return "ENTITY_NOT_FOUND"
     if isinstance(exc, FileExistsError):
         if message.startswith("Agent already exists:"):

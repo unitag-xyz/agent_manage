@@ -387,6 +387,150 @@ cd ~/data/agent_manage && python3 scripts/agentctl.py add-weixin-bot \
 }
 ```
 
+## weixin-bot-status
+
+### 行为说明
+
+- 读取当前 `~/.openclaw/openclaw.json`
+- 返回当前已登记的微信 bot 总数 `weixin_bot_count`
+- 返回当前已绑定的微信 bot 数 `bound_weixin_bot_count`
+- 返回所有微信 bindings 总数 `total_binding_count`
+- 同时读取 `~/.openclaw/openclaw-weixin/accounts/*.json`，补充本地状态文件是否存在、`baseUrl`、`ilink_user_id`
+
+### 远程执行
+
+```bash
+cd ~/data/agent_manage && python3 scripts/agentctl.py weixin-bot-status
+```
+
+可选参数：
+
+- `--config-path`
+- `--openclaw-bin`
+- `--project-dir`
+- `--dry-run`
+
+### Output
+
+成功时 `result` 里主要返回：
+
+- `weixin_bot_count`
+- `bound_weixin_bot_count`
+- `total_binding_count`
+- `bots`
+
+示例：
+
+```json
+{
+  "result": {
+    "ok": true,
+    "weixin_bot_count": 2,
+    "bound_weixin_bot_count": 1,
+    "total_binding_count": 2,
+    "bots": [
+      {
+        "account_id": "bot-a-im-bot",
+        "bot_name": "客服A",
+        "enabled": true,
+        "binding_count": 2,
+        "is_bound": true,
+        "route_tag": "route-a",
+        "cdn_base_url": null,
+        "has_state_file": true,
+        "state_baseurl": "https://ilinkai.weixin.qq.com",
+        "ilink_user_id": "wx-user-1"
+      },
+      {
+        "account_id": "bot-b-im-bot",
+        "bot_name": null,
+        "enabled": true,
+        "binding_count": 0,
+        "is_bound": false,
+        "route_tag": null,
+        "cdn_base_url": null,
+        "has_state_file": false,
+        "state_baseurl": null,
+        "ilink_user_id": null
+      }
+    ]
+  },
+  "error": null,
+  "typeCode": 1,
+  "message": "OK",
+  "serverTimeStamp": "2026-04-04 09:36:50"
+}
+```
+
+## delete-weixin-bot
+
+### 行为说明
+
+- 按 `ilink_bot_id` 删除对应微信账号
+- 会先把传入值规范化成内部 `account_id`
+- 同时删除 `channels.openclaw-weixin.accounts.<accountId>`
+- 同时删除所有引用该账号的微信 bindings
+- 同时删除 `~/.openclaw/openclaw-weixin/accounts/<accountId>.json` 等本地状态文件
+- 更新 `channels.openclaw-weixin.channelConfigUpdatedAt`
+
+### 远程执行
+
+```bash
+cd ~/data/agent_manage && python3 scripts/agentctl.py delete-weixin-bot \
+  --ilink-bot-id caf8d0cd98a9@im.bot
+```
+
+可选参数：
+
+- `--config-path`
+- `--openclaw-bin`
+- `--project-dir`
+- `--dry-run`
+
+### Output
+
+成功时 `result` 里主要返回：
+
+- `deleted_account_id`
+- `raw_account_id`
+- `removed_bindings`
+- `remaining_weixin_bot_count`
+- `state_delete`
+- `config_write`
+
+示例：
+
+```json
+{
+  "result": {
+    "ok": true,
+    "deleted_account_id": "caf8d0cd98a9-im-bot",
+    "raw_account_id": "caf8d0cd98a9@im.bot",
+    "removed_bindings": 1,
+    "remaining_weixin_bot_count": 0,
+    "state_delete": {
+      "deleted_files": [
+        "/root/.openclaw/openclaw-weixin/accounts/caf8d0cd98a9-im-bot.json"
+      ],
+      "index_path": "/root/.openclaw/openclaw-weixin/accounts.json",
+      "remaining_index_count": 0
+    },
+    "config_write": {
+      "config_path": "/root/.openclaw/openclaw.json",
+      "changed_paths": [
+        "channels.openclaw-weixin.accounts.caf8d0cd98a9-im-bot",
+        "channels.openclaw-weixin.channelConfigUpdatedAt",
+        "bindings"
+      ]
+    }
+  },
+  "error": null,
+  "typeCode": 1,
+  "message": "OK",
+  "serverTimeStamp": "2026-04-04 09:36:50"
+}
+```
+
 ## delete-tg-bot
 
 ### 行为说明

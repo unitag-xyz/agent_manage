@@ -15,6 +15,7 @@ from .models import (
     AddWeixinBotRequest,
     CreateInstanceRequest,
     DeleteTelegramBotRequest,
+    DeleteWeixinBotRequest,
     SUPPORTED_MODEL_REFS,
     SetModelRequest,
 )
@@ -355,6 +356,101 @@ class InstanceManagerV2:
             "deleted_bot_name": request.bot_name,
             "removed_bindings": removed_bindings,
             "remaining_tg_bot_count": len(accounts),
+            "config_write": write_result,
+        }
+
+    def get_weixin_bot_status(self) -> Dict[str, object]:
+        config = self._load_config()
+        weixin = config.get("channels", {}).get(self.WEIXIN_PLUGIN_ID, {})
+        accounts = weixin.get("accounts", {})
+        bindings = list(config.get("bindings", []))
+
+        binding_counts: Dict[str, int] = {}
+        for item in bindings:
+            match = item.get("match", {})
+            if match.get("channel") != self.WEIXIN_PLUGIN_ID:
+                continue
+            account_id = match.get("accountId")
+            if not account_id:
+                continue
+            binding_counts[account_id] = binding_counts.get(account_id, 0) + 1
+
+        bots: List[Dict[str, object]] = []
+        for account_id in sorted(accounts.keys()):
+            account = accounts.get(account_id, {})
+            state_payload = self._load_weixin_account_state(account_id)
+            bound_count = binding_counts.get(account_id, 0)
+            bots.append(
+                {
+                    "account_id": account_id,
+                    "bot_name": account.get("name"),
+                    "enabled": bool(account.get("enabled", True)),
+                    "binding_count": bound_count,
+                    "is_bound": bound_count > 0,
+                    "route_tag": account.get("routeTag"),
+                    "cdn_base_url": account.get("cdnBaseUrl"),
+                    "has_state_file": state_payload is not None,
+                    "state_baseurl": state_payload.get("baseUrl") if state_payload else None,
+                    "ilink_user_id": state_payload.get("userId") if state_payload else None,
+                }
+            )
+
+        return {
+            "ok": True,
+            "weixin_bot_count": len(accounts),
+            "bound_weixin_bot_count": sum(1 for item in bots if item["is_bound"]),
+            "total_binding_count": sum(binding_counts.values()),
+            "bots": bots,
+        }
+
+    def delete_weixin_bot(self, request: DeleteWeixinBotRequest) -> Dict[str, object]:
+        normalized_account_id = self._normalize_weixin_account_id(request.ilink_bot_id)
+        config = self._load_config()
+        channels = config.setdefault("channels", {})
+        weixin = channels.setdefault(self.WEIXIN_PLUGIN_ID, {})
+        accounts = weixin.setdefault("accounts", {})
+        if normalized_account_id not in accounts:
+            raise FileNotFoundError(
+                f"Weixin account '{request.ilink_bot_id}' not found"
+            )
+
+        accounts.pop(normalized_account_id, None)
+        bindings = list(config.get("bindings", []))
+        filtered = []
+        removed_bindings = 0
+        for item in bindings:
+            match = item.get("match", {})
+            if (
+                match.get("channel") == self.WEIXIN_PLUGIN_ID
+                and match.get("accountId") == normalized_account_id
+            ):
+                removed_bindings += 1
+                continue
+            filtered.append(item)
+        config["bindings"] = filtered
+        weixin["channelConfigUpdatedAt"] = self._channel_timestamp()
+
+        write_result = self._write_config(
+            config,
+            note=f"delete weixin bot {normalized_account_id}",
+            changed_paths=[
+                f"channels.{self.WEIXIN_PLUGIN_ID}.accounts.{normalized_account_id}",
+                f"channels.{self.WEIXIN_PLUGIN_ID}.channelConfigUpdatedAt",
+                "bindings",
+            ],
+            extra={
+                "deleted_account_id": normalized_account_id,
+                "removed_bindings": removed_bindings,
+            },
+        )
+        state_delete = self._delete_weixin_account_state(normalized_account_id)
+        return {
+            "ok": True,
+            "deleted_account_id": normalized_account_id,
+            "raw_account_id": request.ilink_bot_id,
+            "removed_bindings": removed_bindings,
+            "remaining_weixin_bot_count": len(accounts),
+            "state_delete": state_delete,
             "config_write": write_result,
         }
 
@@ -757,6 +853,45 @@ class InstanceManagerV2:
             "index_path": str(index_path),
         }
 
+    def _load_weixin_account_state(self, account_id: str) -> Optional[Dict[str, object]]:
+        account_path = self._weixin_accounts_dir() / f"{account_id}.json"
+        if not account_path.exists():
+            return None
+        try:
+            payload = json.loads(account_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    def _delete_weixin_account_state(self, account_id: str) -> Dict[str, object]:
+        accounts_dir = self._weixin_accounts_dir()
+        state_root = self.config_path.parent / self.WEIXIN_PLUGIN_ID
+        index_path = state_root / "accounts.json"
+        deleted_files: List[str] = []
+        for suffix in (".json", ".sync.json", ".context-tokens.json"):
+            target = accounts_dir / f"{account_id}{suffix}"
+            if target.exists():
+                target.unlink()
+                deleted_files.append(str(target))
+
+        remaining_ids: List[str] = []
+        if index_path.exists():
+            try:
+                parsed = json.loads(index_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                parsed = []
+            if isinstance(parsed, list):
+                remaining_ids = [item for item in parsed if isinstance(item, str) and item != account_id]
+                index_path.write_text(
+                    json.dumps(remaining_ids, indent=2, ensure_ascii=False) + "\n",
+                    encoding="utf-8",
+                )
+        return {
+            "deleted_files": deleted_files,
+            "index_path": str(index_path),
+            "remaining_index_count": len(remaining_ids),
+        }
+
     def _clear_stale_weixin_accounts_for_user(
         self,
         current_account_id: str,
@@ -766,7 +901,7 @@ class InstanceManagerV2:
         if not value:
             return []
         state_root = self.config_path.parent / self.WEIXIN_PLUGIN_ID
-        accounts_dir = state_root / "accounts"
+        accounts_dir = self._weixin_accounts_dir()
         index_path = state_root / "accounts.json"
         if not accounts_dir.exists():
             return []
@@ -805,6 +940,9 @@ class InstanceManagerV2:
 
     def _channel_timestamp(self) -> str:
         return datetime.now().isoformat()
+
+    def _weixin_accounts_dir(self) -> Path:
+        return self.config_path.parent / self.WEIXIN_PLUGIN_ID / "accounts"
 
     def _load_config(self) -> Dict[str, object]:
         self.runner.log(f"config: load {self.config_path}")

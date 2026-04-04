@@ -17,6 +17,7 @@ from .models import (
     AddWeixinBotRequest,
     CreateInstanceRequest,
     DeleteTelegramBotRequest,
+    DeleteWeixinBotRequest,
     SetModelRequest,
     SUPPORTED_MODEL_REFS,
 )
@@ -57,8 +58,13 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     tg_bot_status = subparsers.add_parser("tg-bot-status")
 
+    weixin_bot_status = subparsers.add_parser("weixin-bot-status")
+
     delete_tg_bot = subparsers.add_parser("delete-tg-bot")
     delete_tg_bot.add_argument("--bot-name", required=True)
+
+    delete_weixin_bot = subparsers.add_parser("delete-weixin-bot")
+    delete_weixin_bot.add_argument("--ilink-bot-id", required=True)
 
     agents_list = subparsers.add_parser("agents-list")
 
@@ -123,10 +129,22 @@ def main(argv: Optional[List[str]] = None) -> int:
             result = client.get_tg_bot_status()
             print_json(build_success_response(result))
             return 0
+        if args.command == "weixin-bot-status":
+            result = client.get_weixin_bot_status()
+            print_json(build_success_response(result))
+            return 0
         if args.command == "delete-tg-bot":
             result = client.delete_tg_bot(
                 DeleteTelegramBotRequest(
                     bot_name=args.bot_name,
+                )
+            )
+            print_json(build_success_response(result))
+            return 0
+        if args.command == "delete-weixin-bot":
+            result = client.delete_weixin_bot(
+                DeleteWeixinBotRequest(
+                    ilink_bot_id=args.ilink_bot_id,
                 )
             )
             print_json(build_success_response(result))

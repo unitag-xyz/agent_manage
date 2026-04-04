@@ -43,5 +43,10 @@ class DeleteTelegramBotRequest:
 
 
 @dataclass
+class DeleteWeixinBotRequest:
+    ilink_bot_id: str
+
+
+@dataclass
 class SetModelRequest:
     model_name: str

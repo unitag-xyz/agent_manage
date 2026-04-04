@@ -10,6 +10,7 @@ from agent_manage.models import (
     AddWeixinBotRequest,
     CreateInstanceRequest,
     DeleteTelegramBotRequest,
+    DeleteWeixinBotRequest,
     SetModelRequest,
 )
 from agent_manage.orchestrator import InstanceManagerV2
@@ -807,6 +808,165 @@ class CreateInstanceV2Test(unittest.TestCase):
                     ["openclaw", "gateway", "restart"],
                 ],
             )
+
+    def test_get_weixin_bot_status_returns_bound_bot_count(self):
+        runner = FakeRunner()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_dir = Path(tmpdir)
+            config_path = state_dir / "openclaw.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "bindings": [
+                            {
+                                "agentId": "unipay-claw-base",
+                                "match": {
+                                    "channel": "openclaw-weixin",
+                                    "accountId": "bot-a-im-bot",
+                                },
+                            },
+                            {
+                                "agentId": "demo",
+                                "match": {
+                                    "channel": "openclaw-weixin",
+                                    "accountId": "bot-a-im-bot",
+                                },
+                            },
+                        ],
+                        "channels": {
+                            "openclaw-weixin": {
+                                "accounts": {
+                                    "bot-a-im-bot": {
+                                        "enabled": True,
+                                        "name": "客服A",
+                                        "routeTag": "route-a",
+                                    },
+                                    "bot-b-im-bot": {
+                                        "enabled": True,
+                                    },
+                                }
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            accounts_dir = state_dir / "openclaw-weixin" / "accounts"
+            accounts_dir.mkdir(parents=True)
+            (accounts_dir / "bot-a-im-bot.json").write_text(
+                json.dumps(
+                    {
+                        "baseUrl": "https://ilinkai.weixin.qq.com",
+                        "userId": "wx-user-1",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            manager = InstanceManagerV2(runner, config_path=str(config_path))
+            result = manager.get_weixin_bot_status()
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["weixin_bot_count"], 2)
+            self.assertEqual(result["bound_weixin_bot_count"], 1)
+            self.assertEqual(result["total_binding_count"], 2)
+            self.assertEqual(
+                [item["account_id"] for item in result["bots"]],
+                ["bot-a-im-bot", "bot-b-im-bot"],
+            )
+            self.assertEqual(result["bots"][0]["bot_name"], "客服A")
+            self.assertEqual(result["bots"][0]["has_state_file"], True)
+            self.assertEqual(result["bots"][1]["has_state_file"], False)
+
+    def test_delete_weixin_bot_removes_account_binding_and_state(self):
+        runner = FakeRunner()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_dir = Path(tmpdir)
+            config_path = state_dir / "openclaw.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "bindings": [
+                            {
+                                "agentId": "unipay-claw-base",
+                                "match": {
+                                    "channel": "openclaw-weixin",
+                                    "accountId": "bot-a-im-bot",
+                                },
+                            },
+                            {
+                                "agentId": "demo",
+                                "match": {
+                                    "channel": "telegram",
+                                    "accountId": "tg-a",
+                                },
+                            },
+                        ],
+                        "channels": {
+                            "openclaw-weixin": {
+                                "accounts": {
+                                    "bot-a-im-bot": {
+                                        "enabled": True,
+                                        "name": "客服A",
+                                    },
+                                    "bot-b-im-bot": {
+                                        "enabled": True,
+                                    },
+                                }
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            state_root = state_dir / "openclaw-weixin"
+            accounts_dir = state_root / "accounts"
+            accounts_dir.mkdir(parents=True)
+            (accounts_dir / "bot-a-im-bot.json").write_text("{}", encoding="utf-8")
+            (accounts_dir / "bot-a-im-bot.sync.json").write_text("{}", encoding="utf-8")
+            (state_root / "accounts.json").write_text(
+                json.dumps(["bot-a-im-bot", "bot-b-im-bot"]) + "\n",
+                encoding="utf-8",
+            )
+
+            manager = InstanceManagerV2(runner, config_path=str(config_path))
+            result = manager.delete_weixin_bot(
+                DeleteWeixinBotRequest(ilink_bot_id="bot-a@im.bot")
+            )
+
+            saved = json.loads(config_path.read_text(encoding="utf-8"))
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["deleted_account_id"], "bot-a-im-bot")
+            self.assertEqual(result["removed_bindings"], 1)
+            self.assertEqual(result["remaining_weixin_bot_count"], 1)
+            self.assertNotIn(
+                "bot-a-im-bot",
+                saved["channels"]["openclaw-weixin"]["accounts"],
+            )
+            self.assertFalse((accounts_dir / "bot-a-im-bot.json").exists())
+            self.assertFalse((accounts_dir / "bot-a-im-bot.sync.json").exists())
+            self.assertEqual(
+                json.loads((state_root / "accounts.json").read_text(encoding="utf-8")),
+                ["bot-b-im-bot"],
+            )
+
+    def test_delete_weixin_bot_requires_existing_account(self):
+        runner = FakeRunner()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "openclaw.json"
+            config_path.write_text(
+                json.dumps({"channels": {"openclaw-weixin": {"accounts": {}}}}),
+                encoding="utf-8",
+            )
+
+            manager = InstanceManagerV2(runner, config_path=str(config_path))
+            with self.assertRaises(FileNotFoundError):
+                manager.delete_weixin_bot(
+                    DeleteWeixinBotRequest(ilink_bot_id="missing@im.bot")
+                )
 
     def test_delete_tg_bot_removes_account_and_bindings(self):
         runner = FakeRunner()
