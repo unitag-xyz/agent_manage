@@ -116,6 +116,38 @@ class CliResponseTest(unittest.TestCase):
         self.assertEqual(payload["typeCode"], TYPE_CODE_INVALID_ARGUMENT)
         self.assertEqual(payload["error"]["code"], "INVALID_ARGUMENT")
 
+    def test_agent_manage_agents_list_dispatches_correctly(self):
+        with patch("agent_manage.cli.InstanceManagerV2") as manager_cls:
+            manager_cls.return_value.list_agents.return_value = {
+                "ok": True,
+                "agent_count": 1,
+                "agents": [{"id": "unipay-claw-base"}],
+            }
+
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                exit_code = agent_manage_main(["agents-list"])
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["result"]["agent_count"], 1)
+        self.assertEqual(payload["result"]["agents"][0]["id"], "unipay-claw-base")
+
+    def test_agent_manage_current_model_dispatches_correctly(self):
+        with patch("agent_manage.cli.InstanceManagerV2") as manager_cls:
+            manager_cls.return_value.get_current_model.return_value = {
+                "ok": True,
+                "current_model": "unipay-fun/gpt-4.1-mini",
+            }
+
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                exit_code = agent_manage_main(["current-model"])
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["result"]["current_model"], "unipay-fun/gpt-4.1-mini")
+
     def test_openclaw_remote_runtime_error_preserves_steps_and_rollback(self):
         with patch("openclaw_remote_Deprecated.cli.OpenClawManager") as manager_cls:
             manager_cls.return_value.create.side_effect = RuntimeError(

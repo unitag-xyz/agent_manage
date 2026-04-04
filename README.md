@@ -155,10 +155,10 @@ cd ~/data/agent_manage && python3 scripts/agentctl.py add-tg-bot \
 
 ### 行为说明
 
-- 用一个尽量轻量的 `openclaw agents list --bindings --json` 做探活
+- 执行 `openclaw gateway status --require-rpc --json`
 - 默认 10 秒超时，避免等待太久同时减少误判
-- 只要该命令正常返回，就认为服务器和 `openclaw` 处于可工作状态
-- 这个命令不做深度巡检，不检查每个 agent 的业务状态
+- 只有当 gateway 服务和 RPC probe 都正常时，才认为服务器和 `openclaw` 可工作
+- 同时读取一次当前 TG bot 状态，一并放进返回体
 
 ### 远程执行
 
@@ -177,14 +177,12 @@ cd ~/data/agent_manage && python3 scripts/agentctl.py check-server-status
 
 成功时 `result` 里主要返回：
 
-- `server_status`
-- `openclaw_status`
 - `check`
 - `timeout_seconds`
-- `agent_count`
 - `config_path`
 - `config_exists`
-- `skipped`
+- `gateway_status`
+- `tg_bot_status`
 
 示例：
 
@@ -192,14 +190,38 @@ cd ~/data/agent_manage && python3 scripts/agentctl.py check-server-status
 {
   "result": {
     "ok": true,
-    "server_status": "ok",
-    "openclaw_status": "running",
-    "check": "openclaw agents list --bindings --json",
+    "check": "openclaw gateway status --require-rpc --json",
     "timeout_seconds": 10,
-    "agent_count": 2,
     "config_path": "/root/.openclaw/openclaw.json",
     "config_exists": true,
-    "skipped": false
+    "gateway_status": {
+      "ok": true,
+      "service": {
+        "status": "running"
+      },
+      "runtime": {
+        "status": "running"
+      },
+      "rpc": {
+        "ok": true
+      }
+    },
+    "tg_bot_status": {
+      "ok": true,
+      "telegram_enabled": true,
+      "tg_bot_count": 1,
+      "bound_tg_bot_count": 1,
+      "total_binding_count": 1,
+      "bots": [
+        {
+          "bot_name": "publicbot",
+          "enabled": true,
+          "binding_count": 1,
+          "is_bound": true,
+          "dm_policy": "open"
+        }
+      ]
+    }
   },
   "error": null,
   "typeCode": 1,
@@ -332,6 +354,59 @@ cd ~/data/agent_manage && python3 scripts/agentctl.py delete-tg-bot \
 }
 ```
 
+## agents-list
+
+### 行为说明
+
+- 执行 `openclaw agents list --bindings --json`
+- 返回当前服务器上的全部 agents
+- 返回里会主动排除 `main`
+- 适合给上层直接展示当前实例列表
+
+### 远程执行
+
+```bash
+cd ~/data/agent_manage && python3 scripts/agentctl.py agents-list
+```
+
+可选参数：
+
+- `--openclaw-bin`
+- `--project-dir`
+- `--dry-run`
+
+### Output
+
+成功时 `result` 里主要返回：
+
+- `check`
+- `agent_count`
+- `agents`
+
+示例：
+
+```json
+{
+  "result": {
+    "ok": true,
+    "check": "openclaw agents list --bindings --json",
+    "agent_count": 1,
+    "agents": [
+      {
+        "id": "unipay-claw-base",
+        "name": "unipay-claw-base",
+        "workspace": "/home/ubuntu/data/unipay-claw-base",
+        "agentDir": "/home/ubuntu/.openclaw/agents/unipay-claw-base/agent"
+      }
+    ]
+  },
+  "error": null,
+  "typeCode": 1,
+  "message": "OK",
+  "serverTimeStamp": "2026-04-04 09:36:50"
+}
+```
+
 ## set-model
 
 ### 行为说明
@@ -389,6 +464,61 @@ cd ~/data/agent_manage && python3 scripts/agentctl.py set-model \
         }
       }
     ]
+  },
+  "error": null,
+  "typeCode": 1,
+  "message": "OK",
+  "serverTimeStamp": "2026-04-04 09:36:50"
+}
+```
+
+## current-model
+
+### 行为说明
+
+- 直接读取 `~/.openclaw/openclaw.json`
+- 返回当前配置里的默认模型，不起 `openclaw` 子进程
+- 同时返回非 `main` agent 的模型覆盖，便于排查“默认模型”和实例模型不一致的问题
+- 这个命令返回的是配置结果，不代表某个 Telegram session 的临时 override
+
+### 远程执行
+
+```bash
+cd ~/data/agent_manage && python3 scripts/agentctl.py current-model
+```
+
+可选参数：
+
+- `--openclaw-bin`
+- `--project-dir`
+- `--dry-run`
+
+### Output
+
+成功时 `result` 里主要返回：
+
+- `current_model`
+- `configured_default_model`
+- `agent_overrides`
+- `config_path`
+- `config_exists`
+
+示例：
+
+```json
+{
+  "result": {
+    "ok": true,
+    "current_model": "unipay-fun/gpt-4.1-mini",
+    "configured_default_model": "unipay-fun/gpt-4.1-mini",
+    "agent_overrides": [
+      {
+        "agent_id": "unipay-claw-base",
+        "model": "unipay-fun/gpt-5.4-mini"
+      }
+    ],
+    "config_path": "/root/.openclaw/openclaw.json",
+    "config_exists": true
   },
   "error": null,
   "typeCode": 1,

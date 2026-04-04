@@ -603,29 +603,47 @@ class CreateInstanceV2Test(unittest.TestCase):
                     )
                 )
 
-    def test_check_server_status_uses_lightweight_openclaw_check(self):
+    def test_check_server_status_uses_gateway_status_and_embeds_tg_status(self):
         runner = FakeRunner(
             responses={
-                ("openclaw", "agents", "list", "--bindings", "--json"): {
-                    "agents": [{"id": "base"}, {"id": "demo"}]
+                ("openclaw", "gateway", "status", "--require-rpc", "--json"): {
+                    "ok": True,
+                    "service": {"status": "running"},
+                    "runtime": {"status": "running"},
+                    "rpc": {"ok": True},
                 }
             }
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             config_path = Path(tmpdir) / "openclaw.json"
-            config_path.write_text(json.dumps({"bindings": []}), encoding="utf-8")
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "bindings": [],
+                        "channels": {
+                            "telegram": {
+                                "enabled": True,
+                                "accounts": {
+                                    "publicbot": {"dmPolicy": "open"},
+                                },
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
 
             manager = InstanceManagerV2(runner, config_path=str(config_path))
             result = manager.check_server_status()
 
             self.assertTrue(result["ok"])
-            self.assertEqual(result["openclaw_status"], "running")
-            self.assertEqual(result["agent_count"], 2)
+            self.assertEqual(result["gateway_status"]["rpc"]["ok"], True)
+            self.assertEqual(result["tg_bot_status"]["tg_bot_count"], 1)
             self.assertEqual(result["timeout_seconds"], 10)
             self.assertEqual(
                 runner.calls[0],
-                ["openclaw", "agents", "list", "--bindings", "--json"],
+                ["openclaw", "gateway", "status", "--require-rpc", "--json"],
             )
 
     def test_get_tg_bot_status_returns_bound_bot_count(self):
@@ -765,6 +783,69 @@ class CreateInstanceV2Test(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             manager.set_model(SetModelRequest(model_name="gpt-4o"))
+
+    def test_list_agents_excludes_main(self):
+        runner = FakeRunner(
+            responses={
+                ("openclaw", "agents", "list", "--bindings", "--json"): {
+                    "agents": [
+                        {"id": "main", "name": "main"},
+                        {"id": "unipay-claw-base", "name": "unipay-claw-base"},
+                    ]
+                }
+            }
+        )
+        manager = InstanceManagerV2(runner)
+
+        result = manager.list_agents()
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["agent_count"], 1)
+        self.assertEqual(
+            result["agents"],
+            [{"id": "unipay-claw-base", "name": "unipay-claw-base"}],
+        )
+        self.assertEqual(runner.calls, [["openclaw", "agents", "list", "--bindings", "--json"]])
+
+    def test_get_current_model_reads_config_only(self):
+        runner = FakeRunner()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "openclaw.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "agents": {
+                            "defaults": {
+                                "model": {
+                                    "primary": "unipay-fun/gpt-4.1-mini",
+                                }
+                            },
+                            "list": [
+                                {"id": "main"},
+                                {
+                                    "id": "unipay-claw-base",
+                                    "model": {
+                                        "primary": "unipay-fun/gpt-5.4-mini",
+                                    },
+                                },
+                            ],
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            manager = InstanceManagerV2(runner, config_path=str(config_path))
+            result = manager.get_current_model()
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["current_model"], "unipay-fun/gpt-4.1-mini")
+        self.assertEqual(
+            result["agent_overrides"],
+            [{"agent_id": "unipay-claw-base", "model": "unipay-fun/gpt-5.4-mini"}],
+        )
+        self.assertEqual(runner.calls, [])
 
     def _write_archive(self, archive_path: Path, files):
         with zipfile.ZipFile(archive_path, "w") as archive:

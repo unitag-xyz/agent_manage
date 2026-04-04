@@ -49,8 +49,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     delete_tg_bot = subparsers.add_parser("delete-tg-bot")
     delete_tg_bot.add_argument("--bot-name", required=True)
 
+    agents_list = subparsers.add_parser("agents-list")
+
     set_model = subparsers.add_parser("set-model")
     set_model.add_argument("--model", required=True, choices=sorted(SUPPORTED_MODEL_REFS.keys()))
+
+    current_model = subparsers.add_parser("current-model")
 
     try:
         args = parser.parse_args(argv)
@@ -101,12 +105,20 @@ def main(argv: Optional[List[str]] = None) -> int:
             )
             print_json(build_success_response(result))
             return 0
+        if args.command == "agents-list":
+            result = client.list_agents()
+            print_json(build_success_response(result))
+            return 0
         if args.command == "set-model":
             result = client.set_model(
                 SetModelRequest(
                     model_name=args.model,
                 )
             )
+            print_json(build_success_response(result))
+            return 0
+        if args.command == "current-model":
+            result = client.get_current_model()
             print_json(build_success_response(result))
             return 0
 

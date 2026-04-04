@@ -166,26 +166,20 @@ class InstanceManagerV2:
         }
 
     def check_server_status(self) -> Dict[str, object]:
-        openclaw_result = self.runner.run_json(
-            [self.bin, "agents", "list", "--bindings", "--json"],
+        gateway_status = self.runner.run_json(
+            [self.bin, "gateway", "status", "--require-rpc", "--json"],
             timeout=self.SERVER_STATUS_TIMEOUT_SECONDS,
         )
-        skipped = bool(openclaw_result.get("skipped")) if isinstance(openclaw_result, dict) else False
-        agent_count = None
-        if not skipped:
-            agent_count = len(self._extract_agent_list(openclaw_result))
+        tg_bot_status = self.get_tg_bot_status()
 
         return {
             "ok": True,
-            "server_status": "ok",
-            "openclaw_status": "running",
-            "check": "openclaw agents list --bindings --json",
+            "check": "openclaw gateway status --require-rpc --json",
             "timeout_seconds": self.SERVER_STATUS_TIMEOUT_SECONDS,
-            "agent_count": agent_count,
             "config_path": str(self.config_path),
             "config_exists": self.config_path.exists(),
-            "command": openclaw_result.get("command") if isinstance(openclaw_result, dict) else None,
-            "skipped": skipped,
+            "gateway_status": self._summarize_gateway_status(gateway_status),
+            "tg_bot_status": tg_bot_status,
         }
 
     def get_tg_bot_status(self) -> Dict[str, object]:
@@ -289,6 +283,55 @@ class InstanceManagerV2:
             ],
         }
 
+    def get_current_model(self) -> Dict[str, object]:
+        config = self._load_config()
+        defaults = config.get("agents", {}).get("defaults", {})
+        configured_default_model = (
+            defaults.get("model", {}).get("primary")
+            if isinstance(defaults.get("model"), dict)
+            else None
+        )
+        agent_overrides = []
+        for agent in config.get("agents", {}).get("list", []):
+            if not isinstance(agent, dict):
+                continue
+            agent_id = agent.get("id")
+            if agent_id == "main":
+                continue
+            model = agent.get("model", {})
+            if isinstance(model, dict) and model.get("primary"):
+                agent_overrides.append(
+                    {
+                        "agent_id": agent_id,
+                        "model": model.get("primary"),
+                    }
+                )
+        return {
+            "ok": True,
+            "current_model": configured_default_model,
+            "configured_default_model": configured_default_model,
+            "agent_overrides": agent_overrides,
+            "config_path": str(self.config_path),
+            "config_exists": self.config_path.exists(),
+        }
+
+    def list_agents(self) -> Dict[str, object]:
+        agents_payload = self.runner.run_json(
+            [self.bin, "agents", "list", "--bindings", "--json"],
+            timeout=self.SERVER_STATUS_TIMEOUT_SECONDS,
+        )
+        agents = [
+            item
+            for item in self._extract_agent_list(agents_payload)
+            if item.get("id") != "main"
+        ]
+        return {
+            "ok": True,
+            "check": "openclaw agents list --bindings --json",
+            "agent_count": len(agents),
+            "agents": agents,
+        }
+
     def resolve_agent_name(self, request: CreateInstanceRequest) -> str:
         return request.template_name
 
@@ -342,6 +385,26 @@ class InstanceManagerV2:
                 if isinstance(nested, list):
                     return nested
         return []
+
+    def _summarize_gateway_status(self, payload: Dict[str, object]) -> Dict[str, object]:
+        if not isinstance(payload, dict):
+            return {}
+        summary: Dict[str, object] = {}
+        for key in (
+            "ok",
+            "degraded",
+            "status",
+            "service",
+            "runtime",
+            "rpc",
+            "url",
+            "configuredUrl",
+            "probe",
+            "authWarning",
+        ):
+            if key in payload:
+                summary[key] = payload[key]
+        return summary or payload
 
     def _add_agent(self, agent_name: str, workspace: Path, model: Optional[str]) -> Dict[str, object]:
         args = [
