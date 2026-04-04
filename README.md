@@ -332,6 +332,79 @@ cd ~/data/agent_manage && python3 scripts/agentctl.py delete-tg-bot \
 }
 ```
 
+## set-model
+
+### 行为说明
+
+- 只允许在以下 4 个模型中切换：
+  `gpt-5.4`、`gpt-5.4-mini`、`gpt-4.1-mini`、`gpt-5.3-codex`
+- 命令内部会把传入模型名映射成 `unipay-fun/<model>`
+- 先执行 `openclaw models set unipay-fun/<model>`
+- 再执行 `openclaw gateway restart`
+- 用于切换当前默认模型并立即让 gateway 生效
+
+### 远程执行
+
+```bash
+cd ~/data/agent_manage && python3 scripts/agentctl.py set-model \
+  --model gpt-5.4
+```
+
+可选模型：
+
+- `gpt-5.4`
+- `gpt-5.4-mini`
+- `gpt-4.1-mini`
+- `gpt-5.3-codex`
+
+可选参数：
+
+- `--openclaw-bin`
+- `--project-dir`
+- `--dry-run`
+
+### Output
+
+成功时 `result` 里主要返回：
+
+- `model_name`
+- `model_ref`
+- `steps`
+
+示例：
+
+```json
+{
+  "result": {
+    "ok": true,
+    "model_name": "gpt-5.4",
+    "model_ref": "unipay-fun/gpt-5.4",
+    "steps": [
+      {
+        "step": "models.set",
+        "result": {
+          "command": "openclaw models set unipay-fun/gpt-5.4",
+          "returncode": 0,
+          "skipped": false
+        }
+      },
+      {
+        "step": "gateway.restart",
+        "result": {
+          "command": "openclaw gateway restart",
+          "returncode": 0,
+          "skipped": false
+        }
+      }
+    ]
+  },
+  "error": null,
+  "typeCode": 1,
+  "message": "OK",
+  "serverTimeStamp": "2026-04-04 09:36:50"
+}
+```
+
 ## 标准返回结构
 
 所有命令统一返回以下结构：

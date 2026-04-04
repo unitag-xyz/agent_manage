@@ -9,7 +9,13 @@ from typing import Dict, List, Optional
 
 from .local import CommandError, LocalRunner
 
-from .models import AddTelegramBotRequest, CreateInstanceRequest, DeleteTelegramBotRequest
+from .models import (
+    AddTelegramBotRequest,
+    CreateInstanceRequest,
+    DeleteTelegramBotRequest,
+    SUPPORTED_MODEL_REFS,
+    SetModelRequest,
+)
 
 
 class InstanceManagerV2:
@@ -266,6 +272,25 @@ class InstanceManagerV2:
             "config_write": write_result,
         }
 
+    def set_model(self, request: SetModelRequest) -> Dict[str, object]:
+        model_ref = SUPPORTED_MODEL_REFS.get(request.model_name)
+        if not model_ref:
+            allowed = ", ".join(sorted(SUPPORTED_MODEL_REFS.keys()))
+            raise ValueError(f"Unsupported model '{request.model_name}'. Allowed: {allowed}")
+
+        set_result = self.runner.run([self.bin, "models", "set", model_ref])
+        restart_result = self.runner.run([self.bin, "gateway", "restart"])
+
+        return {
+            "ok": True,
+            "model_name": request.model_name,
+            "model_ref": model_ref,
+            "steps": [
+                self._command_step("models.set", set_result),
+                self._command_step("gateway.restart", restart_result),
+            ],
+        }
+
     def resolve_agent_name(self, request: CreateInstanceRequest) -> str:
         return request.template_name
 
@@ -432,6 +457,18 @@ class InstanceManagerV2:
                 "stderr": exc.result.stderr,
             }
         return {}
+
+    def _command_step(self, step: str, result) -> Dict[str, object]:
+        payload = {
+            "command": result.command_text,
+            "returncode": result.returncode,
+            "skipped": result.skipped,
+        }
+        if result.stdout.strip():
+            payload["stdout"] = result.stdout
+        if result.stderr.strip():
+            payload["stderr"] = result.stderr
+        return {"step": step, "result": payload}
 
     def _generate_tg_bot_name(self) -> str:
         return f"tgbot-{uuid.uuid4().hex[:8]}"

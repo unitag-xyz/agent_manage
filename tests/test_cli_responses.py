@@ -88,6 +88,34 @@ class CliResponseTest(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertEqual(payload["result"]["deleted_bot_name"], "publicbot")
 
+    def test_agent_manage_set_model_dispatches_correctly(self):
+        with patch("agent_manage.cli.InstanceManagerV2") as manager_cls:
+            manager_cls.return_value.set_model.return_value = {
+                "ok": True,
+                "model_name": "gpt-5.4",
+                "model_ref": "unipay-fun/gpt-5.4",
+            }
+
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                exit_code = agent_manage_main(
+                    ["set-model", "--model", "gpt-5.4"]
+                )
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["result"]["model_ref"], "unipay-fun/gpt-5.4")
+
+    def test_agent_manage_set_model_rejects_unknown_choice(self):
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            exit_code = agent_manage_main(["set-model", "--model", "gpt-4o"])
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(payload["typeCode"], TYPE_CODE_INVALID_ARGUMENT)
+        self.assertEqual(payload["error"]["code"], "INVALID_ARGUMENT")
+
     def test_openclaw_remote_runtime_error_preserves_steps_and_rollback(self):
         with patch("openclaw_remote_Deprecated.cli.OpenClawManager") as manager_cls:
             manager_cls.return_value.create.side_effect = RuntimeError(

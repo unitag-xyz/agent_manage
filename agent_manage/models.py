@@ -2,6 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+SUPPORTED_MODEL_REFS = {
+    "gpt-5.4": "unipay-fun/gpt-5.4",
+    "gpt-5.4-mini": "unipay-fun/gpt-5.4-mini",
+    "gpt-4.1-mini": "unipay-fun/gpt-4.1-mini",
+    "gpt-5.3-codex": "unipay-fun/gpt-5.3-codex",
+}
+
 
 @dataclass
 class CreateInstanceRequest:
@@ -21,3 +28,8 @@ class AddTelegramBotRequest:
 @dataclass
 class DeleteTelegramBotRequest:
     bot_name: str
+
+
+@dataclass
+class SetModelRequest:
+    model_name: str

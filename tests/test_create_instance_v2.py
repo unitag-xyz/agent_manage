@@ -4,10 +4,12 @@ import zipfile
 import json
 from pathlib import Path
 
+from agent_manage.local import CommandResult
 from agent_manage.models import (
     AddTelegramBotRequest,
     CreateInstanceRequest,
     DeleteTelegramBotRequest,
+    SetModelRequest,
 )
 from agent_manage.orchestrator import InstanceManagerV2
 
@@ -26,6 +28,18 @@ class FakeRunner:
 
     def log(self, message):
         return None
+
+    def run(self, args, timeout=None):
+        argv = list(args)
+        self.calls.append(argv)
+        return CommandResult(
+            argv=argv,
+            command_text=" ".join(argv),
+            returncode=0,
+            stdout="",
+            stderr="",
+            skipped=self.dry_run,
+        )
 
 
 class WorkspaceCreatingRunner(FakeRunner):
@@ -729,6 +743,29 @@ class CreateInstanceV2Test(unittest.TestCase):
             manager = InstanceManagerV2(runner, config_path=str(config_path))
             with self.assertRaises(FileNotFoundError):
                 manager.delete_tg_bot(DeleteTelegramBotRequest(bot_name="missingbot"))
+
+    def test_set_model_runs_models_set_then_gateway_restart(self):
+        runner = FakeRunner()
+        manager = InstanceManagerV2(runner)
+
+        result = manager.set_model(SetModelRequest(model_name="gpt-5.4"))
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["model_ref"], "unipay-fun/gpt-5.4")
+        self.assertEqual(
+            runner.calls,
+            [
+                ["openclaw", "models", "set", "unipay-fun/gpt-5.4"],
+                ["openclaw", "gateway", "restart"],
+            ],
+        )
+
+    def test_set_model_rejects_unsupported_model(self):
+        runner = FakeRunner()
+        manager = InstanceManagerV2(runner)
+
+        with self.assertRaises(ValueError):
+            manager.set_model(SetModelRequest(model_name="gpt-4o"))
 
     def _write_archive(self, archive_path: Path, files):
         with zipfile.ZipFile(archive_path, "w") as archive:
