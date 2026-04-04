@@ -340,8 +340,8 @@ cd ~/data/agent_manage && python3 scripts/agentctl.py delete-tg-bot \
   `gpt-5.4`、`gpt-5.4-mini`、`gpt-4.1-mini`、`gpt-5.3-codex`
 - 命令内部会把传入模型名映射成 `unipay-fun/<model>`
 - 先执行 `openclaw models set unipay-fun/<model>`
-- 再执行 `openclaw gateway restart`
-- 用于切换当前默认模型并立即让 gateway 生效
+- 用于切换当前默认模型
+- 按当前观察，模型会在运行中逐步切换，不需要额外重启 gateway
 
 ### 远程执行
 
@@ -384,14 +384,6 @@ cd ~/data/agent_manage && python3 scripts/agentctl.py set-model \
         "step": "models.set",
         "result": {
           "command": "openclaw models set unipay-fun/gpt-5.4",
-          "returncode": 0,
-          "skipped": false
-        }
-      },
-      {
-        "step": "gateway.restart",
-        "result": {
-          "command": "openclaw gateway restart",
           "returncode": 0,
           "skipped": false
         }

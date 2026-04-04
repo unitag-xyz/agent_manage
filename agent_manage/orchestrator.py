@@ -279,7 +279,6 @@ class InstanceManagerV2:
             raise ValueError(f"Unsupported model '{request.model_name}'. Allowed: {allowed}")
 
         set_result = self.runner.run([self.bin, "models", "set", model_ref])
-        restart_result = self.runner.run([self.bin, "gateway", "restart"])
 
         return {
             "ok": True,
@@ -287,7 +286,6 @@ class InstanceManagerV2:
             "model_ref": model_ref,
             "steps": [
                 self._command_step("models.set", set_result),
-                self._command_step("gateway.restart", restart_result),
             ],
         }
 

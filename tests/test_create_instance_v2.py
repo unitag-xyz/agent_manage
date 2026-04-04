@@ -744,7 +744,7 @@ class CreateInstanceV2Test(unittest.TestCase):
             with self.assertRaises(FileNotFoundError):
                 manager.delete_tg_bot(DeleteTelegramBotRequest(bot_name="missingbot"))
 
-    def test_set_model_runs_models_set_then_gateway_restart(self):
+    def test_set_model_runs_models_set_only(self):
         runner = FakeRunner()
         manager = InstanceManagerV2(runner)
 
@@ -756,7 +756,6 @@ class CreateInstanceV2Test(unittest.TestCase):
             runner.calls,
             [
                 ["openclaw", "models", "set", "unipay-fun/gpt-5.4"],
-                ["openclaw", "gateway", "restart"],
             ],
         )
 
