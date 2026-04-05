@@ -9,12 +9,12 @@ MANAGED_MODEL_IDS = [
     "gpt-5.3-codex",
 ]
 
-SUPPORTED_MODEL_REFS = {
-    "gpt-5.4": "unipay-fun/gpt-5.4",
-    "gpt-5.4-mini": "unipay-fun/gpt-5.4-mini",
-    "gpt-4.1-mini": "unipay-fun/gpt-4.1-mini",
-    "gpt-5.3-codex": "unipay-fun/gpt-5.3-codex",
-}
+SUPPORTED_MODEL_REFS = [
+    "unipay-fun/gpt-4.1-mini",
+    "unipay-fun/gpt-5.4",
+    "unipay-fun/gpt-5.4-mini",
+    "unipay-fun/gpt-5.3-codex",
+]
 
 
 @dataclass
@@ -57,4 +57,4 @@ class DeleteWeixinBotRequest:
 
 @dataclass
 class SetModelRequest:
-    model_name: str
+    model_ref: str

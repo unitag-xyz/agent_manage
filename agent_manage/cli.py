@@ -70,7 +70,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     agents_list = subparsers.add_parser("agents-list")
 
     set_model = subparsers.add_parser("set-model")
-    set_model.add_argument("--model", required=True, choices=sorted(SUPPORTED_MODEL_REFS.keys()))
+    set_model.add_argument("--model", required=True, choices=sorted(SUPPORTED_MODEL_REFS))
 
     current_model = subparsers.add_parser("current-model")
 
@@ -158,7 +158,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         if args.command == "set-model":
             result = client.set_model(
                 SetModelRequest(
-                    model_name=args.model,
+                    model_ref=args.model,
                 )
             )
             print_json(build_success_response(result))

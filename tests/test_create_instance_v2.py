@@ -1115,7 +1115,7 @@ class CreateInstanceV2Test(unittest.TestCase):
         runner = FakeRunner()
         manager = InstanceManagerV2(runner)
 
-        result = manager.set_model(SetModelRequest(model_name="gpt-5.4"))
+        result = manager.set_model(SetModelRequest(model_ref="unipay-fun/gpt-5.4"))
 
         self.assertTrue(result["ok"])
         self.assertEqual(result["model_ref"], "unipay-fun/gpt-5.4")
@@ -1131,7 +1131,7 @@ class CreateInstanceV2Test(unittest.TestCase):
         manager = InstanceManagerV2(runner)
 
         with self.assertRaises(ValueError):
-            manager.set_model(SetModelRequest(model_name="gpt-4o"))
+            manager.set_model(SetModelRequest(model_ref="gpt-4o"))
 
     def test_list_agents_excludes_main(self):
         runner = FakeRunner(

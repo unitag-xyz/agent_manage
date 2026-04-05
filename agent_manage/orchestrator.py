@@ -469,17 +469,15 @@ class InstanceManagerV2:
         }
 
     def set_model(self, request: SetModelRequest) -> Dict[str, object]:
-        model_ref = SUPPORTED_MODEL_REFS.get(request.model_name)
-        if not model_ref:
-            allowed = ", ".join(sorted(SUPPORTED_MODEL_REFS.keys()))
-            raise ValueError(f"Unsupported model '{request.model_name}'. Allowed: {allowed}")
+        if request.model_ref not in SUPPORTED_MODEL_REFS:
+            allowed = ", ".join(sorted(SUPPORTED_MODEL_REFS))
+            raise ValueError(f"Unsupported model '{request.model_ref}'. Allowed: {allowed}")
 
-        set_result = self.runner.run([self.bin, "models", "set", model_ref])
+        set_result = self.runner.run([self.bin, "models", "set", request.model_ref])
 
         return {
             "ok": True,
-            "model_name": request.model_name,
-            "model_ref": model_ref,
+            "model_ref": request.model_ref,
             "steps": [
                 self._command_step("models.set", set_result),
             ],

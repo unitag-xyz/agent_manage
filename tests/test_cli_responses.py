@@ -154,14 +154,13 @@ class CliResponseTest(unittest.TestCase):
         with patch("agent_manage.cli.InstanceManagerV2") as manager_cls:
             manager_cls.return_value.set_model.return_value = {
                 "ok": True,
-                "model_name": "gpt-5.4",
                 "model_ref": "unipay-fun/gpt-5.4",
             }
 
             stdout = io.StringIO()
             with redirect_stdout(stdout):
                 exit_code = agent_manage_main(
-                    ["set-model", "--model", "gpt-5.4"]
+                    ["set-model", "--model", "unipay-fun/gpt-5.4"]
                 )
 
         payload = json.loads(stdout.getvalue())

@@ -681,9 +681,9 @@ cd ~/data/agent_manage && python3 scripts/agentctl.py agents-list
 ### 行为说明
 
 - 只允许在以下 4 个模型中切换：
-  `gpt-5.4`、`gpt-5.4-mini`、`gpt-4.1-mini`、`gpt-5.3-codex`
-- 命令内部会把传入模型名映射成 `unipay-fun/<model>`
-- 先执行 `openclaw models set unipay-fun/<model>`
+  `unipay-fun/gpt-5.4`、`unipay-fun/gpt-5.4-mini`、`unipay-fun/gpt-4.1-mini`、`unipay-fun/gpt-5.3-codex`
+- 传参必须写完整模型引用，不再接受简写
+- 直接执行 `openclaw models set <model_ref>`
 - 用于切换当前默认模型
 - 按当前观察，模型会在运行中逐步切换，不需要额外重启 gateway
 
@@ -691,15 +691,15 @@ cd ~/data/agent_manage && python3 scripts/agentctl.py agents-list
 
 ```bash
 cd ~/data/agent_manage && python3 scripts/agentctl.py set-model \
-  --model gpt-5.4
+  --model unipay-fun/gpt-5.4
 ```
 
 可选模型：
 
-- `gpt-5.4`
-- `gpt-5.4-mini`
-- `gpt-4.1-mini`
-- `gpt-5.3-codex`
+- `unipay-fun/gpt-5.4`
+- `unipay-fun/gpt-5.4-mini`
+- `unipay-fun/gpt-4.1-mini`
+- `unipay-fun/gpt-5.3-codex`
 
 可选参数：
 
@@ -711,7 +711,6 @@ cd ~/data/agent_manage && python3 scripts/agentctl.py set-model \
 
 成功时 `result` 里主要返回：
 
-- `model_name`
 - `model_ref`
 - `steps`
 
@@ -721,7 +720,6 @@ cd ~/data/agent_manage && python3 scripts/agentctl.py set-model \
 {
   "result": {
     "ok": true,
-    "model_name": "gpt-5.4",
     "model_ref": "unipay-fun/gpt-5.4",
     "steps": [
       {
