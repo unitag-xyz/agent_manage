@@ -800,11 +800,22 @@ class InstanceManagerV2:
         return [f"{self.MANAGED_MODEL_PROVIDER}/{model_id}" for model_id in MANAGED_MODEL_IDS]
 
     def _managed_model_definition(self, model_id: str) -> Dict[str, object]:
+        model_specs = {
+            "gpt-4.1-mini": {"contextWindow": 1047576, "maxTokens": 32768},
+            "gpt-5.4": {"contextWindow": 400000, "maxTokens": 128000},
+            "gpt-5.4-mini": {"contextWindow": 400000, "maxTokens": 128000},
+            "gpt-5.3-codex": {"contextWindow": 400000, "maxTokens": 128000},
+        }
+        try:
+            spec = model_specs[model_id]
+        except KeyError as exc:
+            raise ValueError(f"Unsupported managed model definition for '{model_id}'") from exc
+
         return {
             "id": model_id,
             "name": f"{model_id} (Custom Provider)",
-            "contextWindow": 16000,
-            "maxTokens": 4096,
+            "contextWindow": spec["contextWindow"],
+            "maxTokens": spec["maxTokens"],
             "input": ["text"],
             "cost": {
                 "input": 0,
