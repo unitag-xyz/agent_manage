@@ -108,6 +108,16 @@ class CreateInstanceV2Test(unittest.TestCase):
                                     "model": {"primary": "legacy/model"},
                                 }
                             },
+                            "tools": {
+                                "exec": {
+                                    "timeout": 30,
+                                },
+                                "web": {
+                                    "search": {
+                                        "region": "us",
+                                    }
+                                },
+                            },
                             "models": {
                                 "providers": {
                                     "legacy": {
@@ -172,23 +182,30 @@ class CreateInstanceV2Test(unittest.TestCase):
             workspace_config = json.loads((workspace / "openclaw.json").read_text(encoding="utf-8"))
             self.assertEqual(
                 workspace_config["agents"]["defaults"]["model"]["primary"],
-                "unipay-fun/gpt-4.1-mini",
+                "unipay-fun/gpt-5.4-nano",
             )
             self.assertEqual(
                 list(workspace_config["agents"]["defaults"]["models"].keys()),
                 [
-                    "unipay-fun/gpt-4.1-mini",
+                    "unipay-fun/gpt-5.4-nano",
                     "unipay-fun/gpt-5.4",
-                    "unipay-fun/gpt-5.4-mini",
                     "unipay-fun/gpt-5.3-codex",
+                    "unipay-fun/gpt-5.4-mini",
+                    "unipay-fun/gpt-5-nano",
                 ],
             )
             self.assertEqual(
                 workspace_config["models"]["providers"]["unipay-fun"]["apiKey"],
                 "test-key",
             )
+            self.assertEqual(workspace_config["tools"]["profile"], "coding")
+            self.assertEqual(workspace_config["tools"]["exec"]["security"], "full")
+            self.assertEqual(workspace_config["tools"]["exec"]["timeout"], 30)
+            self.assertEqual(workspace_config["tools"]["web"]["search"]["provider"], "tavily")
+            self.assertEqual(workspace_config["tools"]["web"]["search"]["region"], "us")
             self.assertNotIn("legacy", workspace_config["models"]["providers"])
             self.assertEqual(result["template_dir"], str(template_dir.resolve()))
+            self.assertEqual(result["steps"][-1]["step"], "workspace.configure_tools")
 
     def test_create_instance_unzips_to_same_named_template_dir_then_copies_to_workspace(self):
         runner = WorkspaceCreatingRunner(
@@ -268,6 +285,7 @@ class CreateInstanceV2Test(unittest.TestCase):
                 "zip weather\n",
             )
             self.assertIn("template.prepare", result["steps"][0]["step"])
+            self.assertEqual(result["steps"][-1]["step"], "workspace.configure_tools")
 
     def test_create_instance_fails_when_agent_exists(self):
         runner = FakeRunner(
@@ -671,7 +689,7 @@ class CreateInstanceV2Test(unittest.TestCase):
                         "agents": {
                             "defaults": {
                                 "model": {
-                                    "primary": "unipay-fun/gpt-4.1-mini",
+                                    "primary": "unipay-fun/gpt-5.4-nano",
                                 }
                             }
                         },
@@ -716,7 +734,7 @@ class CreateInstanceV2Test(unittest.TestCase):
             self.assertEqual(result["weixin_bot_status"]["weixin_bot_count"], 1)
             self.assertEqual(
                 result["current_model_status"]["current_model"],
-                "unipay-fun/gpt-4.1-mini",
+                "unipay-fun/gpt-5.4-nano",
             )
             self.assertEqual(result["timeout_seconds"], 10)
             self.assertEqual(
@@ -1167,7 +1185,7 @@ class CreateInstanceV2Test(unittest.TestCase):
                         "agents": {
                             "defaults": {
                                 "model": {
-                                    "primary": "unipay-fun/gpt-4.1-mini",
+                                    "primary": "unipay-fun/gpt-5.4-nano",
                                 }
                             },
                             "list": [
@@ -1189,7 +1207,7 @@ class CreateInstanceV2Test(unittest.TestCase):
             result = manager.get_current_model()
 
         self.assertTrue(result["ok"])
-        self.assertEqual(result["current_model"], "unipay-fun/gpt-4.1-mini")
+        self.assertEqual(result["current_model"], "unipay-fun/gpt-5.4-nano")
         self.assertEqual(
             result["agent_overrides"],
             [{"agent_id": "unipay-claw-base", "model": "unipay-fun/gpt-5.4-mini"}],

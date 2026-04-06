@@ -26,8 +26,11 @@ python3 scripts/agentctl.py
 - `--model-key` 为必填，会写入实例 workspace 下 `openclaw.json` 的
   `models.providers.unipay-fun.apiKey`
 - 创建完成后会重写实例里的模型配置，只保留以下模型：
-  `gpt-4.1-mini`、`gpt-5.4`、`gpt-5.4-mini`、`gpt-5.3-codex`
-- 默认主模型固定写成 `unipay-fun/gpt-4.1-mini`
+  `gpt-5.4-nano`、`gpt-5.4`、`gpt-5.3-codex`、`gpt-5.4-mini`、`gpt-5-nano`
+- 默认主模型固定写成 `unipay-fun/gpt-5.4-nano`
+- 创建完成后会额外写入实例 workspace 下 `openclaw.json` 的工具默认配置：
+  `tools.profile = coding`、`tools.exec.security = full`、
+  `tools.web.search.provider = tavily`
 - 如执行失败，默认按当前实现做回滚
 
 前置要求：
@@ -81,7 +84,8 @@ cd ~/data/agent_manage && python3 scripts/agentctl.py create-instance \
       {"step": "template.prepare", "result": {}},
       {"step": "agents.add", "result": {}},
       {"step": "workspace.populate", "result": {}},
-      {"step": "workspace.configure_models", "result": {}}
+      {"step": "workspace.configure_models", "result": {}},
+      {"step": "workspace.configure_tools", "result": {}}
     ]
   },
   "error": null,
@@ -253,8 +257,8 @@ cd ~/data/agent_manage && python3 scripts/agentctl.py check-server-status
     },
     "current_model_status": {
       "ok": true,
-      "current_model": "unipay-fun/gpt-4.1-mini",
-      "configured_default_model": "unipay-fun/gpt-4.1-mini",
+      "current_model": "unipay-fun/gpt-5.4-nano",
+      "configured_default_model": "unipay-fun/gpt-5.4-nano",
       "agent_overrides": [],
       "config_path": "/root/.openclaw/openclaw.json",
       "config_exists": true
@@ -680,8 +684,8 @@ cd ~/data/agent_manage && python3 scripts/agentctl.py agents-list
 
 ### 行为说明
 
-- 只允许在以下 4 个模型中切换：
-  `unipay-fun/gpt-5.4`、`unipay-fun/gpt-5.4-mini`、`unipay-fun/gpt-4.1-mini`、`unipay-fun/gpt-5.3-codex`
+- 只允许在以下 5 个模型中切换：
+  `unipay-fun/gpt-5.4-nano`、`unipay-fun/gpt-5.4`、`unipay-fun/gpt-5.3-codex`、`unipay-fun/gpt-5.4-mini`、`unipay-fun/gpt-5-nano`
 - 传参必须写完整模型引用，不再接受简写
 - 直接执行 `openclaw models set <model_ref>`
 - 用于切换当前默认模型
@@ -696,10 +700,11 @@ cd ~/data/agent_manage && python3 scripts/agentctl.py set-model \
 
 可选模型：
 
+- `unipay-fun/gpt-5.4-nano`
 - `unipay-fun/gpt-5.4`
-- `unipay-fun/gpt-5.4-mini`
-- `unipay-fun/gpt-4.1-mini`
 - `unipay-fun/gpt-5.3-codex`
+- `unipay-fun/gpt-5.4-mini`
+- `unipay-fun/gpt-5-nano`
 
 可选参数：
 
@@ -776,8 +781,8 @@ cd ~/data/agent_manage && python3 scripts/agentctl.py current-model
 {
   "result": {
     "ok": true,
-    "current_model": "unipay-fun/gpt-4.1-mini",
-    "configured_default_model": "unipay-fun/gpt-4.1-mini",
+    "current_model": "unipay-fun/gpt-5.4-nano",
+    "configured_default_model": "unipay-fun/gpt-5.4-nano",
     "agent_overrides": [
       {
         "agent_id": "unipay-claw-base",

@@ -94,6 +94,9 @@ class InstanceManagerV2:
             )
             steps.append({"step": "workspace.configure_models", "result": models_result})
 
+            tools_result = self._configure_workspace_tools(workspace=workspace)
+            steps.append({"step": "workspace.configure_tools", "result": tools_result})
+
             return {
                 "ok": True,
                 "template_name": request.template_name,
@@ -723,6 +726,43 @@ class InstanceManagerV2:
             "managed_models": self._managed_model_refs(),
         }
 
+    def _configure_workspace_tools(self, workspace: Path) -> Dict[str, object]:
+        config_path = workspace / "openclaw.json"
+        if self.runner.dry_run:
+            return {
+                "skipped": True,
+                "config_path": str(config_path),
+                "tools_profile": "coding",
+                "exec_security": "full",
+                "web_search_provider": "tavily",
+            }
+
+        if config_path.exists():
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            if not isinstance(config, dict):
+                raise ValueError(f"Workspace config must be a JSON object: {config_path}")
+        else:
+            config = {}
+
+        tools = config.setdefault("tools", {})
+        tools["profile"] = "coding"
+        exec_config = tools.setdefault("exec", {})
+        exec_config["security"] = "full"
+        web = tools.setdefault("web", {})
+        search = web.setdefault("search", {})
+        search["provider"] = "tavily"
+
+        config_path.write_text(
+            json.dumps(config, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        return {
+            "config_path": str(config_path),
+            "tools_profile": "coding",
+            "exec_security": "full",
+            "web_search_provider": "tavily",
+        }
+
     def _resolve_unpacked_root(self, extract_dir: Path) -> Path:
         candidates = [item for item in extract_dir.iterdir() if item.name != "__MACOSX"]
         directories = [item for item in candidates if item.is_dir()]
@@ -801,10 +841,11 @@ class InstanceManagerV2:
 
     def _managed_model_definition(self, model_id: str) -> Dict[str, object]:
         model_specs = {
-            "gpt-4.1-mini": {"contextWindow": 1047576, "maxTokens": 32768},
-            "gpt-5.4": {"contextWindow": 400000, "maxTokens": 128000},
-            "gpt-5.4-mini": {"contextWindow": 400000, "maxTokens": 128000},
+            "gpt-5.4-nano": {"contextWindow": 400000, "maxTokens": 128000},
+            "gpt-5.4": {"contextWindow": 1050000, "maxTokens": 128000},
             "gpt-5.3-codex": {"contextWindow": 400000, "maxTokens": 128000},
+            "gpt-5.4-mini": {"contextWindow": 400000, "maxTokens": 128000},
+            "gpt-5-nano": {"contextWindow": 400000, "maxTokens": 128000},
         }
         try:
             spec = model_specs[model_id]

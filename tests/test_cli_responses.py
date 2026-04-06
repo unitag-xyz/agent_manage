@@ -198,7 +198,7 @@ class CliResponseTest(unittest.TestCase):
         with patch("agent_manage.cli.InstanceManagerV2") as manager_cls:
             manager_cls.return_value.get_current_model.return_value = {
                 "ok": True,
-                "current_model": "unipay-fun/gpt-4.1-mini",
+                "current_model": "unipay-fun/gpt-5.4-nano",
             }
 
             stdout = io.StringIO()
@@ -207,7 +207,7 @@ class CliResponseTest(unittest.TestCase):
 
         payload = json.loads(stdout.getvalue())
         self.assertEqual(exit_code, 0)
-        self.assertEqual(payload["result"]["current_model"], "unipay-fun/gpt-4.1-mini")
+        self.assertEqual(payload["result"]["current_model"], "unipay-fun/gpt-5.4-nano")
 
     def test_openclaw_remote_runtime_error_preserves_steps_and_rollback(self):
         with patch("openclaw_remote_Deprecated.cli.OpenClawManager") as manager_cls:

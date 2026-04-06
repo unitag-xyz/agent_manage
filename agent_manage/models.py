@@ -3,17 +3,19 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 MANAGED_MODEL_IDS = [
-    "gpt-4.1-mini",
+    "gpt-5.4-nano",
     "gpt-5.4",
-    "gpt-5.4-mini",
     "gpt-5.3-codex",
+    "gpt-5.4-mini",
+    "gpt-5-nano",
 ]
 
 SUPPORTED_MODEL_REFS = [
-    "unipay-fun/gpt-4.1-mini",
+    "unipay-fun/gpt-5.4-nano",
     "unipay-fun/gpt-5.4",
-    "unipay-fun/gpt-5.4-mini",
     "unipay-fun/gpt-5.3-codex",
+    "unipay-fun/gpt-5.4-mini",
+    "unipay-fun/gpt-5-nano",
 ]
 
 
