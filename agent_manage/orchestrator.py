@@ -58,8 +58,8 @@ class InstanceManagerV2:
         template_dir = self.resolve_template_dir(request)
 
         self._ensure_sources_ready(archive_path=archive_path)
-        self._ensure_workspace_available(workspace)
-        self._ensure_agent_available(agent_name)
+        workspace_has_content = self._workspace_has_content(workspace)
+        agent_exists = self._agent_exists(agent_name)
 
         created_agent = False
         started_template_prepare = False
@@ -73,29 +73,44 @@ class InstanceManagerV2:
             )
             steps.append({"step": "template.prepare", "result": template_result})
 
-            agent_result = self._add_agent(
-                agent_name=agent_name,
-                workspace=workspace,
-                model=request.model,
-            )
-            created_agent = True
+            if agent_exists:
+                self.runner.log(f"agent exists, skip add: {agent_name}")
+                agent_result = {
+                    "skipped": True,
+                    "reason": "agent_exists",
+                    "agent_name": agent_name,
+                }
+            else:
+                agent_result = self._add_agent(
+                    agent_name=agent_name,
+                    workspace=workspace,
+                    model=request.model,
+                )
+                created_agent = True
             steps.append({"step": "agents.add", "result": agent_result})
 
-            workspace_result = self._populate_workspace(
-                template_dir=template_dir,
-                workspace=workspace,
-            )
-            created_workspace = not workspace_result.get("skipped", False)
+            if workspace_has_content:
+                self.runner.log(f"workspace not empty, skip populate: {workspace}")
+                workspace_result = {
+                    "skipped": True,
+                    "reason": "workspace_not_empty",
+                    "workspace": str(workspace),
+                }
+            else:
+                workspace_result = self._populate_workspace(
+                    template_dir=template_dir,
+                    workspace=workspace,
+                )
+                created_workspace = not workspace_result.get("skipped", False)
             steps.append({"step": "workspace.populate", "result": workspace_result})
 
-            models_result = self._configure_workspace_models(
-                workspace=workspace,
+            models_result = self._configure_config_models(
                 model_key=request.model_key,
             )
-            steps.append({"step": "workspace.configure_models", "result": models_result})
+            steps.append({"step": "config.configure_models", "result": models_result})
 
-            tools_result = self._configure_workspace_tools(workspace=workspace)
-            steps.append({"step": "workspace.configure_tools", "result": tools_result})
+            tools_result = self._configure_config_tools()
+            steps.append({"step": "config.configure_tools", "result": tools_result})
 
             return {
                 "ok": True,
@@ -551,29 +566,25 @@ class InstanceManagerV2:
         if not archive_path.is_file():
             raise FileNotFoundError(f"Template archive not found: {archive_path}")
 
-    def _ensure_workspace_available(self, workspace: Path) -> None:
+    def _workspace_has_content(self, workspace: Path) -> bool:
         if not workspace.exists():
-            return
+            return False
         if not workspace.is_dir():
             raise NotADirectoryError(f"Workspace path is not a directory: {workspace}")
-        if any(workspace.iterdir()):
-            raise FileExistsError(f"Workspace already exists and is not empty: {workspace}")
+        return any(workspace.iterdir())
 
-    def _ensure_agent_available(self, agent_name: str) -> None:
+    def _agent_exists(self, agent_name: str) -> bool:
         if self.runner.dry_run:
-            return
+            return False
         agents = self.runner.run_json([self.bin, "agents", "list", "--bindings", "--json"])
         for item in self._extract_agent_list(agents):
             if item.get("id") == agent_name:
-                raise FileExistsError(f"Agent already exists: {agent_name}")
+                return True
+        return False
 
     def _ensure_agent_exists(self, agent_name: str) -> None:
-        if self.runner.dry_run:
+        if self.runner.dry_run or self._agent_exists(agent_name):
             return
-        agents = self.runner.run_json([self.bin, "agents", "list", "--bindings", "--json"])
-        for item in self._extract_agent_list(agents):
-            if item.get("id") == agent_name:
-                return
         raise FileNotFoundError(f"Agent not found: {agent_name}")
 
     def _extract_agent_list(self, payload: Dict[str, object]) -> List[Dict[str, object]]:
@@ -682,8 +693,8 @@ class InstanceManagerV2:
             "copied_from_template_dir": copied,
         }
 
-    def _configure_workspace_models(self, workspace: Path, model_key: str) -> Dict[str, object]:
-        config_path = workspace / "openclaw.json"
+    def _configure_config_models(self, model_key: str) -> Dict[str, object]:
+        config_path = self.config_path
         if self.runner.dry_run:
             return {
                 "skipped": True,
@@ -692,12 +703,9 @@ class InstanceManagerV2:
                 "managed_models": self._managed_model_refs(),
             }
 
-        if config_path.exists():
-            config = json.loads(config_path.read_text(encoding="utf-8"))
-            if not isinstance(config, dict):
-                raise ValueError(f"Workspace config must be a JSON object: {config_path}")
-        else:
-            config = {}
+        config = self._load_config()
+        if not isinstance(config, dict):
+            raise ValueError(f"Config must be a JSON object: {config_path}")
 
         agents = config.setdefault("agents", {})
         defaults = agents.setdefault("defaults", {})
@@ -716,9 +724,18 @@ class InstanceManagerV2:
             },
         }
 
-        config_path.write_text(
-            json.dumps(config, indent=2, ensure_ascii=False) + "\n",
-            encoding="utf-8",
+        self._write_config(
+            config,
+            note="configure models for create_instance",
+            changed_paths=[
+                "agents.defaults.models",
+                "agents.defaults.model",
+                "models",
+            ],
+            extra={
+                "primary_model": self._managed_primary_model_ref(),
+                "managed_models": self._managed_model_refs(),
+            },
         )
         return {
             "config_path": str(config_path),
@@ -726,41 +743,52 @@ class InstanceManagerV2:
             "managed_models": self._managed_model_refs(),
         }
 
-    def _configure_workspace_tools(self, workspace: Path) -> Dict[str, object]:
-        config_path = workspace / "openclaw.json"
+    def _configure_config_tools(self) -> Dict[str, object]:
+        config_path = self.config_path
         if self.runner.dry_run:
             return {
                 "skipped": True,
                 "config_path": str(config_path),
                 "tools_profile": "coding",
                 "exec_security": "full",
-                "web_search_provider": "tavily",
+                "web_search_enabled": False,
+                "web_fetch_enabled": True,
             }
 
-        if config_path.exists():
-            config = json.loads(config_path.read_text(encoding="utf-8"))
-            if not isinstance(config, dict):
-                raise ValueError(f"Workspace config must be a JSON object: {config_path}")
-        else:
-            config = {}
+        config = self._load_config()
+        if not isinstance(config, dict):
+            raise ValueError(f"Config must be a JSON object: {config_path}")
 
         tools = config.setdefault("tools", {})
         tools["profile"] = "coding"
         exec_config = tools.setdefault("exec", {})
         exec_config["security"] = "full"
         web = tools.setdefault("web", {})
-        search = web.setdefault("search", {})
-        search["provider"] = "tavily"
+        web["search"] = {"enabled": False}
+        web["fetch"] = {"enabled": True}
 
-        config_path.write_text(
-            json.dumps(config, indent=2, ensure_ascii=False) + "\n",
-            encoding="utf-8",
+        self._write_config(
+            config,
+            note="configure tools for create_instance",
+            changed_paths=[
+                "tools.profile",
+                "tools.exec.security",
+                "tools.web.search",
+                "tools.web.fetch",
+            ],
+            extra={
+                "tools_profile": "coding",
+                "exec_security": "full",
+                "web_search_enabled": False,
+                "web_fetch_enabled": True,
+            },
         )
         return {
             "config_path": str(config_path),
             "tools_profile": "coding",
             "exec_security": "full",
-            "web_search_provider": "tavily",
+            "web_search_enabled": False,
+            "web_fetch_enabled": True,
         }
 
     def _resolve_unpacked_root(self, extract_dir: Path) -> Path:

@@ -20,6 +20,7 @@ class FakeRunner:
     def __init__(self, responses=None, dry_run=False):
         self.responses = responses or {}
         self.calls = []
+        self.logs = []
         self.dry_run = dry_run
         self.openclaw_bin = "openclaw"
 
@@ -29,6 +30,7 @@ class FakeRunner:
         return self.responses.get(key, {"ok": True})
 
     def log(self, message):
+        self.logs.append(message)
         return None
 
     def run(self, args, timeout=None, stream_output=False):
@@ -67,6 +69,10 @@ class FailingPopulateManager(InstanceManagerV2):
 
 
 class CreateInstanceV2Test(unittest.TestCase):
+    def _write_host_config(self, config_path: Path, payload=None):
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(json.dumps(payload or {}, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
     def test_create_instance_populates_workspace_and_overlays_template(self):
         runner = FakeRunner(
             responses={
@@ -92,6 +98,7 @@ class CreateInstanceV2Test(unittest.TestCase):
             template_dir = tmp_path / "template" / "base"
             archive_path = tmp_path / "template" / "base.zip"
             workspace = workspace_root / "base"
+            config_path = tmp_path / ".openclaw" / "openclaw.json"
             archive_path.parent.mkdir(parents=True, exist_ok=True)
 
             self._write_archive(
@@ -100,34 +107,35 @@ class CreateInstanceV2Test(unittest.TestCase):
                     "base/app/main.py": "print('hello')\n",
                     "base/SOUL.md": "old soul\n",
                     "base/skills/weather/SKILL.md": "old weather\n",
-                    "base/openclaw.json": json.dumps(
-                        {
-                            "agents": {
-                                "defaults": {
-                                    "models": {"legacy/model": {}},
-                                    "model": {"primary": "legacy/model"},
-                                }
-                            },
-                            "tools": {
-                                "exec": {
-                                    "timeout": 30,
-                                },
-                                "web": {
-                                    "search": {
-                                        "region": "us",
-                                    }
-                                },
-                            },
-                            "models": {
-                                "providers": {
-                                    "legacy": {
-                                        "apiKey": "old-key",
-                                    }
-                                }
-                            },
+                },
+            )
+            self._write_host_config(
+                config_path,
+                {
+                    "agents": {
+                        "defaults": {
+                            "workspace": "/home/ubuntu/.openclaw/workspace",
+                            "models": {"vllm/gpt-4.1-mini": {}},
+                            "model": {"primary": "vllm/gpt-4.1-mini"},
                         }
-                    )
-                    + "\n",
+                    },
+                    "tools": {
+                        "exec": {
+                            "timeout": 30,
+                        },
+                        "web": {
+                            "search": {
+                                "region": "us",
+                            }
+                        },
+                    },
+                    "models": {
+                        "providers": {
+                            "legacy": {
+                                "apiKey": "old-key",
+                            }
+                        }
+                    },
                 },
             )
 
@@ -159,7 +167,11 @@ class CreateInstanceV2Test(unittest.TestCase):
                 )
             )
 
-            manager = InstanceManagerV2(runner, template_root=str(tmp_path / "template"))
+            manager = InstanceManagerV2(
+                runner,
+                template_root=str(tmp_path / "template"),
+                config_path=str(config_path),
+            )
             result = manager.create_instance(
                 CreateInstanceRequest(
                     template_name="base",
@@ -179,13 +191,17 @@ class CreateInstanceV2Test(unittest.TestCase):
                 (workspace / "skills" / "weather" / "SKILL.md").read_text(encoding="utf-8"),
                 "old weather\n",
             )
-            workspace_config = json.loads((workspace / "openclaw.json").read_text(encoding="utf-8"))
+            saved_config = json.loads(config_path.read_text(encoding="utf-8"))
             self.assertEqual(
-                workspace_config["agents"]["defaults"]["model"]["primary"],
+                saved_config["agents"]["defaults"]["model"]["primary"],
                 "unipay-fun/gpt-5.4-nano",
             )
             self.assertEqual(
-                list(workspace_config["agents"]["defaults"]["models"].keys()),
+                saved_config["agents"]["defaults"]["workspace"],
+                "/home/ubuntu/.openclaw/workspace",
+            )
+            self.assertEqual(
+                list(saved_config["agents"]["defaults"]["models"].keys()),
                 [
                     "unipay-fun/gpt-5.4-nano",
                     "unipay-fun/gpt-5.4",
@@ -194,18 +210,19 @@ class CreateInstanceV2Test(unittest.TestCase):
                     "unipay-fun/gpt-5-nano",
                 ],
             )
+            self.assertNotIn("vllm/gpt-4.1-mini", saved_config["agents"]["defaults"]["models"])
             self.assertEqual(
-                workspace_config["models"]["providers"]["unipay-fun"]["apiKey"],
+                saved_config["models"]["providers"]["unipay-fun"]["apiKey"],
                 "test-key",
             )
-            self.assertEqual(workspace_config["tools"]["profile"], "coding")
-            self.assertEqual(workspace_config["tools"]["exec"]["security"], "full")
-            self.assertEqual(workspace_config["tools"]["exec"]["timeout"], 30)
-            self.assertEqual(workspace_config["tools"]["web"]["search"]["provider"], "tavily")
-            self.assertEqual(workspace_config["tools"]["web"]["search"]["region"], "us")
-            self.assertNotIn("legacy", workspace_config["models"]["providers"])
+            self.assertEqual(saved_config["tools"]["profile"], "coding")
+            self.assertEqual(saved_config["tools"]["exec"]["security"], "full")
+            self.assertEqual(saved_config["tools"]["exec"]["timeout"], 30)
+            self.assertEqual(saved_config["tools"]["web"]["search"], {"enabled": False})
+            self.assertEqual(saved_config["tools"]["web"]["fetch"], {"enabled": True})
+            self.assertNotIn("legacy", saved_config["models"]["providers"])
             self.assertEqual(result["template_dir"], str(template_dir.resolve()))
-            self.assertEqual(result["steps"][-1]["step"], "workspace.configure_tools")
+            self.assertEqual(result["steps"][-1]["step"], "config.configure_tools")
 
     def test_create_instance_unzips_to_same_named_template_dir_then_copies_to_workspace(self):
         runner = WorkspaceCreatingRunner(
@@ -229,6 +246,7 @@ class CreateInstanceV2Test(unittest.TestCase):
             workspace_root = tmp_path / "data"
             workspace = workspace_root / "unipay-claw-base"
             archive_path = tmp_path / "template" / "unipay-claw-base.zip"
+            config_path = tmp_path / ".openclaw" / "openclaw.json"
             archive_path.parent.mkdir(parents=True)
             self._write_archive(
                 archive_path,
@@ -238,6 +256,7 @@ class CreateInstanceV2Test(unittest.TestCase):
                     "skills/weather/SKILL.md": "zip weather\n",
                 },
             )
+            self._write_host_config(config_path)
 
             runner.responses[
                 (
@@ -263,7 +282,11 @@ class CreateInstanceV2Test(unittest.TestCase):
                 )
             )
 
-            manager = InstanceManagerV2(runner, template_root=str(tmp_path / "template"))
+            manager = InstanceManagerV2(
+                runner,
+                template_root=str(tmp_path / "template"),
+                config_path=str(config_path),
+            )
             result = manager.create_instance(
                 CreateInstanceRequest(
                     template_name="unipay-claw-base",
@@ -285,9 +308,9 @@ class CreateInstanceV2Test(unittest.TestCase):
                 "zip weather\n",
             )
             self.assertIn("template.prepare", result["steps"][0]["step"])
-            self.assertEqual(result["steps"][-1]["step"], "workspace.configure_tools")
+            self.assertEqual(result["steps"][-1]["step"], "config.configure_tools")
 
-    def test_create_instance_fails_when_agent_exists(self):
+    def test_create_instance_skips_add_when_agent_exists(self):
         runner = FakeRunner(
             responses={
                 ("openclaw", "agents", "list", "--bindings", "--json"): {
@@ -300,18 +323,36 @@ class CreateInstanceV2Test(unittest.TestCase):
             tmp_path = Path(tmpdir)
             archive_path = tmp_path / "template" / "base.zip"
             template_dir = tmp_path / "template" / "base"
+            config_path = tmp_path / ".openclaw" / "openclaw.json"
             archive_path.parent.mkdir(parents=True)
             self._write_archive(archive_path, {"main.py": "print('x')\n"})
+            self._write_host_config(config_path)
 
-            manager = InstanceManagerV2(runner, template_root=str(tmp_path / "template"))
-            with self.assertRaises(FileExistsError):
-                manager.create_instance(
-                    CreateInstanceRequest(
-                        template_name="base",
-                        model_key="test-key",
-                        workspace_root=str(tmp_path / "data"),
-                    )
+            manager = InstanceManagerV2(
+                runner,
+                template_root=str(tmp_path / "template"),
+                config_path=str(config_path),
+            )
+            result = manager.create_instance(
+                CreateInstanceRequest(
+                    template_name="base",
+                    model_key="test-key",
+                    workspace_root=str(tmp_path / "data"),
                 )
+            )
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["steps"][1]["step"], "agents.add")
+            self.assertEqual(
+                result["steps"][1]["result"],
+                {
+                    "skipped": True,
+                    "reason": "agent_exists",
+                    "agent_name": "base",
+                },
+            )
+            self.assertEqual(runner.calls, [["openclaw", "agents", "list", "--bindings", "--json"]])
+            self.assertIn("agent exists, skip add: base", runner.logs)
 
     def test_create_instance_reuses_precreated_empty_workspace_directory(self):
         runner = WorkspaceCreatingRunner(
@@ -334,10 +375,12 @@ class CreateInstanceV2Test(unittest.TestCase):
             tmp_path = Path(tmpdir)
             workspace_root = tmp_path / "data"
             workspace = workspace_root / "base"
+            config_path = tmp_path / ".openclaw" / "openclaw.json"
             workspace.mkdir(parents=True)
             archive_path = tmp_path / "template" / "base.zip"
             archive_path.parent.mkdir(parents=True)
             self._write_archive(archive_path, {"main.py": "print('x')\n"})
+            self._write_host_config(config_path)
 
             runner.responses[
                 (
@@ -363,7 +406,11 @@ class CreateInstanceV2Test(unittest.TestCase):
                 )
             )
 
-            manager = InstanceManagerV2(runner, template_root=str(tmp_path / "template"))
+            manager = InstanceManagerV2(
+                runner,
+                template_root=str(tmp_path / "template"),
+                config_path=str(config_path),
+            )
             result = manager.create_instance(
                 CreateInstanceRequest(
                     template_name="base",
@@ -375,10 +422,20 @@ class CreateInstanceV2Test(unittest.TestCase):
             self.assertTrue(result["ok"])
             self.assertEqual((workspace / "main.py").read_text(encoding="utf-8"), "print('x')\n")
 
-    def test_create_instance_rejects_non_empty_workspace_directory(self):
+    def test_create_instance_skips_populate_when_workspace_is_non_empty(self):
         runner = FakeRunner(
             responses={
                 ("openclaw", "agents", "list", "--bindings", "--json"): {"agents": []},
+                (
+                    "openclaw",
+                    "agents",
+                    "add",
+                    "base",
+                    "--workspace",
+                    "__WORKSPACE__",
+                    "--non-interactive",
+                    "--json",
+                ): {"ok": True},
             }
         )
 
@@ -386,21 +443,65 @@ class CreateInstanceV2Test(unittest.TestCase):
             tmp_path = Path(tmpdir)
             workspace_root = tmp_path / "data"
             workspace = workspace_root / "base"
+            config_path = tmp_path / ".openclaw" / "openclaw.json"
             workspace.mkdir(parents=True)
             (workspace / "old.txt").write_text("keep\n", encoding="utf-8")
             archive_path = tmp_path / "template" / "base.zip"
             archive_path.parent.mkdir(parents=True)
             self._write_archive(archive_path, {"main.py": "print('x')\n"})
+            self._write_host_config(config_path)
 
-            manager = InstanceManagerV2(runner, template_root=str(tmp_path / "template"))
-            with self.assertRaises(FileExistsError):
-                manager.create_instance(
-                    CreateInstanceRequest(
-                        template_name="base",
-                        model_key="test-key",
-                        workspace_root=str(workspace_root),
-                    )
+            runner.responses[
+                (
+                    "openclaw",
+                    "agents",
+                    "add",
+                    "base",
+                    "--workspace",
+                    str(workspace),
+                    "--non-interactive",
+                    "--json",
                 )
+            ] = runner.responses.pop(
+                (
+                    "openclaw",
+                    "agents",
+                    "add",
+                    "base",
+                    "--workspace",
+                    "__WORKSPACE__",
+                    "--non-interactive",
+                    "--json",
+                )
+            )
+
+            manager = InstanceManagerV2(
+                runner,
+                template_root=str(tmp_path / "template"),
+                config_path=str(config_path),
+            )
+            result = manager.create_instance(
+                CreateInstanceRequest(
+                    template_name="base",
+                    model_key="test-key",
+                    workspace_root=str(workspace_root),
+                )
+            )
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["steps"][2]["step"], "workspace.populate")
+            self.assertEqual(
+                result["steps"][2]["result"],
+                {
+                    "skipped": True,
+                    "reason": "workspace_not_empty",
+                    "workspace": str(workspace.resolve()),
+                },
+            )
+            self.assertEqual((workspace / "old.txt").read_text(encoding="utf-8"), "keep\n")
+            saved_config = json.loads(config_path.read_text(encoding="utf-8"))
+            self.assertEqual(saved_config["agents"]["defaults"]["model"]["primary"], "unipay-fun/gpt-5.4-nano")
+            self.assertIn(f"workspace not empty, skip populate: {workspace.resolve()}", runner.logs)
 
     def test_prepare_failure_rolls_back_partial_template_dir(self):
         runner = FakeRunner(responses={("openclaw", "agents", "list", "--bindings", "--json"): {"agents": []}})

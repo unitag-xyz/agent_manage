@@ -23,14 +23,17 @@ python3 scripts/agentctl.py
 - workspace 默认创建在 `~/data/{templateName}`，也可通过参数覆盖
 - 从 `~/template/{templateName}.zip` 解压到 `~/template/{templateName}/`
 - 再把 `~/template/{templateName}/` 整体复制到 workspace
-- `--model-key` 为必填，会写入实例 workspace 下 `openclaw.json` 的
+- 如果同名 agent 已存在，会跳过 `openclaw agents add`，继续后续步骤
+- 如果 workspace 已存在且非空，会跳过 `workspace.populate`，继续后续步骤
+- `--model-key` 为必填，会写入 `~/.openclaw/openclaw.json` 的
   `models.providers.unipay-fun.apiKey`
-- 创建完成后会重写实例里的模型配置，只保留以下模型：
+- 创建完成后会重写 `~/.openclaw/openclaw.json` 里的默认模型配置，只保留以下模型：
   `gpt-5.4-nano`、`gpt-5.4`、`gpt-5.3-codex`、`gpt-5.4-mini`、`gpt-5-nano`
 - 默认主模型固定写成 `unipay-fun/gpt-5.4-nano`
-- 创建完成后会额外写入实例 workspace 下 `openclaw.json` 的工具默认配置：
+- 如果模板原先带有 `vllm` 等旧 provider，会在初始化时被覆盖掉，只保留 `unipay-fun`
+- 创建完成后会额外写入 `~/.openclaw/openclaw.json` 的工具默认配置：
   `tools.profile = coding`、`tools.exec.security = full`、
-  `tools.web.search.provider = tavily`
+  `tools.web.search.enabled = false`、`tools.web.fetch.enabled = true`
 - 如执行失败，默认按当前实现做回滚
 
 前置要求：
@@ -84,8 +87,8 @@ cd ~/data/agent_manage && python3 scripts/agentctl.py create-instance \
       {"step": "template.prepare", "result": {}},
       {"step": "agents.add", "result": {}},
       {"step": "workspace.populate", "result": {}},
-      {"step": "workspace.configure_models", "result": {}},
-      {"step": "workspace.configure_tools", "result": {}}
+      {"step": "config.configure_models", "result": {}},
+      {"step": "config.configure_tools", "result": {}}
     ]
   },
   "error": null,
