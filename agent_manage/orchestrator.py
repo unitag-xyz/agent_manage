@@ -580,8 +580,8 @@ class InstanceManagerV2:
     def _agent_exists(self, agent_name: str) -> bool:
         if self.runner.dry_run:
             return False
-        agents = self.runner.run_json([self.bin, "agents", "list", "--bindings", "--json"])
-        for item in self._extract_agent_list(agents):
+        config = self._load_config()
+        for item in self._extract_agent_list(config):
             if item.get("id") == agent_name:
                 return True
         return False

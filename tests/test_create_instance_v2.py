@@ -76,7 +76,6 @@ class CreateInstanceV2Test(unittest.TestCase):
     def test_create_instance_populates_workspace_and_overlays_template(self):
         runner = FakeRunner(
             responses={
-                ("openclaw", "agents", "list", "--bindings", "--json"): {"agents": []},
                 (
                     "openclaw",
                     "agents",
@@ -113,6 +112,7 @@ class CreateInstanceV2Test(unittest.TestCase):
                 config_path,
                 {
                     "agents": {
+                        "list": [],
                         "defaults": {
                             "workspace": "/home/ubuntu/.openclaw/workspace",
                             "models": {"vllm/gpt-4.1-mini": {}},
@@ -182,8 +182,7 @@ class CreateInstanceV2Test(unittest.TestCase):
             )
 
             self.assertTrue(result["ok"])
-            self.assertEqual(runner.calls[0][:4], ["openclaw", "agents", "list", "--bindings"])
-            self.assertEqual(runner.calls[1][:4], ["openclaw", "agents", "add", "base"])
+            self.assertEqual(runner.calls[0][:4], ["openclaw", "agents", "add", "base"])
             self.assertEqual((workspace / "app" / "main.py").read_text(encoding="utf-8"), "print('hello')\n")
             self.assertEqual((workspace / "SOUL.md").read_text(encoding="utf-8"), "old soul\n")
             self.assertEqual((template_dir / "SOUL.md").read_text(encoding="utf-8"), "old soul\n")
@@ -311,13 +310,7 @@ class CreateInstanceV2Test(unittest.TestCase):
             self.assertEqual(result["steps"][-1]["step"], "config.configure_tools")
 
     def test_create_instance_skips_add_when_agent_exists(self):
-        runner = FakeRunner(
-            responses={
-                ("openclaw", "agents", "list", "--bindings", "--json"): {
-                    "agents": [{"id": "base"}]
-                }
-            }
-        )
+        runner = FakeRunner()
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
@@ -326,7 +319,7 @@ class CreateInstanceV2Test(unittest.TestCase):
             config_path = tmp_path / ".openclaw" / "openclaw.json"
             archive_path.parent.mkdir(parents=True)
             self._write_archive(archive_path, {"main.py": "print('x')\n"})
-            self._write_host_config(config_path)
+            self._write_host_config(config_path, {"agents": {"list": [{"id": "base"}]}})
 
             manager = InstanceManagerV2(
                 runner,
@@ -351,7 +344,7 @@ class CreateInstanceV2Test(unittest.TestCase):
                     "agent_name": "base",
                 },
             )
-            self.assertEqual(runner.calls, [["openclaw", "agents", "list", "--bindings", "--json"]])
+            self.assertEqual(runner.calls, [])
             self.assertIn("agent exists, skip add: base", runner.logs)
 
     def test_create_instance_reuses_precreated_empty_workspace_directory(self):

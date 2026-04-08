@@ -23,6 +23,7 @@ python3 scripts/agentctl.py
 - workspace 默认创建在 `~/data/{templateName}`，也可通过参数覆盖
 - 从 `~/template/{templateName}.zip` 解压到 `~/template/{templateName}/`
 - 再把 `~/template/{templateName}/` 整体复制到 workspace
+- 直接从 `openclaw.json` 的 `agents.list` 检查同名 agent 是否已存在
 - 如果同名 agent 已存在，会跳过 `openclaw agents add`，继续后续步骤
 - 如果 workspace 已存在且非空，会跳过 `workspace.populate`，继续后续步骤
 - `--model-key` 为必填，会写入 `~/.openclaw/openclaw.json` 的
