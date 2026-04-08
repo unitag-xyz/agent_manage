@@ -143,7 +143,7 @@ class InstanceManagerV2:
             ) from exc
 
     def add_tg_bot(self, request: AddTelegramBotRequest) -> Dict[str, object]:
-        self._ensure_agent_exists(request.agent_name)
+        self._ensure_agent_exists_in_config(request.agent_name)
 
         account_id = request.bot_name or self._generate_tg_bot_name()
         config = self._load_config()
@@ -192,17 +192,22 @@ class InstanceManagerV2:
                 "removed_existing_bindings": removed,
             },
         )
+        restart_result = self.runner.run(
+            [self.bin, "gateway", "restart"],
+            stream_output=True,
+        )
         return {
             "ok": True,
             "agent_name": request.agent_name,
             "bot_name": account_id,
             "config_write": write_result,
+            "gateway_restart": self._command_step("gateway.restart", restart_result),
         }
 
     def add_weixin_bot(self, request: AddWeixinBotRequest) -> Dict[str, object]:
-        self._ensure_agent_exists(request.agent_name)
+        self._ensure_agent_exists_in_config(request.agent_name)
         normalized_account_id = self._normalize_weixin_account_id(request.ilink_bot_id)
-        plugin_prepare = self._ensure_weixin_plugin_ready()
+        plugin_prepare = self._prepare_weixin_plugin_config()
         stale_accounts = self._clear_stale_weixin_accounts_for_user(
             current_account_id=normalized_account_id,
             user_id=request.ilink_user_id,
@@ -266,14 +271,13 @@ class InstanceManagerV2:
             },
         )
 
-        if plugin_prepare.get("restart_required"):
-            restart_result = self.runner.run(
-                [self.bin, "gateway", "restart"],
-                stream_output=True,
-            )
-            plugin_prepare.setdefault("steps", []).append(
-                self._command_step("gateway.restart", restart_result)
-            )
+        restart_result = self.runner.run(
+            [self.bin, "gateway", "restart"],
+            stream_output=True,
+        )
+        plugin_prepare.setdefault("steps", []).append(
+            self._command_step("gateway.restart", restart_result)
+        )
 
         return {
             "ok": True,
@@ -586,6 +590,15 @@ class InstanceManagerV2:
         if self.runner.dry_run or self._agent_exists(agent_name):
             return
         raise FileNotFoundError(f"Agent not found: {agent_name}")
+
+    def _ensure_agent_exists_in_config(self, agent_name: str) -> None:
+        if self.runner.dry_run:
+            return
+        config = self._load_config()
+        for item in self._extract_agent_list(config):
+            if item.get("id") == agent_name:
+                return
+        raise FileNotFoundError(f"Agent not found in config: {agent_name}")
 
     def _extract_agent_list(self, payload: Dict[str, object]) -> List[Dict[str, object]]:
         if isinstance(payload, list):
@@ -915,18 +928,8 @@ class InstanceManagerV2:
             raise ValueError("Invalid Weixin account id")
         return value
 
-    def _ensure_weixin_plugin_ready(self) -> Dict[str, object]:
-        installed = self._is_weixin_plugin_installed()
+    def _prepare_weixin_plugin_config(self) -> Dict[str, object]:
         steps: List[Dict[str, object]] = []
-        restart_required = False
-        if not installed:
-            install_result = self.runner.run(
-                [self.bin, "plugins", "install", self.WEIXIN_PLUGIN_PACKAGE],
-                stream_output=True,
-            )
-            steps.append(self._command_step("plugins.install", install_result))
-            installed = True
-            restart_required = True
 
         config = self._load_config()
         plugin_entry = (
@@ -934,32 +937,23 @@ class InstanceManagerV2:
             .setdefault("entries", {})
             .setdefault(self.WEIXIN_PLUGIN_ID, {})
         )
-        enabled_before = plugin_entry.get("enabled") is True
-        if not enabled_before:
+        config_updated = plugin_entry.get("enabled") is not True
+        if config_updated:
             plugin_entry["enabled"] = True
             self._write_config(
                 config,
                 note=f"enable plugin {self.WEIXIN_PLUGIN_ID}",
                 changed_paths=[f"plugins.entries.{self.WEIXIN_PLUGIN_ID}.enabled"],
             )
-            restart_required = True
 
         return {
             "plugin_id": self.WEIXIN_PLUGIN_ID,
-            "installed": installed,
+            "install_check_skipped": True,
             "enabled": True,
-            "restart_required": restart_required,
+            "config_updated": config_updated,
+            "restart_required": True,
             "steps": steps,
         }
-
-    def _is_weixin_plugin_installed(self) -> bool:
-        payload = self.runner.run_json([self.bin, "plugins", "list", "--json"])
-        for item in self._extract_plugin_list(payload):
-            plugin_id = item.get("id")
-            package_name = item.get("packageName") or item.get("package")
-            if plugin_id == self.WEIXIN_PLUGIN_ID or package_name == self.WEIXIN_PLUGIN_PACKAGE:
-                return True
-        return False
 
     def _write_weixin_account_state(
         self,

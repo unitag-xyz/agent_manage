@@ -625,6 +625,7 @@ class CreateInstanceV2Test(unittest.TestCase):
             config_path.write_text(
                 json.dumps(
                     {
+                        "agents": {"list": [{"id": "base"}]},
                         "bindings": [],
                         "channels": {"telegram": {"accounts": {}}},
                     }
@@ -643,6 +644,7 @@ class CreateInstanceV2Test(unittest.TestCase):
             saved = json.loads(config_path.read_text(encoding="utf-8"))
             self.assertTrue(result["ok"])
             self.assertTrue(result["bot_name"].startswith("tgbot-"))
+            self.assertEqual(runner.calls, [["openclaw", "gateway", "restart"]])
             self.assertEqual(
                 saved["channels"]["telegram"]["accounts"][result["bot_name"]],
                 {
@@ -665,19 +667,14 @@ class CreateInstanceV2Test(unittest.TestCase):
             )
 
     def test_add_tg_bot_replaces_existing_binding_for_same_bot_name(self):
-        runner = FakeRunner(
-            responses={
-                ("openclaw", "agents", "list", "--bindings", "--json"): {
-                    "agents": [{"id": "base"}]
-                }
-            }
-        )
+        runner = FakeRunner()
 
         with tempfile.TemporaryDirectory() as tmpdir:
             config_path = Path(tmpdir) / "openclaw.json"
             config_path.write_text(
                 json.dumps(
                     {
+                        "agents": {"list": [{"id": "base"}]},
                         "bindings": [
                             {
                                 "agentId": "old-agent",
@@ -748,17 +745,14 @@ class CreateInstanceV2Test(unittest.TestCase):
                     },
                 ],
             )
+            self.assertEqual(runner.calls, [["openclaw", "gateway", "restart"]])
 
     def test_add_tg_bot_requires_existing_agent(self):
-        runner = FakeRunner(
-            responses={
-                ("openclaw", "agents", "list", "--bindings", "--json"): {"agents": []}
-            }
-        )
+        runner = FakeRunner()
 
         with tempfile.TemporaryDirectory() as tmpdir:
             config_path = Path(tmpdir) / "openclaw.json"
-            config_path.write_text(json.dumps({"bindings": []}), encoding="utf-8")
+            config_path.write_text(json.dumps({"bindings": [], "agents": {"list": []}}), encoding="utf-8")
 
             manager = InstanceManagerV2(runner, config_path=str(config_path))
             with self.assertRaises(FileNotFoundError):
@@ -893,16 +887,7 @@ class CreateInstanceV2Test(unittest.TestCase):
             )
 
     def test_add_weixin_bot_writes_state_config_and_binding(self):
-        runner = FakeRunner(
-            responses={
-                ("openclaw", "agents", "list", "--bindings", "--json"): {
-                    "agents": [{"id": "unipay-claw-base"}]
-                },
-                ("openclaw", "plugins", "list", "--json"): {
-                    "plugins": [{"id": "openclaw-weixin"}]
-                },
-            }
-        )
+        runner = FakeRunner()
 
         with tempfile.TemporaryDirectory() as tmpdir:
             state_dir = Path(tmpdir)
@@ -910,6 +895,7 @@ class CreateInstanceV2Test(unittest.TestCase):
             config_path.write_text(
                 json.dumps(
                     {
+                        "agents": {"list": [{"id": "unipay-claw-base"}]},
                         "plugins": {"entries": {"openclaw-weixin": {"enabled": True}}},
                         "bindings": [],
                         "channels": {},
@@ -938,8 +924,9 @@ class CreateInstanceV2Test(unittest.TestCase):
 
             self.assertTrue(result["ok"])
             self.assertEqual(result["account_id"], account_id)
-            self.assertEqual(result["plugin_prepare"]["installed"], True)
-            self.assertEqual(result["plugin_prepare"]["restart_required"], False)
+            self.assertTrue(result["plugin_prepare"]["install_check_skipped"])
+            self.assertTrue(result["plugin_prepare"]["restart_required"])
+            self.assertEqual(runner.calls, [["openclaw", "gateway", "restart"]])
             self.assertTrue(account_path.exists())
             self.assertTrue(index_path.exists())
             self.assertEqual(
@@ -967,20 +954,20 @@ class CreateInstanceV2Test(unittest.TestCase):
                 ],
             )
 
-    def test_add_weixin_bot_installs_and_restarts_plugin_when_missing(self):
-        runner = FakeRunner(
-            responses={
-                ("openclaw", "agents", "list", "--bindings", "--json"): {
-                    "agents": [{"id": "unipay-claw-base"}]
-                },
-                ("openclaw", "plugins", "list", "--json"): {"plugins": []},
-            }
-        )
+    def test_add_weixin_bot_enables_plugin_and_always_restarts_gateway(self):
+        runner = FakeRunner()
 
         with tempfile.TemporaryDirectory() as tmpdir:
             config_path = Path(tmpdir) / "openclaw.json"
             config_path.write_text(
-                json.dumps({"plugins": {"entries": {}}, "bindings": [], "channels": {}}),
+                json.dumps(
+                    {
+                        "agents": {"list": [{"id": "unipay-claw-base"}]},
+                        "plugins": {"entries": {}},
+                        "bindings": [],
+                        "channels": {},
+                    }
+                ),
                 encoding="utf-8",
             )
 
@@ -994,12 +981,11 @@ class CreateInstanceV2Test(unittest.TestCase):
             )
 
             self.assertTrue(result["ok"])
+            saved_config = json.loads(config_path.read_text(encoding="utf-8"))
+            self.assertTrue(saved_config["plugins"]["entries"]["openclaw-weixin"]["enabled"])
             self.assertEqual(
-                runner.calls[:4],
+                runner.calls,
                 [
-                    ["openclaw", "agents", "list", "--bindings", "--json"],
-                    ["openclaw", "plugins", "list", "--json"],
-                    ["openclaw", "plugins", "install", "@tencent-weixin/openclaw-weixin"],
                     ["openclaw", "gateway", "restart"],
                 ],
             )

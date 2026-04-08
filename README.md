@@ -102,12 +102,13 @@ cd ~/data/agent_manage && python3 scripts/agentctl.py create-instance \
 
 ### 行为说明
 
-- 要求目标 agent 已存在
+- 直接从 `openclaw.json` 的 `agents.list` 检查目标 agent 是否存在
 - 新增或覆盖一个 Telegram bot 账号配置
 - 当前 bot 按公开模式写入：
   `dmPolicy = open`，`allowFrom = ["*"]`
 - 会删除该 bot 名下旧的 Telegram binding，再写入一条新的 binding 指向指定 agent
 - 不传 `--bot-name` 时自动生成 `tgbot-xxxxxxxx`
+- 写入配置后总是执行一次 `openclaw gateway restart`
 
 ### 远程执行
 
@@ -141,6 +142,7 @@ cd ~/data/agent_manage && python3 scripts/agentctl.py add-tg-bot \
 - `agent_name`
 - `bot_name`
 - `config_write`
+- `gateway_restart`
 
 示例：
 
@@ -156,6 +158,14 @@ cd ~/data/agent_manage && python3 scripts/agentctl.py add-tg-bot \
         "channels.telegram.accounts.publicbot",
         "bindings"
       ]
+    },
+    "gateway_restart": {
+      "step": "gateway.restart",
+      "result": {
+        "command": "openclaw gateway restart",
+        "returncode": 0,
+        "skipped": false
+      }
     }
   },
   "error": null,
@@ -348,10 +358,10 @@ cd ~/data/agent_manage && python3 scripts/agentctl.py tg-bot-status
 - 用前端已经拿到的微信登录成功结果补齐本机接入流程
 - 要求传入前端拿到的登录成功字段：
   `ilink_bot_id`、`bot_token`，可选 `baseurl`、`ilink_user_id`
-- 检查 `openclaw-weixin` 插件是否已安装；如果未安装，会自动执行
-  `openclaw plugins install @tencent-weixin/openclaw-weixin`
+- 直接从 `openclaw.json` 的 `agents.list` 检查目标 agent 是否存在
 - 确保 `plugins.entries.openclaw-weixin.enabled = true`
-- 如插件是本次新安装或首次启用，会自动执行一次 `openclaw gateway restart`
+- 不检查 `openclaw-weixin` 插件安装状态，不执行自动安装
+- 写入配置后总是执行一次 `openclaw gateway restart`
 - 将微信账号状态写入 `~/.openclaw/openclaw-weixin/accounts/<accountId>.json`
 - 将账号索引写入 `~/.openclaw/openclaw-weixin/accounts.json`
 - 将 `channels.openclaw-weixin.accounts.<accountId>` 和绑定关系写入 `openclaw.json`
@@ -402,10 +412,20 @@ cd ~/data/agent_manage && python3 scripts/agentctl.py add-weixin-bot \
     "raw_account_id": "B0F5860FDECB@im.bot",
     "plugin_prepare": {
       "plugin_id": "openclaw-weixin",
-      "installed": true,
+      "install_check_skipped": true,
       "enabled": true,
-      "restart_required": false,
-      "steps": []
+      "config_updated": false,
+      "restart_required": true,
+      "steps": [
+        {
+          "step": "gateway.restart",
+          "result": {
+            "command": "openclaw gateway restart",
+            "returncode": 0,
+            "skipped": false
+          }
+        }
+      ]
     },
     "stale_accounts_cleared": [],
     "state_write": {
