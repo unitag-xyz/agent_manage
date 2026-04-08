@@ -497,16 +497,22 @@ class CreateInstanceV2Test(unittest.TestCase):
             self.assertIn(f"workspace not empty, skip populate: {workspace.resolve()}", runner.logs)
 
     def test_prepare_failure_rolls_back_partial_template_dir(self):
-        runner = FakeRunner(responses={("openclaw", "agents", "list", "--bindings", "--json"): {"agents": []}})
+        runner = FakeRunner()
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
             template_root = tmp_path / "template"
             archive_path = template_root / "base.zip"
+            config_path = tmp_path / ".openclaw" / "openclaw.json"
             archive_path.parent.mkdir(parents=True)
             self._write_archive(archive_path, {"main.py": "print('x')\n"})
+            self._write_host_config(config_path, {"agents": {"list": []}})
 
-            manager = FailingPrepareManager(runner, template_root=str(template_root))
+            manager = FailingPrepareManager(
+                runner,
+                template_root=str(template_root),
+                config_path=str(config_path),
+            )
             with self.assertRaises(RuntimeError):
                 manager.create_instance(
                     CreateInstanceRequest(
@@ -521,7 +527,6 @@ class CreateInstanceV2Test(unittest.TestCase):
     def test_populate_failure_rolls_back_workspace_and_agent(self):
         runner = WorkspaceCreatingRunner(
             responses={
-                ("openclaw", "agents", "list", "--bindings", "--json"): {"agents": []},
                 (
                     "openclaw",
                     "agents",
@@ -542,8 +547,10 @@ class CreateInstanceV2Test(unittest.TestCase):
             workspace_root = tmp_path / "data"
             workspace = workspace_root / "base"
             archive_path = template_root / "base.zip"
+            config_path = tmp_path / ".openclaw" / "openclaw.json"
             archive_path.parent.mkdir(parents=True)
             self._write_archive(archive_path, {"main.py": "print('x')\n"})
+            self._write_host_config(config_path, {"agents": {"list": []}})
 
             runner.responses[
                 (
@@ -569,7 +576,11 @@ class CreateInstanceV2Test(unittest.TestCase):
                 )
             )
 
-            manager = FailingPopulateManager(runner, template_root=str(template_root))
+            manager = FailingPopulateManager(
+                runner,
+                template_root=str(template_root),
+                config_path=str(config_path),
+            )
             with self.assertRaises(RuntimeError):
                 manager.create_instance(
                     CreateInstanceRequest(
