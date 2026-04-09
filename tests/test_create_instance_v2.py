@@ -994,6 +994,55 @@ class CreateInstanceV2Test(unittest.TestCase):
                 ],
             )
 
+    def test_add_weixin_bot_ignores_sync_sidecar_files_when_clearing_stale_accounts(self):
+        runner = FakeRunner()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_dir = Path(tmpdir)
+            config_path = state_dir / "openclaw.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "agents": {"list": [{"id": "unipay-claw-base"}]},
+                        "plugins": {"entries": {"openclaw-weixin": {"enabled": True}}},
+                        "bindings": [],
+                        "channels": {},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            state_root = state_dir / "openclaw-weixin"
+            accounts_dir = state_root / "accounts"
+            accounts_dir.mkdir(parents=True)
+            (accounts_dir / "old-bot-im-bot.json").write_text(
+                json.dumps({"userId": "wx-user-1", "token": "old-token"}),
+                encoding="utf-8",
+            )
+            (accounts_dir / "old-bot-im-bot.sync.json").write_text(
+                json.dumps({"synced": True}),
+                encoding="utf-8",
+            )
+            (state_root / "accounts.json").write_text(
+                json.dumps(["old-bot-im-bot"]) + "\n",
+                encoding="utf-8",
+            )
+
+            manager = InstanceManagerV2(runner, config_path=str(config_path))
+            result = manager.add_weixin_bot(
+                AddWeixinBotRequest(
+                    agent_name="unipay-claw-base",
+                    ilink_bot_id="new-bot@im.bot",
+                    bot_token="wx-token",
+                    ilink_user_id="wx-user-1",
+                )
+            )
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["stale_accounts_cleared"], ["old-bot-im-bot"])
+            self.assertFalse((accounts_dir / "old-bot-im-bot.json").exists())
+            self.assertFalse((accounts_dir / "old-bot-im-bot.sync.json").exists())
+            self.assertTrue((accounts_dir / "new-bot-im-bot.json").exists())
+
     def test_get_weixin_bot_status_returns_bound_bot_count(self):
         runner = FakeRunner()
 

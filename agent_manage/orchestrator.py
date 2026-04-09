@@ -1023,7 +1023,10 @@ class InstanceManagerV2:
         for suffix in (".json", ".sync.json", ".context-tokens.json"):
             target = accounts_dir / f"{account_id}{suffix}"
             if target.exists():
-                target.unlink()
+                try:
+                    target.unlink()
+                except FileNotFoundError:
+                    continue
                 deleted_files.append(str(target))
 
         remaining_ids: List[str] = []
@@ -1060,6 +1063,8 @@ class InstanceManagerV2:
 
         removed: List[str] = []
         for account_path in sorted(accounts_dir.glob("*.json")):
+            if account_path.name.endswith(".sync.json") or account_path.name.endswith(".context-tokens.json"):
+                continue
             account_id = account_path.stem
             if account_id == current_account_id:
                 continue
@@ -1075,7 +1080,10 @@ class InstanceManagerV2:
             for suffix in (".json", ".sync.json", ".context-tokens.json"):
                 target = accounts_dir / f"{account_id}{suffix}"
                 if target.exists():
-                    target.unlink()
+                    try:
+                        target.unlink()
+                    except FileNotFoundError:
+                        continue
 
         if removed and index_path.exists():
             try:
