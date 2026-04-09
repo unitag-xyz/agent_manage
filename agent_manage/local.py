@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shlex
 import subprocess
 import sys
@@ -59,8 +60,9 @@ class LocalRunner:
                 skipped=True,
             )
 
+        env = self._command_env()
         if stream_output:
-            return self._run_streaming(argv, command_text)
+            return self._run_streaming(argv, command_text, env)
 
         try:
             completed = subprocess.run(
@@ -68,6 +70,7 @@ class LocalRunner:
                 text=True,
                 capture_output=True,
                 cwd=str(self.project_dir) if self.project_dir else None,
+                env=env,
                 check=False,
                 timeout=timeout,
             )
@@ -105,13 +108,14 @@ class LocalRunner:
         self._log(f"done ({completed.returncode}): {command_text}")
         return result
 
-    def _run_streaming(self, argv: List[str], command_text: str) -> CommandResult:
+    def _run_streaming(self, argv: List[str], command_text: str, env: dict[str, str]) -> CommandResult:
         process = subprocess.Popen(
             argv,
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             cwd=str(self.project_dir) if self.project_dir else None,
+            env=env,
             bufsize=1,
         )
         output_lines: List[str] = []
@@ -154,6 +158,30 @@ class LocalRunner:
 
     def _log(self, message: str) -> None:
         self.log(message)
+
+    def _command_env(self) -> dict[str, str]:
+        env = os.environ.copy()
+        home = env.get("HOME") or str(Path.home())
+        runtime_dir = env.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+        dbus_address = env.get("DBUS_SESSION_BUS_ADDRESS") or f"unix:path={runtime_dir}/bus"
+
+        env["HOME"] = home
+        env["XDG_RUNTIME_DIR"] = runtime_dir
+        env["DBUS_SESSION_BUS_ADDRESS"] = dbus_address
+
+        npm_bin = str(Path(home) / ".npm-global" / "bin")
+        path_parts = env.get("PATH", "").split(os.pathsep) if env.get("PATH") else []
+        if npm_bin not in path_parts:
+            env["PATH"] = os.pathsep.join([npm_bin, *path_parts]) if path_parts else npm_bin
+            self._log(f"env: prepended PATH with {npm_bin}")
+
+        self._log(
+            "env: "
+            f"HOME={env['HOME']} "
+            f"XDG_RUNTIME_DIR={env['XDG_RUNTIME_DIR']} "
+            f"DBUS_SESSION_BUS_ADDRESS={env['DBUS_SESSION_BUS_ADDRESS']}"
+        )
+        return env
 
     def _extract_json(self, text: str):
         decoder = JSONDecoder()
