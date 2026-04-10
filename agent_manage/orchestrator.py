@@ -6,6 +6,7 @@ import tempfile
 import uuid
 from datetime import datetime
 from pathlib import Path
+from time import perf_counter
 from typing import Dict, List, Optional
 
 from .local import CommandError, LocalRunner
@@ -67,11 +68,14 @@ class InstanceManagerV2:
 
         try:
             started_template_prepare = True
-            template_result = self._prepare_template_dir(
-                archive_path=archive_path,
-                template_dir=template_dir,
+            template_result = self._run_timed_step(
+                steps,
+                "template.prepare",
+                lambda: self._prepare_template_dir(
+                    archive_path=archive_path,
+                    template_dir=template_dir,
+                ),
             )
-            steps.append({"step": "template.prepare", "result": template_result})
 
             if agent_exists:
                 self.runner.log(f"agent exists, skip add: {agent_name}")
@@ -80,14 +84,18 @@ class InstanceManagerV2:
                     "reason": "agent_exists",
                     "agent_name": agent_name,
                 }
+                steps.append(self._build_step_payload("agents.add", agent_result))
             else:
-                agent_result = self._add_agent(
-                    agent_name=agent_name,
-                    workspace=workspace,
-                    model=request.model,
+                agent_result = self._run_timed_step(
+                    steps,
+                    "agents.add",
+                    lambda: self._add_agent(
+                        agent_name=agent_name,
+                        workspace=workspace,
+                        model=request.model,
+                    ),
                 )
                 created_agent = True
-            steps.append({"step": "agents.add", "result": agent_result})
 
             if workspace_has_content:
                 self.runner.log(f"workspace not empty, skip populate: {workspace}")
@@ -96,21 +104,31 @@ class InstanceManagerV2:
                     "reason": "workspace_not_empty",
                     "workspace": str(workspace),
                 }
+                steps.append(self._build_step_payload("workspace.populate", workspace_result))
             else:
-                workspace_result = self._populate_workspace(
-                    template_dir=template_dir,
-                    workspace=workspace,
+                workspace_result = self._run_timed_step(
+                    steps,
+                    "workspace.populate",
+                    lambda: self._populate_workspace(
+                        template_dir=template_dir,
+                        workspace=workspace,
+                    ),
                 )
                 created_workspace = not workspace_result.get("skipped", False)
-            steps.append({"step": "workspace.populate", "result": workspace_result})
 
-            models_result = self._configure_config_models(
-                model_key=request.model_key,
+            models_result = self._run_timed_step(
+                steps,
+                "config.configure_models",
+                lambda: self._configure_config_models(
+                    model_key=request.model_key,
+                ),
             )
-            steps.append({"step": "config.configure_models", "result": models_result})
 
-            tools_result = self._configure_config_tools()
-            steps.append({"step": "config.configure_tools", "result": tools_result})
+            tools_result = self._run_timed_step(
+                steps,
+                "config.configure_tools",
+                self._configure_config_tools,
+            )
 
             return {
                 "ok": True,
@@ -661,7 +679,13 @@ class InstanceManagerV2:
         ]
         if model:
             args.extend(["--model", model])
-        return self.runner.run_json(args)
+        result = self.runner.run(args)
+        payload = self.runner._extract_json(result.stdout) if result.stdout.strip() else {}
+        payload["command"] = result.command_text
+        payload["returncode"] = result.returncode
+        if result.skipped:
+            payload["skipped"] = True
+        return payload
 
     def _prepare_template_dir(self, archive_path: Path, template_dir: Path) -> Dict[str, object]:
         if self.runner.dry_run:
@@ -803,6 +827,26 @@ class InstanceManagerV2:
             "web_search_enabled": False,
             "web_fetch_enabled": True,
         }
+
+    def _run_timed_step(self, steps: List[Dict[str, object]], step: str, func):
+        self.runner.log(f"step: start {step}")
+        started_at = perf_counter()
+        result = func()
+        elapsed_ms = round((perf_counter() - started_at) * 1000, 1)
+        self.runner.log(f"step: done {step} ({elapsed_ms} ms)")
+        steps.append(self._build_step_payload(step, result, elapsed_ms=elapsed_ms))
+        return result
+
+    def _build_step_payload(
+        self,
+        step: str,
+        result: Dict[str, object],
+        elapsed_ms: Optional[float] = None,
+    ) -> Dict[str, object]:
+        payload: Dict[str, object] = {"step": step, "result": result}
+        if elapsed_ms is not None:
+            payload["elapsed_ms"] = elapsed_ms
+        return payload
 
     def _resolve_unpacked_root(self, extract_dir: Path) -> Path:
         candidates = [item for item in extract_dir.iterdir() if item.name != "__MACOSX"]

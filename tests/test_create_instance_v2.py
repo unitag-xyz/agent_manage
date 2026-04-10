@@ -221,6 +221,11 @@ class CreateInstanceV2Test(unittest.TestCase):
             self.assertEqual(saved_config["tools"]["web"]["fetch"], {"enabled": True})
             self.assertNotIn("legacy", saved_config["models"]["providers"])
             self.assertEqual(result["template_dir"], str(template_dir.resolve()))
+            self.assertIn("elapsed_ms", result["steps"][0])
+            self.assertEqual(
+                result["steps"][1]["result"]["command"],
+                f"openclaw agents add base --workspace {workspace.resolve()} --non-interactive --json --model openai/gpt-5",
+            )
             self.assertEqual(result["steps"][-1]["step"], "config.configure_tools")
 
     def test_create_instance_unzips_to_same_named_template_dir_then_copies_to_workspace(self):
