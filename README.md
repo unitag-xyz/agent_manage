@@ -28,6 +28,7 @@ python3 scripts/agentctl.py
 - 如果 workspace 已存在且非空，会跳过 `workspace.populate`，继续后续步骤
 - `--model-key` 为必填，会写入 `~/.openclaw/openclaw.json` 的
   `models.providers.unipay-fun.apiKey`
+- 创建时会生成新的 `gateway_token`，写入 `gateway.auth.token`，并在返回结果里带回
 - 创建完成后会重写 `~/.openclaw/openclaw.json` 里的默认模型配置，只保留以下模型：
   `gpt-5.4-nano`、`gpt-5.4`、`gpt-5.3-codex`、`gpt-5.4-mini`、`gpt-5-nano`
 - 默认主模型固定写成 `unipay-fun/gpt-5.4-nano`
@@ -68,6 +69,7 @@ cd ~/data/agent_manage && python3 scripts/agentctl.py create-instance \
 
 - `template_name`
 - `agent_name`
+- `gateway_token`
 - `workspace`
 - `archive_path`
 - `template_dir`
@@ -81,6 +83,7 @@ cd ~/data/agent_manage && python3 scripts/agentctl.py create-instance \
     "ok": true,
     "template_name": "unipay-claw-base",
     "agent_name": "unipay-claw-base",
+    "gateway_token": "generated-gateway-token",
     "workspace": "/root/data/unipay-claw-base",
     "archive_path": "/root/template/unipay-claw-base.zip",
     "template_dir": "/root/template/unipay-claw-base",
@@ -89,6 +92,7 @@ cd ~/data/agent_manage && python3 scripts/agentctl.py create-instance \
       {"step": "agents.add", "result": {}},
       {"step": "workspace.populate", "result": {}},
       {"step": "config.configure_models", "result": {}},
+      {"step": "config.configure_gateway_auth", "result": {}},
       {"step": "config.configure_tools", "result": {}}
     ]
   },
@@ -813,6 +817,52 @@ cd ~/data/agent_manage && python3 scripts/agentctl.py current-model
         "model": "unipay-fun/gpt-5.4-mini"
       }
     ],
+    "config_path": "/root/.openclaw/openclaw.json",
+    "config_exists": true
+  },
+  "error": null,
+  "typeCode": 1,
+  "message": "OK",
+  "serverTimeStamp": "2026-04-04 09:36:50"
+}
+```
+
+## current-gateway-token
+
+### 行为说明
+
+- 直接读取 `~/.openclaw/openclaw.json`
+- 返回当前配置里的 `gateway.auth.mode` 和 `gateway.auth.token`，不起 `openclaw` 子进程
+
+### 远程执行
+
+```bash
+cd ~/data/agent_manage && python3 scripts/agentctl.py current-gateway-token
+```
+
+可选参数：
+
+- `--openclaw-bin`
+- `--project-dir`
+- `--dry-run`
+
+### Output
+
+成功时 `result` 里主要返回：
+
+- `gateway_auth_mode`
+- `gateway_token`
+- `config_path`
+- `config_exists`
+
+示例：
+
+```json
+{
+  "result": {
+    "ok": true,
+    "gateway_auth_mode": "token",
+    "gateway_token": "generated-gateway-token",
     "config_path": "/root/.openclaw/openclaw.json",
     "config_exists": true
   },

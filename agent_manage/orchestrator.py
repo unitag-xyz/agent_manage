@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import secrets
 import shutil
 import tempfile
 import uuid
@@ -124,6 +125,13 @@ class InstanceManagerV2:
                 ),
             )
 
+            gateway_token = self._generate_gateway_token()
+            gateway_auth_result = self._run_timed_step(
+                steps,
+                "config.configure_gateway_auth",
+                lambda: self._configure_gateway_auth(gateway_token),
+            )
+
             tools_result = self._run_timed_step(
                 steps,
                 "config.configure_tools",
@@ -134,6 +142,7 @@ class InstanceManagerV2:
                 "ok": True,
                 "template_name": request.template_name,
                 "agent_name": agent_name,
+                "gateway_token": gateway_token,
                 "workspace": str(workspace),
                 "archive_path": str(archive_path),
                 "template_dir": str(template_dir) if template_dir else None,
@@ -555,6 +564,20 @@ class InstanceManagerV2:
             "config_exists": self.config_path.exists(),
         }
 
+    def get_current_gateway_token(self) -> Dict[str, object]:
+        config = self._load_config()
+        gateway = config.get("gateway", {})
+        auth = gateway.get("auth", {}) if isinstance(gateway, dict) else {}
+        configured_mode = auth.get("mode") if isinstance(auth, dict) else None
+        configured_token = auth.get("token") if isinstance(auth, dict) else None
+        return {
+            "ok": True,
+            "gateway_auth_mode": configured_mode,
+            "gateway_token": configured_token,
+            "config_path": str(self.config_path),
+            "config_exists": self.config_path.exists(),
+        }
+
     def list_agents(self) -> Dict[str, object]:
         agents_payload = self.runner.run_json(
             [self.bin, "agents", "list", "--bindings", "--json"],
@@ -828,6 +851,42 @@ class InstanceManagerV2:
             "web_fetch_enabled": True,
         }
 
+    def _configure_gateway_auth(self, gateway_token: str) -> Dict[str, object]:
+        config_path = self.config_path
+        if self.runner.dry_run:
+            return {
+                "skipped": True,
+                "config_path": str(config_path),
+                "gateway_auth_mode": "token",
+                "gateway_token": gateway_token,
+            }
+
+        config = self._load_config()
+        if not isinstance(config, dict):
+            raise ValueError(f"Config must be a JSON object: {config_path}")
+
+        gateway = config.setdefault("gateway", {})
+        auth = gateway.setdefault("auth", {})
+        auth["mode"] = "token"
+        auth["token"] = gateway_token
+
+        self._write_config(
+            config,
+            note="configure gateway auth for create_instance",
+            changed_paths=[
+                "gateway.auth.mode",
+                "gateway.auth.token",
+            ],
+            extra={
+                "gateway_auth_mode": "token",
+            },
+        )
+        return {
+            "config_path": str(config_path),
+            "gateway_auth_mode": "token",
+            "gateway_token": gateway_token,
+        }
+
     def _run_timed_step(self, steps: List[Dict[str, object]], step: str, func):
         self.runner.log(f"step: start {step}")
         started_at = perf_counter()
@@ -917,6 +976,9 @@ class InstanceManagerV2:
 
     def _generate_tg_bot_name(self) -> str:
         return f"tgbot-{uuid.uuid4().hex[:8]}"
+
+    def _generate_gateway_token(self) -> str:
+        return secrets.token_urlsafe(32)
 
     def _managed_primary_model_ref(self) -> str:
         return f"{self.MANAGED_MODEL_PROVIDER}/{MANAGED_MODEL_IDS[0]}"

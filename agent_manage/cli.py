@@ -74,6 +74,8 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     current_model = subparsers.add_parser("current-model")
 
+    current_gateway_token = subparsers.add_parser("current-gateway-token")
+
     try:
         args = parser.parse_args(argv)
         client = InstanceManagerV2(
@@ -165,6 +167,10 @@ def main(argv: Optional[List[str]] = None) -> int:
             return 0
         if args.command == "current-model":
             result = client.get_current_model()
+            print_json(build_success_response(result))
+            return 0
+        if args.command == "current-gateway-token":
+            result = client.get_current_gateway_token()
             print_json(build_success_response(result))
             return 0
 

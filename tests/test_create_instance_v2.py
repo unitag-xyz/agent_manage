@@ -182,6 +182,8 @@ class CreateInstanceV2Test(unittest.TestCase):
             )
 
             self.assertTrue(result["ok"])
+            self.assertIsInstance(result["gateway_token"], str)
+            self.assertGreaterEqual(len(result["gateway_token"]), 40)
             self.assertEqual(runner.calls[0][:4], ["openclaw", "agents", "add", "base"])
             self.assertEqual((workspace / "app" / "main.py").read_text(encoding="utf-8"), "print('hello')\n")
             self.assertEqual((workspace / "SOUL.md").read_text(encoding="utf-8"), "old soul\n")
@@ -214,6 +216,8 @@ class CreateInstanceV2Test(unittest.TestCase):
                 saved_config["models"]["providers"]["unipay-fun"]["apiKey"],
                 "test-key",
             )
+            self.assertEqual(saved_config["gateway"]["auth"]["mode"], "token")
+            self.assertEqual(saved_config["gateway"]["auth"]["token"], result["gateway_token"])
             self.assertEqual(saved_config["tools"]["profile"], "coding")
             self.assertEqual(saved_config["tools"]["exec"]["security"], "full")
             self.assertEqual(saved_config["tools"]["exec"]["timeout"], 30)
@@ -227,6 +231,7 @@ class CreateInstanceV2Test(unittest.TestCase):
                 f"openclaw agents add base --workspace {workspace.resolve()} --non-interactive --json --model openai/gpt-5",
             )
             self.assertEqual(result["steps"][-1]["step"], "config.configure_tools")
+            self.assertEqual(result["steps"][-2]["step"], "config.configure_gateway_auth")
 
     def test_create_instance_unzips_to_same_named_template_dir_then_copies_to_workspace(self):
         runner = WorkspaceCreatingRunner(
@@ -300,8 +305,11 @@ class CreateInstanceV2Test(unittest.TestCase):
             )
 
             self.assertTrue(result["ok"])
+            self.assertIsInstance(result["gateway_token"], str)
             self.assertEqual(result["agent_name"], "unipay-claw-base")
             self.assertEqual(result["template_dir"], str((tmp_path / "template" / "unipay-claw-base").resolve()))
+            saved_config = json.loads(config_path.read_text(encoding="utf-8"))
+            self.assertEqual(saved_config["gateway"]["auth"]["token"], result["gateway_token"])
             self.assertEqual(
                 ((tmp_path / "template" / "unipay-claw-base" / "SOUL.md").read_text(encoding="utf-8")),
                 "zip soul\n",
@@ -340,6 +348,7 @@ class CreateInstanceV2Test(unittest.TestCase):
             )
 
             self.assertTrue(result["ok"])
+            self.assertIsInstance(result["gateway_token"], str)
             self.assertEqual(result["steps"][1]["step"], "agents.add")
             self.assertEqual(
                 result["steps"][1]["result"],
@@ -418,7 +427,10 @@ class CreateInstanceV2Test(unittest.TestCase):
             )
 
             self.assertTrue(result["ok"])
+            self.assertIsInstance(result["gateway_token"], str)
             self.assertEqual((workspace / "main.py").read_text(encoding="utf-8"), "print('x')\n")
+            saved_config = json.loads(config_path.read_text(encoding="utf-8"))
+            self.assertEqual(saved_config["gateway"]["auth"]["token"], result["gateway_token"])
 
     def test_create_instance_skips_populate_when_workspace_is_non_empty(self):
         runner = FakeRunner(
@@ -487,6 +499,7 @@ class CreateInstanceV2Test(unittest.TestCase):
             )
 
             self.assertTrue(result["ok"])
+            self.assertIsInstance(result["gateway_token"], str)
             self.assertEqual(result["steps"][2]["step"], "workspace.populate")
             self.assertEqual(
                 result["steps"][2]["result"],
@@ -499,6 +512,7 @@ class CreateInstanceV2Test(unittest.TestCase):
             self.assertEqual((workspace / "old.txt").read_text(encoding="utf-8"), "keep\n")
             saved_config = json.loads(config_path.read_text(encoding="utf-8"))
             self.assertEqual(saved_config["agents"]["defaults"]["model"]["primary"], "unipay-fun/gpt-5.4-nano")
+            self.assertEqual(saved_config["gateway"]["auth"]["token"], result["gateway_token"])
             self.assertIn(f"workspace not empty, skip populate: {workspace.resolve()}", runner.logs)
 
     def test_prepare_failure_rolls_back_partial_template_dir(self):
@@ -616,9 +630,11 @@ class CreateInstanceV2Test(unittest.TestCase):
             )
 
             self.assertTrue(result["ok"])
+            self.assertIsInstance(result["gateway_token"], str)
             self.assertFalse((tmp_path / "data" / "base").exists())
             self.assertFalse((tmp_path / "template" / "base").exists())
             self.assertEqual(runner.calls[0][:4], ["openclaw", "agents", "add", "base"])
+            self.assertEqual(result["steps"][-2]["step"], "config.configure_gateway_auth")
 
     def test_add_tg_bot_generates_name_and_writes_public_binding(self):
         runner = FakeRunner(
@@ -1357,6 +1373,35 @@ class CreateInstanceV2Test(unittest.TestCase):
             result["agent_overrides"],
             [{"agent_id": "unipay-claw-base", "model": "unipay-fun/gpt-5.4-mini"}],
         )
+        self.assertEqual(runner.calls, [])
+
+    def test_get_current_gateway_token_reads_config_only(self):
+        runner = FakeRunner()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "openclaw.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "gateway": {
+                            "auth": {
+                                "mode": "token",
+                                "token": "gateway-token-123",
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            manager = InstanceManagerV2(runner, config_path=str(config_path))
+            result = manager.get_current_gateway_token()
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["gateway_auth_mode"], "token")
+        self.assertEqual(result["gateway_token"], "gateway-token-123")
+        self.assertEqual(result["config_path"], str(config_path.resolve()))
+        self.assertEqual(result["config_exists"], True)
         self.assertEqual(runner.calls, [])
 
     def _write_archive(self, archive_path: Path, files):

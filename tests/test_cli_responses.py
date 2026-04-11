@@ -207,5 +207,22 @@ class CliResponseTest(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertEqual(payload["result"]["current_model"], "unipay-fun/gpt-5.4-nano")
 
+    def test_agent_manage_current_gateway_token_dispatches_correctly(self):
+        with patch("agent_manage.cli.InstanceManagerV2") as manager_cls:
+            manager_cls.return_value.get_current_gateway_token.return_value = {
+                "ok": True,
+                "gateway_auth_mode": "token",
+                "gateway_token": "test-gateway-token",
+            }
+
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                exit_code = agent_manage_main(["current-gateway-token"])
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["result"]["gateway_auth_mode"], "token")
+        self.assertEqual(payload["result"]["gateway_token"], "test-gateway-token")
+
 if __name__ == "__main__":
     unittest.main()
