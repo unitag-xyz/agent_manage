@@ -19,7 +19,6 @@ from .models import (
     DeleteTelegramBotRequest,
     DeleteWeixinBotRequest,
     SetModelRequest,
-    SUPPORTED_MODEL_REFS,
 )
 from .orchestrator import InstanceManagerV2
 
@@ -70,9 +69,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     agents_list = subparsers.add_parser("agents-list")
 
     set_model = subparsers.add_parser("set-model")
-    set_model.add_argument("--model", required=True, choices=sorted(SUPPORTED_MODEL_REFS))
+    set_model.add_argument("--model", required=True)
 
     current_model = subparsers.add_parser("current-model")
+
+    models = subparsers.add_parser("models")
+
+    update_model = subparsers.add_parser("update-model")
 
     current_gateway_token = subparsers.add_parser("current-gateway-token")
 
@@ -167,6 +170,14 @@ def main(argv: Optional[List[str]] = None) -> int:
             return 0
         if args.command == "current-model":
             result = client.get_current_model()
+            print_json(build_success_response(result))
+            return 0
+        if args.command == "models":
+            result = client.get_supported_models()
+            print_json(build_success_response(result))
+            return 0
+        if args.command == "update-model":
+            result = client.update_model_catalog()
             print_json(build_success_response(result))
             return 0
         if args.command == "current-gateway-token":

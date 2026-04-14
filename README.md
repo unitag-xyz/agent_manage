@@ -29,9 +29,13 @@ python3 scripts/agentctl.py
 - `--model-key` 为必填，会写入 `~/.openclaw/openclaw.json` 的
   `models.providers.unipay-fun.apiKey`
 - 创建时会生成新的 `gateway_token`，写入 `gateway.auth.token`，并在返回结果里带回
-- 创建完成后会重写 `~/.openclaw/openclaw.json` 里的默认模型配置，只保留以下模型：
-  `gpt-5.4-nano`、`gpt-5.4`、`gpt-5.3-codex`、`gpt-5.4-mini`、`gpt-5-nano`
-- 默认主模型固定写成 `unipay-fun/gpt-5.4-nano`
+- 创建时会先从
+  `https://unitag.dola.fi/aigateway/api/frontend/aimodels`
+  拉取当前激活模型目录，再写入 `~/.openclaw/openclaw.json`
+- 写入时会把返回模型转换成 `openclaw` 当前使用的 provider 模型定义结构，保存到
+  `models.providers.unipay-fun.models`
+- `agents.defaults.models` 会按当前拉取到的模型重建
+- 默认主模型优先使用 `unipay-fun/gpt-5.4-nano`；如果当前目录里没有这个模型，则退回到拉取结果里的第一个可用模型
 - 如果模板原先带有 `vllm` 等旧 provider，会在初始化时被覆盖掉，只保留 `unipay-fun`
 - 创建完成后会额外写入 `~/.openclaw/openclaw.json` 的工具默认配置：
   `tools.profile = coding`、`tools.exec.security = full`、
@@ -91,6 +95,7 @@ cd ~/data/agent_manage && python3 scripts/agentctl.py create-instance \
       {"step": "template.prepare", "result": {}},
       {"step": "agents.add", "result": {}},
       {"step": "workspace.populate", "result": {}},
+      {"step": "models.fetch_catalog", "result": {}},
       {"step": "config.configure_models", "result": {}},
       {"step": "config.configure_gateway_auth", "result": {}},
       {"step": "config.configure_tools", "result": {}}
@@ -712,9 +717,8 @@ cd ~/data/agent_manage && python3 scripts/agentctl.py agents-list
 
 ### 行为说明
 
-- 只允许在以下 5 个模型中切换：
-  `unipay-fun/gpt-5.4-nano`、`unipay-fun/gpt-5.4`、`unipay-fun/gpt-5.3-codex`、`unipay-fun/gpt-5.4-mini`、`unipay-fun/gpt-5-nano`
-- 传参必须写完整模型引用，不再接受简写
+- 只允许切换到当前 `~/.openclaw/openclaw.json` 已保存的受支持模型
+- 传参必须写完整模型引用，不接受简写
 - 直接执行 `openclaw models set <model_ref>`
 - 用于切换当前默认模型
 - 按当前观察，模型会在运行中逐步切换，不需要额外重启 gateway
@@ -728,11 +732,7 @@ cd ~/data/agent_manage && python3 scripts/agentctl.py set-model \
 
 可选模型：
 
-- `unipay-fun/gpt-5.4-nano`
-- `unipay-fun/gpt-5.4`
-- `unipay-fun/gpt-5.3-codex`
-- `unipay-fun/gpt-5.4-mini`
-- `unipay-fun/gpt-5-nano`
+- 以 `models` 返回结果为准
 
 可选参数：
 
@@ -826,6 +826,69 @@ cd ~/data/agent_manage && python3 scripts/agentctl.py current-model
   "serverTimeStamp": "2026-04-04 09:36:50"
 }
 ```
+
+## models
+
+### 行为说明
+
+- 直接读取 `~/.openclaw/openclaw.json`
+- 返回当前本机已经保存的受支持模型列表，不请求远端接口
+- 适合给上层在 `set-model` 前先拉一遍可选项
+
+### 远程执行
+
+```bash
+cd ~/data/agent_manage && python3 scripts/agentctl.py models
+```
+
+可选参数：
+
+- `--openclaw-bin`
+- `--project-dir`
+- `--dry-run`
+
+### Output
+
+成功时 `result` 里主要返回：
+
+- `provider`
+- `current_model`
+- `supported_model_refs`
+- `models`
+- `config_path`
+- `config_exists`
+
+## update-model
+
+### 行为说明
+
+- 重新请求 `https://unitag.dola.fi/aigateway/api/frontend/aimodels`
+- 将最新激活模型按当前 `openclaw` 配置格式写回 `~/.openclaw/openclaw.json`
+- 优先保留当前默认模型；如果当前默认模型已经不在最新目录里，则回退到推荐默认模型
+- 需要当前配置中已经存在 `models.providers.unipay-fun.apiKey`
+
+### 远程执行
+
+```bash
+cd ~/data/agent_manage && python3 scripts/agentctl.py update-model
+```
+
+可选参数：
+
+- `--openclaw-bin`
+- `--project-dir`
+- `--dry-run`
+
+### Output
+
+成功时 `result` 里主要返回：
+
+- `provider`
+- `current_model_before`
+- `current_model_after`
+- `supported_model_refs`
+- `steps`
+- `config_path`
 
 ## current-gateway-token
 

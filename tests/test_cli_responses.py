@@ -166,14 +166,19 @@ class CliResponseTest(unittest.TestCase):
         self.assertEqual(payload["result"]["model_ref"], "unipay-fun/gpt-5.4")
 
     def test_agent_manage_set_model_rejects_unknown_choice(self):
-        stdout = io.StringIO()
-        with redirect_stdout(stdout):
-            exit_code = agent_manage_main(["set-model", "--model", "gpt-4o"])
+        with patch("agent_manage.cli.InstanceManagerV2") as manager_cls:
+            manager_cls.return_value.set_model.side_effect = ValueError(
+                "Unsupported model 'gpt-4o'. Allowed: unipay-fun/gpt-5.4"
+            )
+
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                exit_code = agent_manage_main(["set-model", "--model", "gpt-4o"])
 
         payload = json.loads(stdout.getvalue())
         self.assertEqual(exit_code, 1)
         self.assertEqual(payload["typeCode"], TYPE_CODE_INVALID_ARGUMENT)
-        self.assertEqual(payload["error"]["code"], "INVALID_ARGUMENT")
+        self.assertEqual(payload["error"]["code"], "VALIDATION_ERROR")
 
     def test_agent_manage_agents_list_dispatches_correctly(self):
         with patch("agent_manage.cli.InstanceManagerV2") as manager_cls:
@@ -206,6 +211,42 @@ class CliResponseTest(unittest.TestCase):
         payload = json.loads(stdout.getvalue())
         self.assertEqual(exit_code, 0)
         self.assertEqual(payload["result"]["current_model"], "unipay-fun/gpt-5.4-nano")
+
+    def test_agent_manage_models_dispatches_correctly(self):
+        with patch("agent_manage.cli.InstanceManagerV2") as manager_cls:
+            manager_cls.return_value.get_supported_models.return_value = {
+                "ok": True,
+                "supported_model_refs": [
+                    "unipay-fun/gpt-5.4-nano",
+                    "unipay-fun/claude-sonnet-4-6",
+                ],
+            }
+
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                exit_code = agent_manage_main(["models"])
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(
+            payload["result"]["supported_model_refs"],
+            ["unipay-fun/gpt-5.4-nano", "unipay-fun/claude-sonnet-4-6"],
+        )
+
+    def test_agent_manage_update_model_dispatches_correctly(self):
+        with patch("agent_manage.cli.InstanceManagerV2") as manager_cls:
+            manager_cls.return_value.update_model_catalog.return_value = {
+                "ok": True,
+                "current_model_after": "unipay-fun/gpt-5.4",
+            }
+
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                exit_code = agent_manage_main(["update-model"])
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["result"]["current_model_after"], "unipay-fun/gpt-5.4")
 
     def test_agent_manage_current_gateway_token_dispatches_correctly(self):
         with patch("agent_manage.cli.InstanceManagerV2") as manager_cls:

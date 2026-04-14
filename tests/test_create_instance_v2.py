@@ -3,6 +3,7 @@ import unittest
 import zipfile
 import json
 from pathlib import Path
+from unittest.mock import patch
 
 from agent_manage.local import CommandResult
 from agent_manage.models import (
@@ -69,6 +70,61 @@ class FailingPopulateManager(InstanceManagerV2):
 
 
 class CreateInstanceV2Test(unittest.TestCase):
+    def setUp(self):
+        self.sample_supported_models = [
+            {
+                "id": "gpt-5.4-nano",
+                "model_ref": "unipay-fun/gpt-5.4-nano",
+                "definition": {
+                    "id": "gpt-5.4-nano",
+                    "name": "GPT-5.4 nano",
+                    "contextWindow": 400000,
+                    "maxTokens": 128000,
+                    "input": ["text"],
+                    "cost": {"input": 0.2, "output": 1.25, "cacheRead": 0.02, "cacheWrite": 0},
+                    "reasoning": True,
+                },
+            },
+            {
+                "id": "gpt-5.4",
+                "model_ref": "unipay-fun/gpt-5.4",
+                "definition": {
+                    "id": "gpt-5.4",
+                    "name": "GPT-5.4",
+                    "contextWindow": 400000,
+                    "maxTokens": 128000,
+                    "input": ["text"],
+                    "cost": {"input": 2.5, "output": 15.0, "cacheRead": 0.25, "cacheWrite": 0},
+                    "reasoning": True,
+                },
+            },
+            {
+                "id": "claude-sonnet-4-6",
+                "model_ref": "unipay-fun/claude-sonnet-4-6",
+                "definition": {
+                    "id": "claude-sonnet-4-6",
+                    "name": "Claude Sonnet 4.6",
+                    "contextWindow": 1000000,
+                    "maxTokens": 128000,
+                    "input": ["text"],
+                    "cost": {"input": 3.0, "output": 15.0, "cacheRead": 0.3, "cacheWrite": 0},
+                    "reasoning": False,
+                },
+            },
+        ]
+        self.fetch_models_patcher = patch.object(
+            InstanceManagerV2,
+            "_fetch_supported_gateway_models",
+            return_value={
+                "source_url": InstanceManagerV2.MODEL_CATALOG_URL,
+                "model_count": len(self.sample_supported_models),
+                "models": self.sample_supported_models,
+                "primary_model": "unipay-fun/gpt-5.4-nano",
+            },
+        )
+        self.fetch_models_patcher.start()
+        self.addCleanup(self.fetch_models_patcher.stop)
+
     def _write_host_config(self, config_path: Path, payload=None):
         config_path.parent.mkdir(parents=True, exist_ok=True)
         config_path.write_text(json.dumps(payload or {}, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
@@ -206,15 +262,17 @@ class CreateInstanceV2Test(unittest.TestCase):
                 [
                     "unipay-fun/gpt-5.4-nano",
                     "unipay-fun/gpt-5.4",
-                    "unipay-fun/gpt-5.3-codex",
-                    "unipay-fun/gpt-5.4-mini",
-                    "unipay-fun/gpt-5-nano",
+                    "unipay-fun/claude-sonnet-4-6",
                 ],
             )
             self.assertNotIn("vllm/gpt-4.1-mini", saved_config["agents"]["defaults"]["models"])
             self.assertEqual(
                 saved_config["models"]["providers"]["unipay-fun"]["apiKey"],
                 "test-key",
+            )
+            self.assertEqual(
+                saved_config["models"]["providers"]["unipay-fun"]["models"],
+                [item["definition"] for item in self.sample_supported_models],
             )
             self.assertEqual(saved_config["gateway"]["auth"]["mode"], "token")
             self.assertEqual(saved_config["gateway"]["auth"]["token"], result["gateway_token"])
@@ -230,6 +288,8 @@ class CreateInstanceV2Test(unittest.TestCase):
                 result["steps"][1]["result"]["command"],
                 f"openclaw agents add base --workspace {workspace.resolve()} --non-interactive --json --model openai/gpt-5",
             )
+            self.assertEqual(result["steps"][3]["step"], "models.fetch_catalog")
+            self.assertEqual(result["steps"][4]["step"], "config.configure_models")
             self.assertEqual(result["steps"][-1]["step"], "config.configure_tools")
             self.assertEqual(result["steps"][-2]["step"], "config.configure_gateway_auth")
 
@@ -1292,25 +1352,180 @@ class CreateInstanceV2Test(unittest.TestCase):
 
     def test_set_model_runs_models_set_only(self):
         runner = FakeRunner()
-        manager = InstanceManagerV2(runner)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "openclaw.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "models": {
+                            "providers": {
+                                "unipay-fun": {
+                                    "models": [item["definition"] for item in self.sample_supported_models]
+                                }
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            manager = InstanceManagerV2(runner, config_path=str(config_path))
 
-        result = manager.set_model(SetModelRequest(model_ref="unipay-fun/gpt-5.4"))
+            result = manager.set_model(SetModelRequest(model_ref="unipay-fun/gpt-5.4"))
 
-        self.assertTrue(result["ok"])
-        self.assertEqual(result["model_ref"], "unipay-fun/gpt-5.4")
-        self.assertEqual(
-            runner.calls,
-            [
-                ["openclaw", "models", "set", "unipay-fun/gpt-5.4"],
-            ],
-        )
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["model_ref"], "unipay-fun/gpt-5.4")
+            self.assertEqual(
+                runner.calls,
+                [
+                    ["openclaw", "models", "set", "unipay-fun/gpt-5.4"],
+                ],
+            )
 
     def test_set_model_rejects_unsupported_model(self):
         runner = FakeRunner()
-        manager = InstanceManagerV2(runner)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "openclaw.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "models": {
+                            "providers": {
+                                "unipay-fun": {
+                                    "models": [item["definition"] for item in self.sample_supported_models]
+                                }
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            manager = InstanceManagerV2(runner, config_path=str(config_path))
 
-        with self.assertRaises(ValueError):
-            manager.set_model(SetModelRequest(model_ref="gpt-4o"))
+            with self.assertRaises(ValueError):
+                manager.set_model(SetModelRequest(model_ref="gpt-4o"))
+
+    def test_get_supported_models_reads_config_only(self):
+        runner = FakeRunner()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "openclaw.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "agents": {
+                            "defaults": {
+                                "model": {
+                                    "primary": "unipay-fun/gpt-5.4-nano",
+                                }
+                            }
+                        },
+                        "models": {
+                            "providers": {
+                                "unipay-fun": {
+                                    "models": [item["definition"] for item in self.sample_supported_models]
+                                }
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            manager = InstanceManagerV2(runner, config_path=str(config_path))
+            result = manager.get_supported_models()
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["current_model"], "unipay-fun/gpt-5.4-nano")
+        self.assertEqual(
+            result["supported_model_refs"],
+            [
+                "unipay-fun/gpt-5.4-nano",
+                "unipay-fun/gpt-5.4",
+                "unipay-fun/claude-sonnet-4-6",
+            ],
+        )
+        self.assertEqual(runner.calls, [])
+
+    def test_update_model_catalog_preserves_current_model_when_still_supported(self):
+        runner = FakeRunner()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "openclaw.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "agents": {
+                            "defaults": {
+                                "model": {
+                                    "primary": "unipay-fun/claude-sonnet-4-6",
+                                }
+                            }
+                        },
+                        "models": {
+                            "providers": {
+                                "unipay-fun": {
+                                    "apiKey": "test-key",
+                                    "models": [],
+                                }
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            manager = InstanceManagerV2(runner, config_path=str(config_path))
+            result = manager.update_model_catalog()
+
+            saved_config = json.loads(config_path.read_text(encoding="utf-8"))
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["current_model_before"], "unipay-fun/claude-sonnet-4-6")
+        self.assertEqual(result["current_model_after"], "unipay-fun/claude-sonnet-4-6")
+        self.assertEqual(
+            saved_config["agents"]["defaults"]["model"]["primary"],
+            "unipay-fun/claude-sonnet-4-6",
+        )
+        self.assertEqual(
+            saved_config["models"]["providers"]["unipay-fun"]["models"],
+            [item["definition"] for item in self.sample_supported_models],
+        )
+        self.assertEqual(result["steps"][0]["step"], "models.fetch_catalog")
+        self.assertEqual(result["steps"][1]["step"], "config.configure_models")
+
+    def test_update_model_catalog_falls_back_when_current_model_no_longer_supported(self):
+        runner = FakeRunner()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "openclaw.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "agents": {
+                            "defaults": {
+                                "model": {
+                                    "primary": "unipay-fun/removed-model",
+                                }
+                            }
+                        },
+                        "models": {
+                            "providers": {
+                                "unipay-fun": {
+                                    "apiKey": "test-key",
+                                    "models": [],
+                                }
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            manager = InstanceManagerV2(runner, config_path=str(config_path))
+            result = manager.update_model_catalog()
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["current_model_before"], "unipay-fun/removed-model")
+        self.assertEqual(result["current_model_after"], "unipay-fun/gpt-5.4-nano")
 
     def test_list_agents_excludes_main(self):
         runner = FakeRunner(

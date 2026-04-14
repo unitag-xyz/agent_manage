@@ -9,6 +9,8 @@ from datetime import datetime
 from pathlib import Path
 from time import perf_counter
 from typing import Dict, List, Optional
+from urllib.error import URLError
+from urllib.request import Request, urlopen
 
 from .local import CommandError, LocalRunner
 
@@ -18,8 +20,6 @@ from .models import (
     CreateInstanceRequest,
     DeleteTelegramBotRequest,
     DeleteWeixinBotRequest,
-    MANAGED_MODEL_IDS,
-    SUPPORTED_MODEL_REFS,
     SetModelRequest,
 )
 
@@ -30,6 +30,15 @@ class InstanceManagerV2:
     WEIXIN_PLUGIN_PACKAGE = "@tencent-weixin/openclaw-weixin"
     WEIXIN_DEFAULT_BASE_URL = "https://ilinkai.weixin.qq.com"
     MANAGED_MODEL_PROVIDER = "unipay-fun"
+    MODEL_CATALOG_URL = "https://unitag.dola.fi/aigateway/api/frontend/aimodels"
+    DEFAULT_MODEL_MAX_TOKENS = 128000
+    PREFERRED_PRIMARY_MODEL_IDS = (
+        "gpt-5.4-nano",
+        "gpt-5.4",
+        "gpt-5.3-codex",
+        "gpt-5.4-mini",
+        "gpt-5-nano",
+    )
 
     def __init__(
         self,
@@ -117,11 +126,18 @@ class InstanceManagerV2:
                 )
                 created_workspace = not workspace_result.get("skipped", False)
 
+            fetched_models = self._run_timed_step(
+                steps,
+                "models.fetch_catalog",
+                self._fetch_supported_gateway_models,
+            )
+
             models_result = self._run_timed_step(
                 steps,
                 "config.configure_models",
                 lambda: self._configure_config_models(
                     model_key=request.model_key,
+                    supported_models=fetched_models["models"],
                 ),
             )
 
@@ -518,8 +534,9 @@ class InstanceManagerV2:
         }
 
     def set_model(self, request: SetModelRequest) -> Dict[str, object]:
-        if request.model_ref not in SUPPORTED_MODEL_REFS:
-            allowed = ", ".join(sorted(SUPPORTED_MODEL_REFS))
+        supported_model_refs = self._supported_model_refs_from_config()
+        if request.model_ref not in supported_model_refs:
+            allowed = ", ".join(sorted(supported_model_refs))
             raise ValueError(f"Unsupported model '{request.model_ref}'. Allowed: {allowed}")
 
         set_result = self.runner.run([self.bin, "models", "set", request.model_ref])
@@ -562,6 +579,57 @@ class InstanceManagerV2:
             "agent_overrides": agent_overrides,
             "config_path": str(self.config_path),
             "config_exists": self.config_path.exists(),
+        }
+
+    def get_supported_models(self) -> Dict[str, object]:
+        config = self._load_config()
+        defaults = config.get("agents", {}).get("defaults", {})
+        current_model = (
+            defaults.get("model", {}).get("primary")
+            if isinstance(defaults.get("model"), dict)
+            else None
+        )
+        models = self._supported_models_from_config(config)
+
+        return {
+            "ok": True,
+            "provider": self.MANAGED_MODEL_PROVIDER,
+            "current_model": current_model,
+            "supported_model_refs": [item["model_ref"] for item in models],
+            "models": models,
+            "config_path": str(self.config_path),
+            "config_exists": self.config_path.exists(),
+        }
+
+    def update_model_catalog(self) -> Dict[str, object]:
+        config = self._load_config()
+        current_model = self._configured_default_model_from_config(config)
+        model_key = self._configured_model_api_key_from_config(config)
+        steps: List[Dict[str, object]] = []
+
+        fetched_models = self._run_timed_step(
+            steps,
+            "models.fetch_catalog",
+            self._fetch_supported_gateway_models,
+        )
+        configure_result = self._run_timed_step(
+            steps,
+            "config.configure_models",
+            lambda: self._configure_config_models(
+                model_key=model_key,
+                supported_models=fetched_models["models"],
+                primary_model=current_model,
+            ),
+        )
+
+        return {
+            "ok": True,
+            "provider": self.MANAGED_MODEL_PROVIDER,
+            "current_model_before": current_model,
+            "current_model_after": configure_result["primary_model"],
+            "supported_model_refs": configure_result["managed_models"],
+            "steps": steps,
+            "config_path": str(self.config_path),
         }
 
     def get_current_gateway_token(self) -> Dict[str, object]:
@@ -753,14 +821,24 @@ class InstanceManagerV2:
             "copied_from_template_dir": copied,
         }
 
-    def _configure_config_models(self, model_key: str) -> Dict[str, object]:
+    def _configure_config_models(
+        self,
+        model_key: str,
+        supported_models: List[Dict[str, object]],
+        primary_model: Optional[str] = None,
+    ) -> Dict[str, object]:
         config_path = self.config_path
+        managed_model_refs = [item["model_ref"] for item in supported_models]
+        resolved_primary_model = self._select_primary_model_ref(
+            supported_models,
+            preferred_model_ref=primary_model,
+        )
         if self.runner.dry_run:
             return {
                 "skipped": True,
                 "config_path": str(config_path),
-                "primary_model": self._managed_primary_model_ref(),
-                "managed_models": self._managed_model_refs(),
+                "primary_model": resolved_primary_model,
+                "managed_models": managed_model_refs,
             }
 
         config = self._load_config()
@@ -769,8 +847,8 @@ class InstanceManagerV2:
 
         agents = config.setdefault("agents", {})
         defaults = agents.setdefault("defaults", {})
-        defaults["models"] = {model_ref: {} for model_ref in self._managed_model_refs()}
-        defaults["model"] = {"primary": self._managed_primary_model_ref()}
+        defaults["models"] = {model_ref: {} for model_ref in managed_model_refs}
+        defaults["model"] = {"primary": resolved_primary_model}
 
         config["models"] = {
             "mode": "merge",
@@ -779,7 +857,7 @@ class InstanceManagerV2:
                     "baseUrl": "https://unitag.dola.fi/aigateway/v1",
                     "api": "openai-completions",
                     "apiKey": model_key,
-                    "models": [self._managed_model_definition(model_id) for model_id in MANAGED_MODEL_IDS],
+                    "models": [item["definition"] for item in supported_models],
                 }
             },
         }
@@ -793,14 +871,14 @@ class InstanceManagerV2:
                 "models",
             ],
             extra={
-                "primary_model": self._managed_primary_model_ref(),
-                "managed_models": self._managed_model_refs(),
+                "primary_model": resolved_primary_model,
+                "managed_models": managed_model_refs,
             },
         )
         return {
             "config_path": str(config_path),
-            "primary_model": self._managed_primary_model_ref(),
-            "managed_models": self._managed_model_refs(),
+            "primary_model": resolved_primary_model,
+            "managed_models": managed_model_refs,
         }
 
     def _configure_config_tools(self) -> Dict[str, object]:
@@ -980,39 +1058,153 @@ class InstanceManagerV2:
     def _generate_gateway_token(self) -> str:
         return secrets.token_urlsafe(32)
 
-    def _managed_primary_model_ref(self) -> str:
-        return f"{self.MANAGED_MODEL_PROVIDER}/{MANAGED_MODEL_IDS[0]}"
-
-    def _managed_model_refs(self) -> List[str]:
-        return [f"{self.MANAGED_MODEL_PROVIDER}/{model_id}" for model_id in MANAGED_MODEL_IDS]
-
-    def _managed_model_definition(self, model_id: str) -> Dict[str, object]:
-        model_specs = {
-            "gpt-5.4-nano": {"contextWindow": 400000, "maxTokens": 128000},
-            "gpt-5.4": {"contextWindow": 1050000, "maxTokens": 128000},
-            "gpt-5.3-codex": {"contextWindow": 400000, "maxTokens": 128000},
-            "gpt-5.4-mini": {"contextWindow": 400000, "maxTokens": 128000},
-            "gpt-5-nano": {"contextWindow": 400000, "maxTokens": 128000},
-        }
+    def _fetch_supported_gateway_models(self) -> Dict[str, object]:
+        self.runner.log(f"models: fetch catalog {self.MODEL_CATALOG_URL}")
+        request = Request(
+            self.MODEL_CATALOG_URL,
+            headers={
+                "Accept": "application/json",
+                "User-Agent": "agent_manage/1.0",
+            },
+        )
         try:
-            spec = model_specs[model_id]
-        except KeyError as exc:
-            raise ValueError(f"Unsupported managed model definition for '{model_id}'") from exc
+            with urlopen(request, timeout=15) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except URLError as exc:
+            raise RuntimeError(f"Failed to fetch model catalog: {exc}") from exc
 
+        content = payload.get("content")
+        if not isinstance(content, list):
+            raise ValueError("Model catalog response missing 'content' list")
+
+        models = [
+            self._normalize_catalog_model(item)
+            for item in content
+            if isinstance(item, dict) and item.get("isActive") is True
+        ]
+        if not models:
+            raise ValueError("Model catalog did not contain any active models")
+
+        models.sort(key=self._supported_model_sort_key)
+        return {
+            "source_url": self.MODEL_CATALOG_URL,
+            "model_count": len(models),
+            "models": models,
+            "primary_model": self._select_primary_model_ref(models),
+        }
+
+    def _normalize_catalog_model(self, item: Dict[str, object]) -> Dict[str, object]:
+        model_id = str(item.get("identifier") or "").strip()
+        if not model_id:
+            raise ValueError(f"Model catalog entry missing identifier: {item}")
+
+        context_window = self._to_int(item.get("contextWindowTokens"))
+        if context_window is None:
+            raise ValueError(f"Model catalog entry missing contextWindowTokens for '{model_id}'")
+
+        display_name = str(item.get("displayName") or model_id).strip()
         return {
             "id": model_id,
-            "name": f"{model_id} (Custom Provider)",
-            "contextWindow": spec["contextWindow"],
-            "maxTokens": spec["maxTokens"],
-            "input": ["text"],
-            "cost": {
-                "input": 0,
-                "output": 0,
-                "cacheRead": 0,
-                "cacheWrite": 0,
+            "model_ref": f"{self.MANAGED_MODEL_PROVIDER}/{model_id}",
+            "definition": {
+                "id": model_id,
+                "name": display_name,
+                "contextWindow": context_window,
+                "maxTokens": self.DEFAULT_MODEL_MAX_TOKENS,
+                "input": ["text"],
+                "cost": {
+                    "input": self._to_number(item.get("inputTokenPrice")),
+                    "output": self._to_number(item.get("outputTokenPrice")),
+                    "cacheRead": self._to_number(item.get("cachedInputTokenPrice")),
+                    "cacheWrite": 0,
+                },
+                "reasoning": item.get("reasoningTokenPrice") is not None,
             },
-            "reasoning": True,
+            "upstream": {
+                "display_name": display_name,
+                "model_provider_identifier": item.get("modelProviderIdentifier"),
+                "model_provider_display_name": item.get("modelProviderDisplayName"),
+                "currency": item.get("currency"),
+                "token_pricing_unit": item.get("tokenPricingUnit"),
+                "reasoning_token_price": self._to_number(item.get("reasoningTokenPrice")),
+            },
         }
+
+    def _select_primary_model_ref(
+        self,
+        supported_models: List[Dict[str, object]],
+        preferred_model_ref: Optional[str] = None,
+    ) -> str:
+        supported_refs = {item["model_ref"] for item in supported_models}
+        if preferred_model_ref and preferred_model_ref in supported_refs:
+            return preferred_model_ref
+        by_id = {item["id"]: item["model_ref"] for item in supported_models}
+        for model_id in self.PREFERRED_PRIMARY_MODEL_IDS:
+            if model_id in by_id:
+                return by_id[model_id]
+        return supported_models[0]["model_ref"]
+
+    def _supported_model_sort_key(self, item: Dict[str, object]) -> tuple[int, str]:
+        model_id = item["id"]
+        try:
+            index = self.PREFERRED_PRIMARY_MODEL_IDS.index(model_id)
+        except ValueError:
+            index = len(self.PREFERRED_PRIMARY_MODEL_IDS)
+        return (index, model_id)
+
+    def _supported_models_from_config(self, config: Dict[str, object]) -> List[Dict[str, object]]:
+        provider = config.get("models", {}).get("providers", {}).get(self.MANAGED_MODEL_PROVIDER, {})
+        definitions = provider.get("models", []) if isinstance(provider, dict) else []
+        models: List[Dict[str, object]] = []
+        for item in definitions:
+            if not isinstance(item, dict):
+                continue
+            model_id = item.get("id")
+            if not isinstance(model_id, str) or not model_id.strip():
+                continue
+            model_id = model_id.strip()
+            models.append(
+                {
+                    "id": model_id,
+                    "model_ref": f"{self.MANAGED_MODEL_PROVIDER}/{model_id}",
+                    "definition": item,
+                }
+            )
+        models.sort(key=self._supported_model_sort_key)
+        return models
+
+    def _supported_model_refs_from_config(self) -> List[str]:
+        config = self._load_config()
+        supported_refs = [item["model_ref"] for item in self._supported_models_from_config(config)]
+        if not supported_refs:
+            raise ValueError(f"No supported models configured under provider '{self.MANAGED_MODEL_PROVIDER}'")
+        return supported_refs
+
+    def _configured_default_model_from_config(self, config: Dict[str, object]) -> Optional[str]:
+        defaults = config.get("agents", {}).get("defaults", {})
+        model = defaults.get("model", {}) if isinstance(defaults, dict) else {}
+        if isinstance(model, dict):
+            primary = model.get("primary")
+            if isinstance(primary, str) and primary.strip():
+                return primary.strip()
+        return None
+
+    def _configured_model_api_key_from_config(self, config: Dict[str, object]) -> str:
+        provider = config.get("models", {}).get("providers", {}).get(self.MANAGED_MODEL_PROVIDER, {})
+        api_key = provider.get("apiKey") if isinstance(provider, dict) else None
+        if not isinstance(api_key, str) or not api_key.strip():
+            raise ValueError(f"Configured apiKey not found for provider '{self.MANAGED_MODEL_PROVIDER}'")
+        return api_key.strip()
+
+    def _to_int(self, value) -> Optional[int]:
+        if value is None:
+            return None
+        return int(value)
+
+    def _to_number(self, value) -> float:
+        if value is None:
+            return 0
+        return float(value)
 
     def _normalize_weixin_account_id(self, account_id: str) -> str:
         normalized = []
