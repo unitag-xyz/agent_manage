@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from typing import List, Optional
 
@@ -13,6 +14,8 @@ from .response import (
 )
 
 from .models import (
+    AddAgentRequest,
+    AddAgentsRequest,
     AddTelegramBotRequest,
     AddWeixinBotRequest,
     CreateInstanceRequest,
@@ -38,6 +41,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     create_instance.add_argument("--model")
     create_instance.add_argument("--workspace-root", default="~/data")
     create_instance.add_argument("--no-rollback", action="store_true")
+
+    add_agents = subparsers.add_parser("add-agents")
+    add_agents.add_argument("--agents", required=True)
+    add_agents.add_argument("--workspace-root", default="~/data")
 
     add_tg_bot = subparsers.add_parser("add-tg-bot")
     add_tg_bot.add_argument("--agent", required=True)
@@ -99,6 +106,15 @@ def main(argv: Optional[List[str]] = None) -> int:
                     model=args.model,
                     workspace_root=args.workspace_root,
                     rollback_on_fail=not args.no_rollback,
+                )
+            )
+            print_json(build_success_response(result))
+            return 0
+        if args.command == "add-agents":
+            result = client.add_agents(
+                AddAgentsRequest(
+                    agents=_parse_add_agents(args.agents),
+                    workspace_root=args.workspace_root,
                 )
             )
             print_json(build_success_response(result))
@@ -192,6 +208,54 @@ def main(argv: Optional[List[str]] = None) -> int:
     except Exception as exc:
         print_json(build_error_response(exc))
         return 1
+
+
+def _parse_add_agents(raw: str) -> List[AddAgentRequest]:
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError("--agents must be a JSON array") from exc
+
+    if not isinstance(payload, list):
+        raise ValueError("--agents must be a JSON array")
+    if not payload:
+        raise ValueError("--agents must contain at least one item")
+
+    agents: List[AddAgentRequest] = []
+    for index, item in enumerate(payload):
+        if isinstance(item, str):
+            agent_name = item.strip()
+            if not agent_name:
+                raise ValueError(f"agents[{index}] must not be empty")
+            agents.append(AddAgentRequest(agent_name=agent_name))
+            continue
+
+        if not isinstance(item, dict):
+            raise ValueError(f"agents[{index}] must be a string or object")
+
+        agent_name = item.get("agent_name")
+        template_name = item.get("template_name")
+        workspace = item.get("workspace")
+        model = item.get("model")
+
+        if not isinstance(agent_name, str) or not agent_name.strip():
+            raise ValueError(f"agents[{index}].agent_name is required")
+        if template_name is not None and not isinstance(template_name, str):
+            raise ValueError(f"agents[{index}].template_name must be a string")
+        if workspace is not None and not isinstance(workspace, str):
+            raise ValueError(f"agents[{index}].workspace must be a string")
+        if model is not None and not isinstance(model, str):
+            raise ValueError(f"agents[{index}].model must be a string")
+
+        agents.append(
+            AddAgentRequest(
+                agent_name=agent_name.strip(),
+                template_name=template_name.strip() if isinstance(template_name, str) else None,
+                workspace=workspace.strip() if isinstance(workspace, str) else None,
+                model=model.strip() if isinstance(model, str) else None,
+            )
+        )
+    return agents
 
 
 if __name__ == "__main__":

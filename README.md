@@ -108,6 +108,132 @@ cd ~/data/agent_manage && python3 scripts/agentctl.py create-instance \
 }
 ```
 
+## add-agents
+
+### 行为说明
+
+- 用于给已经启动的服务批量追加 agent
+- `--agents` 必须传 JSON 数组
+- 数组项支持两种写法：
+  - 字符串：直接视为 `agent_name`
+  - 对象：支持 `agent_name`，可选 `template_name`、`workspace`、`model`
+- 每个条目会按 `create-instance` 的前三步执行：
+  `template.prepare -> agents.add -> workspace.populate`
+- 默认 `template_name = agent_name`
+- 会从 `~/template/{templateName}.zip` 解压到 `~/template/{templateName}/`
+- 再把 `~/template/{templateName}/` 整体复制到 workspace
+- 未显式传 `workspace` 时，默认使用 `--workspace-root/{agent_name}`，默认根目录仍为 `~/data`
+- 单个 agent 的创建顺序与 `create-instance` 一致，`openclaw agents add` 发生在模板解压之后、workspace 填充之前
+- 如果同名 agent 已存在，会跳过该项并继续处理剩余项
+- 如果 workspace 已存在且非空，会跳过该项的 `workspace.populate`
+- 批量追加完成后不额外执行 `openclaw gateway restart`
+- 返回体会显式给出 `restart_required = false` 和空的 `post_batch_actions`
+
+### 远程执行
+
+```bash
+cd ~/data/agent_manage && python3 scripts/agentctl.py add-agents \
+  --agents '[
+    "unipay-claw-base",
+    {"agent_name":"unipay-claw-demo","template_name":"demo-template","model":"openai/gpt-5"},
+    {"agent_name":"unipay-claw-custom","workspace":"~/agents/custom"}
+  ]'
+```
+
+可选参数：
+
+- `--workspace-root`
+- `--config-path`
+- `--openclaw-bin`
+- `--project-dir`
+- `--dry-run`
+
+### Output
+
+成功时 `result` 里主要返回：
+
+- `requested_count`
+- `added_count`
+- `skipped_count`
+- `restart_required`
+- `post_batch_actions`
+- `agents`
+- `steps`
+
+示例：
+
+```json
+{
+  "result": {
+    "ok": true,
+    "requested_count": 2,
+    "added_count": 1,
+    "skipped_count": 1,
+    "restart_required": false,
+    "post_batch_actions": [],
+    "agents": [
+      {
+        "agent_name": "unipay-claw-base",
+        "template_name": "unipay-claw-base",
+        "workspace": "/root/data/unipay-claw-base",
+        "archive_path": "/root/template/unipay-claw-base.zip",
+        "template_dir": "/root/template/unipay-claw-base",
+        "model": null,
+        "status": "skipped",
+        "result": {
+          "template_prepare": {
+            "archive_path": "/root/template/unipay-claw-base.zip"
+          },
+          "agents_add": {
+            "skipped": true,
+            "reason": "agent_exists",
+            "agent_name": "unipay-claw-base"
+          },
+          "workspace_populate": {
+            "skipped": true,
+            "reason": "workspace_not_empty",
+            "workspace": "/root/data/unipay-claw-base"
+          }
+        }
+      },
+      {
+        "agent_name": "unipay-claw-demo",
+        "template_name": "demo-template",
+        "workspace": "/root/data/unipay-claw-demo",
+        "archive_path": "/root/template/demo-template.zip",
+        "template_dir": "/root/template/demo-template",
+        "model": "openai/gpt-5",
+        "status": "added",
+        "result": {
+          "template_prepare": {
+            "archive_path": "/root/template/demo-template.zip"
+          },
+          "agents_add": {
+            "command": "openclaw agents add unipay-claw-demo --workspace /root/data/unipay-claw-demo --non-interactive --json --model openai/gpt-5",
+            "returncode": 0
+          },
+          "workspace_populate": {
+            "workspace": "/root/data/unipay-claw-demo"
+          }
+        }
+      }
+    ],
+    "steps": [
+      {"step": "template.prepare[unipay-claw-base]", "result": {}},
+      {"step": "agents.add[unipay-claw-base]", "result": {}},
+      {"step": "workspace.populate[unipay-claw-base]", "result": {}},
+      {"step": "template.prepare[unipay-claw-demo]", "result": {}},
+      {"step": "agents.add[unipay-claw-demo]", "result": {}},
+      {"step": "workspace.populate[unipay-claw-demo]", "result": {}}
+    ]
+  },
+  "error": null,
+  "typeCode": 1,
+  "message": "OK",
+  "serverTimeStamp": "2026-04-20 11:20:00"
+}
+```
+
 ## add-tg-bot
 
 ### 行为说明

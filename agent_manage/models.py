@@ -13,6 +13,20 @@ class CreateInstanceRequest:
 
 
 @dataclass
+class AddAgentRequest:
+    agent_name: str
+    template_name: str | None = None
+    workspace: str | None = None
+    model: str | None = None
+
+
+@dataclass
+class AddAgentsRequest:
+    agents: list[AddAgentRequest]
+    workspace_root: str = "~/data"
+
+
+@dataclass
 class AddTelegramBotRequest:
     agent_name: str
     bot_token: str

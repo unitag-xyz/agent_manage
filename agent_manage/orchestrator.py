@@ -15,6 +15,8 @@ from urllib.request import Request, urlopen
 from .local import CommandError, LocalRunner
 
 from .models import (
+    AddAgentRequest,
+    AddAgentsRequest,
     AddTelegramBotRequest,
     AddWeixinBotRequest,
     CreateInstanceRequest,
@@ -67,64 +69,25 @@ class InstanceManagerV2:
         workspace = self.default_workspace(agent_name, request.workspace_root)
         archive_path = self.resolve_archive_path(request)
         template_dir = self.resolve_template_dir(request)
-
-        self._ensure_sources_ready(archive_path=archive_path)
-        workspace_has_content = self._workspace_has_content(workspace)
-        agent_exists = self._agent_exists(agent_name)
-
         created_agent = False
         started_template_prepare = False
         created_workspace = False
 
         try:
-            started_template_prepare = True
-            template_result = self._run_timed_step(
-                steps,
-                "template.prepare",
-                lambda: self._prepare_template_dir(
-                    archive_path=archive_path,
-                    template_dir=template_dir,
-                ),
+            provision_result = self._provision_agent_from_template(
+                steps=steps,
+                template_name=request.template_name,
+                agent_name=agent_name,
+                archive_path=archive_path,
+                template_dir=template_dir,
+                workspace=workspace,
+                model=request.model,
+                rollback_on_fail=request.rollback_on_fail,
+                step_scope=None,
             )
-
-            if agent_exists:
-                self.runner.log(f"agent exists, skip add: {agent_name}")
-                agent_result = {
-                    "skipped": True,
-                    "reason": "agent_exists",
-                    "agent_name": agent_name,
-                }
-                steps.append(self._build_step_payload("agents.add", agent_result))
-            else:
-                agent_result = self._run_timed_step(
-                    steps,
-                    "agents.add",
-                    lambda: self._add_agent(
-                        agent_name=agent_name,
-                        workspace=workspace,
-                        model=request.model,
-                    ),
-                )
-                created_agent = True
-
-            if workspace_has_content:
-                self.runner.log(f"workspace not empty, skip populate: {workspace}")
-                workspace_result = {
-                    "skipped": True,
-                    "reason": "workspace_not_empty",
-                    "workspace": str(workspace),
-                }
-                steps.append(self._build_step_payload("workspace.populate", workspace_result))
-            else:
-                workspace_result = self._run_timed_step(
-                    steps,
-                    "workspace.populate",
-                    lambda: self._populate_workspace(
-                        template_dir=template_dir,
-                        workspace=workspace,
-                    ),
-                )
-                created_workspace = not workspace_result.get("skipped", False)
+            created_agent = bool(provision_result["created_agent"])
+            started_template_prepare = bool(provision_result["started_template_prepare"])
+            created_workspace = bool(provision_result["created_workspace"])
 
             fetched_models = self._run_timed_step(
                 steps,
@@ -165,6 +128,9 @@ class InstanceManagerV2:
                 "steps": steps,
             }
         except Exception as exc:
+            payload = self._embedded_error_payload(exc)
+            if payload.get("rollback"):
+                raise
             rollback_steps: List[Dict[str, object]] = []
             if request.rollback_on_fail:
                 if created_workspace or (created_agent and workspace.exists()):
@@ -184,6 +150,84 @@ class InstanceManagerV2:
                     ensure_ascii=False,
                 )
             ) from exc
+
+    def add_agents(self, request: AddAgentsRequest) -> Dict[str, object]:
+        if not request.agents:
+            raise ValueError("agents is required")
+
+        steps: List[Dict[str, object]] = []
+        agent_results: List[Dict[str, object]] = []
+        seen_agent_names = set()
+
+        for spec in request.agents:
+            agent_name = spec.agent_name.strip()
+            if not agent_name:
+                raise ValueError("agent_name is required")
+            if agent_name in seen_agent_names:
+                raise ValueError(f"Duplicate agent_name in batch: {agent_name}")
+            seen_agent_names.add(agent_name)
+
+            template_name = self.resolve_add_agent_template_name(spec)
+            workspace = self.resolve_add_agent_workspace(spec, request.workspace_root)
+            archive_path = self.template_root / f"{template_name}.zip"
+            template_dir = self.template_root / template_name
+
+            self._provision_agent_from_template(
+                steps=steps,
+                template_name=template_name,
+                agent_name=agent_name,
+                archive_path=archive_path,
+                template_dir=template_dir,
+                workspace=workspace,
+                model=spec.model,
+                rollback_on_fail=True,
+                step_scope=agent_name,
+            )
+
+            agent_results.append(
+                {
+                    "agent_name": agent_name,
+                    "template_name": template_name,
+                    "workspace": str(workspace),
+                    "archive_path": str(archive_path),
+                    "template_dir": str(template_dir),
+                    "model": spec.model,
+                }
+            )
+        step_results = self._index_step_results(steps)
+        added_count = 0
+        skipped_count = 0
+        for item in agent_results:
+            agent_name = item["agent_name"]
+            add_result = step_results.get(self._scoped_step_name("agents.add", agent_name), {})
+            status = "skipped" if add_result.get("skipped") else "added"
+            item["status"] = status
+            item["result"] = {
+                "template_prepare": step_results.get(
+                    self._scoped_step_name("template.prepare", agent_name),
+                    {},
+                ),
+                "agents_add": add_result,
+                "workspace_populate": step_results.get(
+                    self._scoped_step_name("workspace.populate", agent_name),
+                    {},
+                ),
+            }
+            if status == "added":
+                added_count += 1
+            else:
+                skipped_count += 1
+
+        return {
+            "ok": True,
+            "requested_count": len(request.agents),
+            "added_count": added_count,
+            "skipped_count": skipped_count,
+            "restart_required": False,
+            "post_batch_actions": [],
+            "agents": agent_results,
+            "steps": steps,
+        }
 
     def add_tg_bot(self, request: AddTelegramBotRequest) -> Dict[str, object]:
         self._ensure_agent_exists_in_config(request.agent_name)
@@ -669,6 +713,14 @@ class InstanceManagerV2:
     def default_workspace(self, agent_name: str, workspace_root: str) -> Path:
         return Path(workspace_root).expanduser().resolve() / agent_name
 
+    def resolve_add_agent_template_name(self, request: AddAgentRequest) -> str:
+        return (request.template_name or request.agent_name).strip()
+
+    def resolve_add_agent_workspace(self, request: AddAgentRequest, workspace_root: str) -> Path:
+        if request.workspace:
+            return Path(request.workspace).expanduser().resolve()
+        return self.default_workspace(request.agent_name, workspace_root)
+
     def resolve_archive_path(self, request: CreateInstanceRequest) -> Path:
         return self.template_root / f"{request.template_name}.zip"
 
@@ -984,6 +1036,138 @@ class InstanceManagerV2:
         if elapsed_ms is not None:
             payload["elapsed_ms"] = elapsed_ms
         return payload
+
+    def _scoped_step_name(self, step: str, scope: Optional[str]) -> str:
+        return f"{step}[{scope}]" if scope else step
+
+    def _index_step_results(self, steps: List[Dict[str, object]]) -> Dict[str, Dict[str, object]]:
+        indexed: Dict[str, Dict[str, object]] = {}
+        for item in steps:
+            step = item.get("step")
+            result = item.get("result")
+            if isinstance(step, str) and isinstance(result, dict):
+                indexed[step] = result
+        return indexed
+
+    def _provision_agent_from_template(
+        self,
+        *,
+        steps: List[Dict[str, object]],
+        template_name: str,
+        agent_name: str,
+        archive_path: Path,
+        template_dir: Path,
+        workspace: Path,
+        model: Optional[str],
+        rollback_on_fail: bool,
+        step_scope: Optional[str],
+    ) -> Dict[str, object]:
+        self._ensure_sources_ready(archive_path=archive_path)
+        workspace_has_content = self._workspace_has_content(workspace)
+        agent_exists = self._agent_exists(agent_name)
+
+        created_agent = False
+        started_template_prepare = False
+        created_workspace = False
+
+        try:
+            started_template_prepare = True
+            self._run_timed_step(
+                steps,
+                self._scoped_step_name("template.prepare", step_scope),
+                lambda: self._prepare_template_dir(
+                    archive_path=archive_path,
+                    template_dir=template_dir,
+                ),
+            )
+
+            if agent_exists:
+                self.runner.log(f"agent exists, skip add: {agent_name}")
+                agent_result = {
+                    "skipped": True,
+                    "reason": "agent_exists",
+                    "agent_name": agent_name,
+                }
+                steps.append(
+                    self._build_step_payload(
+                        self._scoped_step_name("agents.add", step_scope),
+                        agent_result,
+                    )
+                )
+            else:
+                self._run_timed_step(
+                    steps,
+                    self._scoped_step_name("agents.add", step_scope),
+                    lambda: self._add_agent(
+                        agent_name=agent_name,
+                        workspace=workspace,
+                        model=model,
+                    ),
+                )
+                created_agent = True
+
+            if workspace_has_content:
+                self.runner.log(f"workspace not empty, skip populate: {workspace}")
+                workspace_result = {
+                    "skipped": True,
+                    "reason": "workspace_not_empty",
+                    "workspace": str(workspace),
+                }
+                steps.append(
+                    self._build_step_payload(
+                        self._scoped_step_name("workspace.populate", step_scope),
+                        workspace_result,
+                    )
+                )
+            else:
+                workspace_result = self._run_timed_step(
+                    steps,
+                    self._scoped_step_name("workspace.populate", step_scope),
+                    lambda: self._populate_workspace(
+                        template_dir=template_dir,
+                        workspace=workspace,
+                    ),
+                )
+                created_workspace = not workspace_result.get("skipped", False)
+            return {
+                "created_agent": created_agent,
+                "started_template_prepare": started_template_prepare,
+                "created_workspace": created_workspace,
+            }
+        except Exception as exc:
+            rollback_steps: List[Dict[str, object]] = []
+            if rollback_on_fail:
+                if created_workspace or (created_agent and workspace.exists()):
+                    rollback_steps.append(self._safe_purge_workspace(workspace))
+                if created_agent:
+                    rollback_steps.append(self._safe_delete_agent(agent_name))
+                if started_template_prepare and template_dir.exists():
+                    rollback_steps.append(self._safe_purge_template_dir(template_dir))
+            raise RuntimeError(
+                json.dumps(
+                    {
+                        "error": str(exc),
+                        "details": self._error_details(exc),
+                        "context": {
+                            "template_name": template_name,
+                            "agent_name": agent_name,
+                            "workspace": str(workspace),
+                            "archive_path": str(archive_path),
+                            "template_dir": str(template_dir),
+                        },
+                        "steps": steps,
+                        "rollback": rollback_steps,
+                    },
+                    ensure_ascii=False,
+                )
+            ) from exc
+
+    def _embedded_error_payload(self, exc: Exception) -> Dict[str, object]:
+        try:
+            payload = json.loads(str(exc))
+        except (TypeError, json.JSONDecodeError):
+            return {}
+        return payload if isinstance(payload, dict) else {}
 
     def _resolve_unpacked_root(self, extract_dir: Path) -> Path:
         candidates = [item for item in extract_dir.iterdir() if item.name != "__MACOSX"]

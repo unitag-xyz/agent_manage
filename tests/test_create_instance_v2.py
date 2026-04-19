@@ -7,6 +7,8 @@ from unittest.mock import patch
 
 from agent_manage.local import CommandResult
 from agent_manage.models import (
+    AddAgentsRequest,
+    AddAgentRequest,
     AddTelegramBotRequest,
     AddWeixinBotRequest,
     CreateInstanceRequest,
@@ -750,6 +752,158 @@ class CreateInstanceV2Test(unittest.TestCase):
                     }
                 ],
             )
+
+    def test_add_agents_runs_non_interactive_add_for_each_requested_agent(self):
+        runner = FakeRunner()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            template_root = tmp_path / "template"
+            template_root.mkdir(parents=True)
+            self._write_archive(template_root / "base.zip", {"base/SOUL.md": "base soul\n"})
+            self._write_archive(
+                template_root / "demo-template.zip",
+                {"demo-template/app/main.py": "print('demo')\n"},
+            )
+            config_path = tmp_path / "openclaw.json"
+            config_path.write_text(json.dumps({"agents": {"list": []}}), encoding="utf-8")
+
+            manager = InstanceManagerV2(
+                runner,
+                template_root=str(template_root),
+                config_path=str(config_path),
+            )
+            result = manager.add_agents(
+                AddAgentsRequest(
+                    agents=[
+                        AddAgentRequest(agent_name="base"),
+                        AddAgentRequest(
+                            agent_name="demo",
+                            template_name="demo-template",
+                            workspace=str(tmp_path / "custom-demo"),
+                            model="openai/gpt-5",
+                        ),
+                    ],
+                    workspace_root=str(tmp_path / "data"),
+                )
+            )
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["added_count"], 2)
+            self.assertEqual(result["skipped_count"], 0)
+            self.assertFalse(result["restart_required"])
+            self.assertEqual(result["post_batch_actions"], [])
+            self.assertEqual(
+                (tmp_path / "data" / "base" / "SOUL.md").read_text(encoding="utf-8"),
+                "base soul\n",
+            )
+            self.assertEqual(
+                (tmp_path / "custom-demo" / "app" / "main.py").read_text(encoding="utf-8"),
+                "print('demo')\n",
+            )
+            self.assertEqual(
+                runner.calls,
+                [
+                    [
+                        "openclaw",
+                        "agents",
+                        "add",
+                        "base",
+                        "--workspace",
+                        str((tmp_path / "data" / "base").resolve()),
+                        "--non-interactive",
+                        "--json",
+                    ],
+                    [
+                        "openclaw",
+                        "agents",
+                        "add",
+                        "demo",
+                        "--workspace",
+                        str((tmp_path / "custom-demo").resolve()),
+                        "--non-interactive",
+                        "--json",
+                        "--model",
+                        "openai/gpt-5",
+                    ],
+                ],
+            )
+            self.assertEqual(result["steps"][0]["step"], "template.prepare[base]")
+            self.assertEqual(result["steps"][1]["step"], "agents.add[base]")
+            self.assertEqual(result["steps"][2]["step"], "workspace.populate[base]")
+            self.assertEqual(result["steps"][3]["step"], "template.prepare[demo]")
+            self.assertEqual(result["steps"][4]["step"], "agents.add[demo]")
+            self.assertEqual(result["steps"][5]["step"], "workspace.populate[demo]")
+            self.assertEqual(result["agents"][1]["template_name"], "demo-template")
+            self.assertEqual(
+                result["agents"][0]["result"]["template_prepare"]["archive_path"],
+                str((template_root / "base.zip").resolve()),
+            )
+
+    def test_add_agents_skips_existing_agent_and_keeps_running(self):
+        runner = FakeRunner()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            template_root = tmp_path / "template"
+            template_root.mkdir(parents=True)
+            self._write_archive(template_root / "base.zip", {"SOUL.md": "base soul\n"})
+            self._write_archive(template_root / "demo.zip", {"SOUL.md": "demo soul\n"})
+            config_path = tmp_path / "openclaw.json"
+            config_path.write_text(
+                json.dumps({"agents": {"list": [{"id": "base"}]}}),
+                encoding="utf-8",
+            )
+
+            manager = InstanceManagerV2(
+                runner,
+                template_root=str(template_root),
+                config_path=str(config_path),
+            )
+            result = manager.add_agents(
+                AddAgentsRequest(
+                    agents=[
+                        AddAgentRequest(agent_name="base"),
+                        AddAgentRequest(agent_name="demo"),
+                    ],
+                    workspace_root=str(tmp_path / "data"),
+                )
+            )
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["added_count"], 1)
+            self.assertEqual(result["skipped_count"], 1)
+            self.assertEqual(
+                (tmp_path / "data" / "base" / "SOUL.md").read_text(encoding="utf-8"),
+                "base soul\n",
+            )
+            self.assertEqual(
+                result["agents"][0]["result"]["agents_add"],
+                {
+                    "skipped": True,
+                    "reason": "agent_exists",
+                    "agent_name": "base",
+                },
+            )
+            self.assertEqual(
+                runner.calls,
+                [
+                    [
+                        "openclaw",
+                        "agents",
+                        "add",
+                        "demo",
+                        "--workspace",
+                        str((tmp_path / "data" / "demo").resolve()),
+                        "--non-interactive",
+                        "--json",
+                    ]
+                ],
+            )
+            self.assertEqual(result["steps"][0]["step"], "template.prepare[base]")
+            self.assertEqual(result["steps"][1]["step"], "agents.add[base]")
+            self.assertEqual(result["steps"][2]["step"], "workspace.populate[base]")
+            self.assertIn("agent exists, skip add: base", runner.logs)
 
     def test_add_tg_bot_replaces_existing_binding_for_same_bot_name(self):
         runner = FakeRunner()

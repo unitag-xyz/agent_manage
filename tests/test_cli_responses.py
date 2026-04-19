@@ -5,6 +5,7 @@ from contextlib import redirect_stdout
 from unittest.mock import patch
 
 from agent_manage.cli import main as agent_manage_main
+from agent_manage.models import AddAgentsRequest
 from agent_manage.response import (
     TYPE_CODE_INVALID_ARGUMENT,
     TYPE_CODE_NOT_FOUND,
@@ -68,6 +69,53 @@ class CliResponseTest(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertEqual(payload["typeCode"], TYPE_CODE_SUCCESS)
         self.assertEqual(payload["result"]["bound_tg_bot_count"], 2)
+
+    def test_agent_manage_add_agents_dispatches_correctly(self):
+        with patch("agent_manage.cli.InstanceManagerV2") as manager_cls:
+            manager_cls.return_value.add_agents.return_value = {
+                "ok": True,
+                "added_count": 2,
+            }
+
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                exit_code = agent_manage_main(
+                    [
+                        "add-agents",
+                        "--agents",
+                        '[\"base\", {\"agent_name\": \"demo\", \"model\": \"openai/gpt-5\"}]',
+                    ]
+                )
+
+        payload = json.loads(stdout.getvalue())
+        request = manager_cls.return_value.add_agents.call_args.args[0]
+        self.assertEqual(exit_code, 0)
+        self.assertIsInstance(request, AddAgentsRequest)
+        self.assertEqual(request.agents[0].agent_name, "base")
+        self.assertEqual(request.agents[1].agent_name, "demo")
+        self.assertEqual(request.agents[1].model, "openai/gpt-5")
+        self.assertEqual(payload["result"]["added_count"], 2)
+
+    def test_agent_manage_add_agents_parses_optional_template_name(self):
+        with patch("agent_manage.cli.InstanceManagerV2") as manager_cls:
+            manager_cls.return_value.add_agents.return_value = {
+                "ok": True,
+                "added_count": 1,
+            }
+
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                exit_code = agent_manage_main(
+                    [
+                        "add-agents",
+                        "--agents",
+                        '[{"agent_name":"demo","template_name":"demo-template"}]',
+                    ]
+                )
+
+        request = manager_cls.return_value.add_agents.call_args.args[0]
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(request.agents[0].template_name, "demo-template")
 
     def test_agent_manage_weixin_bot_status_uses_result_envelope(self):
         with patch("agent_manage.cli.InstanceManagerV2") as manager_cls:
