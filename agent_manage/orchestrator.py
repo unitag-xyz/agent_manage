@@ -35,9 +35,11 @@ class InstanceManagerV2:
     MODEL_CATALOG_URL = "https://unitag.dola.fi/aigateway/api/frontend/aimodels"
     DEFAULT_MODEL_MAX_TOKENS = 128000
     PREFERRED_PRIMARY_MODEL_IDS = (
-        "gpt-5.4-nano",
+        "deepseek-v4-flash",
+        "deepseek-v4-pro",
         "gpt-5.4",
         "gpt-5.3-codex",
+        "gpt-5.4-nano",
         "gpt-5.4-mini",
         "gpt-5-nano",
     )

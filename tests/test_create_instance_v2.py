@@ -75,6 +75,58 @@ class CreateInstanceV2Test(unittest.TestCase):
     def setUp(self):
         self.sample_supported_models = [
             {
+                "id": "deepseek-v4-flash",
+                "model_ref": "unipay-fun/deepseek-v4-flash",
+                "definition": {
+                    "id": "deepseek-v4-flash",
+                    "name": "DeepSeek V4 Flash",
+                    "contextWindow": 1000000,
+                    "maxTokens": 128000,
+                    "input": ["text"],
+                    "cost": {"input": 0.14, "output": 0.28, "cacheRead": 0.028, "cacheWrite": 0},
+                    "reasoning": False,
+                },
+            },
+            {
+                "id": "deepseek-v4-pro",
+                "model_ref": "unipay-fun/deepseek-v4-pro",
+                "definition": {
+                    "id": "deepseek-v4-pro",
+                    "name": "DeepSeek V4 Pro",
+                    "contextWindow": 1000000,
+                    "maxTokens": 128000,
+                    "input": ["text"],
+                    "cost": {"input": 1.74, "output": 3.48, "cacheRead": 0.145, "cacheWrite": 0},
+                    "reasoning": False,
+                },
+            },
+            {
+                "id": "gpt-5.4",
+                "model_ref": "unipay-fun/gpt-5.4",
+                "definition": {
+                    "id": "gpt-5.4",
+                    "name": "GPT-5.4",
+                    "contextWindow": 1050000,
+                    "maxTokens": 128000,
+                    "input": ["text"],
+                    "cost": {"input": 2.5, "output": 15.0, "cacheRead": 0.25, "cacheWrite": 0},
+                    "reasoning": True,
+                },
+            },
+            {
+                "id": "gpt-5.3-codex",
+                "model_ref": "unipay-fun/gpt-5.3-codex",
+                "definition": {
+                    "id": "gpt-5.3-codex",
+                    "name": "GPT-5.3 Codex",
+                    "contextWindow": 400000,
+                    "maxTokens": 128000,
+                    "input": ["text"],
+                    "cost": {"input": 1.75, "output": 14.0, "cacheRead": 0.175, "cacheWrite": 0},
+                    "reasoning": True,
+                },
+            },
+            {
                 "id": "gpt-5.4-nano",
                 "model_ref": "unipay-fun/gpt-5.4-nano",
                 "definition": {
@@ -84,19 +136,6 @@ class CreateInstanceV2Test(unittest.TestCase):
                     "maxTokens": 128000,
                     "input": ["text"],
                     "cost": {"input": 0.2, "output": 1.25, "cacheRead": 0.02, "cacheWrite": 0},
-                    "reasoning": True,
-                },
-            },
-            {
-                "id": "gpt-5.4",
-                "model_ref": "unipay-fun/gpt-5.4",
-                "definition": {
-                    "id": "gpt-5.4",
-                    "name": "GPT-5.4",
-                    "contextWindow": 400000,
-                    "maxTokens": 128000,
-                    "input": ["text"],
-                    "cost": {"input": 2.5, "output": 15.0, "cacheRead": 0.25, "cacheWrite": 0},
                     "reasoning": True,
                 },
             },
@@ -121,7 +160,7 @@ class CreateInstanceV2Test(unittest.TestCase):
                 "source_url": InstanceManagerV2.MODEL_CATALOG_URL,
                 "model_count": len(self.sample_supported_models),
                 "models": self.sample_supported_models,
-                "primary_model": "unipay-fun/gpt-5.4-nano",
+                "primary_model": "unipay-fun/deepseek-v4-flash",
             },
         )
         self.fetch_models_patcher.start()
@@ -130,6 +169,39 @@ class CreateInstanceV2Test(unittest.TestCase):
     def _write_host_config(self, config_path: Path, payload=None):
         config_path.parent.mkdir(parents=True, exist_ok=True)
         config_path.write_text(json.dumps(payload or {}, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    def test_normalize_catalog_model_maps_api_fields(self):
+        manager = InstanceManagerV2(FakeRunner())
+
+        result = manager._normalize_catalog_model(
+            {
+                "identifier": "deepseek-v4-flash",
+                "displayName": "DeepSeek V4 Flash",
+                "contextWindowTokens": 1000000,
+                "inputTokenPrice": 0.14,
+                "outputTokenPrice": 0.28,
+                "cachedInputTokenPrice": 0.028,
+                "reasoningTokenPrice": None,
+                "currency": "USD",
+                "tokenPricingUnit": "PerMillionTokens",
+            }
+        )
+
+        self.assertEqual(result["model_ref"], "unipay-fun/deepseek-v4-flash")
+        self.assertEqual(
+            result["definition"],
+            {
+                "id": "deepseek-v4-flash",
+                "name": "DeepSeek V4 Flash",
+                "contextWindow": 1000000,
+                "maxTokens": InstanceManagerV2.DEFAULT_MODEL_MAX_TOKENS,
+                "input": ["text"],
+                "cost": {"input": 0.14, "output": 0.28, "cacheRead": 0.028, "cacheWrite": 0},
+                "reasoning": False,
+            },
+        )
+        self.assertEqual(result["upstream"]["currency"], "USD")
+        self.assertEqual(result["upstream"]["token_pricing_unit"], "PerMillionTokens")
 
     def test_create_instance_populates_workspace_and_overlays_template(self):
         runner = FakeRunner(
@@ -253,7 +325,7 @@ class CreateInstanceV2Test(unittest.TestCase):
             saved_config = json.loads(config_path.read_text(encoding="utf-8"))
             self.assertEqual(
                 saved_config["agents"]["defaults"]["model"]["primary"],
-                "unipay-fun/gpt-5.4-nano",
+                "unipay-fun/deepseek-v4-flash",
             )
             self.assertEqual(
                 saved_config["agents"]["defaults"]["workspace"],
@@ -262,8 +334,11 @@ class CreateInstanceV2Test(unittest.TestCase):
             self.assertEqual(
                 list(saved_config["agents"]["defaults"]["models"].keys()),
                 [
-                    "unipay-fun/gpt-5.4-nano",
+                    "unipay-fun/deepseek-v4-flash",
+                    "unipay-fun/deepseek-v4-pro",
                     "unipay-fun/gpt-5.4",
+                    "unipay-fun/gpt-5.3-codex",
+                    "unipay-fun/gpt-5.4-nano",
                     "unipay-fun/claude-sonnet-4-6",
                 ],
             )
@@ -573,7 +648,7 @@ class CreateInstanceV2Test(unittest.TestCase):
             )
             self.assertEqual((workspace / "old.txt").read_text(encoding="utf-8"), "keep\n")
             saved_config = json.loads(config_path.read_text(encoding="utf-8"))
-            self.assertEqual(saved_config["agents"]["defaults"]["model"]["primary"], "unipay-fun/gpt-5.4-nano")
+            self.assertEqual(saved_config["agents"]["defaults"]["model"]["primary"], "unipay-fun/deepseek-v4-flash")
             self.assertEqual(saved_config["gateway"]["auth"]["token"], result["gateway_token"])
             self.assertIn(f"workspace not empty, skip populate: {workspace.resolve()}", runner.logs)
 
@@ -1593,8 +1668,11 @@ class CreateInstanceV2Test(unittest.TestCase):
         self.assertEqual(
             result["supported_model_refs"],
             [
-                "unipay-fun/gpt-5.4-nano",
+                "unipay-fun/deepseek-v4-flash",
+                "unipay-fun/deepseek-v4-pro",
                 "unipay-fun/gpt-5.4",
+                "unipay-fun/gpt-5.3-codex",
+                "unipay-fun/gpt-5.4-nano",
                 "unipay-fun/claude-sonnet-4-6",
             ],
         )
@@ -1679,7 +1757,7 @@ class CreateInstanceV2Test(unittest.TestCase):
 
         self.assertTrue(result["ok"])
         self.assertEqual(result["current_model_before"], "unipay-fun/removed-model")
-        self.assertEqual(result["current_model_after"], "unipay-fun/gpt-5.4-nano")
+        self.assertEqual(result["current_model_after"], "unipay-fun/deepseek-v4-flash")
 
     def test_list_agents_excludes_main(self):
         runner = FakeRunner(

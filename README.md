@@ -35,7 +35,7 @@ python3 scripts/agentctl.py
 - 写入时会把返回模型转换成 `openclaw` 当前使用的 provider 模型定义结构，保存到
   `models.providers.unipay-fun.models`
 - `agents.defaults.models` 会按当前拉取到的模型重建
-- 默认主模型优先使用 `unipay-fun/gpt-5.4-nano`；如果当前目录里没有这个模型，则退回到拉取结果里的第一个可用模型
+- 默认主模型优先使用 `unipay-fun/deepseek-v4-flash`；如果当前目录里没有这个模型，则退回到拉取结果里的第一个可用模型
 - 如果模板原先带有 `vllm` 等旧 provider，会在初始化时被覆盖掉，只保留 `unipay-fun`
 - 创建完成后会额外写入 `~/.openclaw/openclaw.json` 的工具默认配置：
   `tools.profile = coding`、`tools.exec.security = full`、
@@ -406,8 +406,8 @@ cd ~/data/agent_manage && python3 scripts/agentctl.py check-server-status
     },
     "current_model_status": {
       "ok": true,
-      "current_model": "unipay-fun/gpt-5.4-nano",
-      "configured_default_model": "unipay-fun/gpt-5.4-nano",
+      "current_model": "unipay-fun/deepseek-v4-flash",
+      "configured_default_model": "unipay-fun/deepseek-v4-flash",
       "agent_overrides": [],
       "config_path": "/root/.openclaw/openclaw.json",
       "config_exists": true
@@ -935,8 +935,8 @@ cd ~/data/agent_manage && python3 scripts/agentctl.py current-model
 {
   "result": {
     "ok": true,
-    "current_model": "unipay-fun/gpt-5.4-nano",
-    "configured_default_model": "unipay-fun/gpt-5.4-nano",
+    "current_model": "unipay-fun/deepseek-v4-flash",
+    "configured_default_model": "unipay-fun/deepseek-v4-flash",
     "agent_overrides": [
       {
         "agent_id": "unipay-claw-base",
