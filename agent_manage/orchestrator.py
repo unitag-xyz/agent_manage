@@ -7,7 +7,7 @@ import tempfile
 import uuid
 from datetime import datetime
 from pathlib import Path
-from time import perf_counter
+from time import perf_counter, sleep
 from typing import Dict, List, Optional
 from urllib.error import URLError
 from urllib.request import Request, urlopen
@@ -28,6 +28,11 @@ from .models import (
 
 class InstanceManagerV2:
     SERVER_STATUS_TIMEOUT_SECONDS = 10
+    GATEWAY_SERVICE_NAME = "openclaw-gateway.service"
+    GATEWAY_STOP_TIMEOUT_SECONDS = 30
+    GATEWAY_START_TIMEOUT_SECONDS = 180
+    GATEWAY_POLL_INTERVAL_SECONDS = 1.0
+    GATEWAY_PORT = "18889"
     WEIXIN_PLUGIN_ID = "openclaw-weixin"
     WEIXIN_PLUGIN_PACKAGE = "@tencent-weixin/openclaw-weixin"
     WEIXIN_DEFAULT_BASE_URL = "https://ilinkai.weixin.qq.com"
@@ -281,16 +286,13 @@ class InstanceManagerV2:
                 "removed_existing_bindings": removed,
             },
         )
-        restart_result = self.runner.run(
-            [self.bin, "gateway", "restart"],
-            stream_output=True,
-        )
+        restart_result = self._restart_gateway_service()
         return {
             "ok": True,
             "agent_name": request.agent_name,
             "bot_name": account_id,
             "config_write": write_result,
-            "gateway_restart": self._command_step("gateway.restart", restart_result),
+            "gateway_restart": self._build_step_payload("gateway.restart", restart_result),
         }
 
     def add_weixin_bot(self, request: AddWeixinBotRequest) -> Dict[str, object]:
@@ -360,12 +362,9 @@ class InstanceManagerV2:
             },
         )
 
-        restart_result = self.runner.run(
-            [self.bin, "gateway", "restart"],
-            stream_output=True,
-        )
+        restart_result = self._restart_gateway_service()
         plugin_prepare.setdefault("steps", []).append(
-            self._command_step("gateway.restart", restart_result)
+            self._build_step_payload("gateway.restart", restart_result)
         )
 
         return {
@@ -1381,6 +1380,96 @@ class InstanceManagerV2:
         if not isinstance(api_key, str) or not api_key.strip():
             raise ValueError(f"Configured apiKey not found for provider '{self.MANAGED_MODEL_PROVIDER}'")
         return api_key.strip()
+
+    def _restart_gateway_service(self) -> Dict[str, object]:
+        if self.runner.dry_run:
+            return {
+                "skipped": True,
+                "method": "systemctl_user_stop_start",
+                "service": self.GATEWAY_SERVICE_NAME,
+            }
+
+        steps: List[Dict[str, object]] = []
+        stop_result = self.runner.run(
+            ["systemctl", "--user", "stop", self.GATEWAY_SERVICE_NAME],
+            timeout=self.GATEWAY_STOP_TIMEOUT_SECONDS,
+        )
+        steps.append(self._command_step("systemctl.stop", stop_result))
+
+        stopped_result = self._wait_gateway_process_stopped()
+        steps.append(self._build_step_payload("gateway.wait_stopped", stopped_result))
+
+        start_result = self.runner.run(
+            ["systemctl", "--user", "start", self.GATEWAY_SERVICE_NAME],
+            timeout=self.GATEWAY_STOP_TIMEOUT_SECONDS,
+        )
+        steps.append(self._command_step("systemctl.start", start_result))
+
+        listening_result = self._wait_gateway_port_listening()
+        steps.append(self._build_step_payload("gateway.wait_port", listening_result))
+
+        return {
+            "method": "systemctl_user_stop_start",
+            "service": self.GATEWAY_SERVICE_NAME,
+            "port": self.GATEWAY_PORT,
+            "steps": steps,
+        }
+
+    def _wait_gateway_process_stopped(self) -> Dict[str, object]:
+        started_at = perf_counter()
+        checks = 0
+        while True:
+            checks += 1
+            if not self._gateway_process_running():
+                return {
+                    "ok": True,
+                    "checks": checks,
+                    "elapsed_ms": round((perf_counter() - started_at) * 1000, 1),
+                }
+            if perf_counter() - started_at >= self.GATEWAY_STOP_TIMEOUT_SECONDS:
+                raise TimeoutError(
+                    f"Timed out waiting for {self.GATEWAY_SERVICE_NAME} process to stop"
+                )
+            sleep(self.GATEWAY_POLL_INTERVAL_SECONDS)
+
+    def _wait_gateway_port_listening(self) -> Dict[str, object]:
+        started_at = perf_counter()
+        checks = 0
+        while True:
+            checks += 1
+            if self._gateway_port_listening():
+                return {
+                    "ok": True,
+                    "port": self.GATEWAY_PORT,
+                    "checks": checks,
+                    "elapsed_ms": round((perf_counter() - started_at) * 1000, 1),
+                }
+            if perf_counter() - started_at >= self.GATEWAY_START_TIMEOUT_SECONDS:
+                raise TimeoutError(
+                    f"Timed out waiting for gateway port {self.GATEWAY_PORT} to listen"
+                )
+            sleep(self.GATEWAY_POLL_INTERVAL_SECONDS)
+
+    def _gateway_process_running(self) -> bool:
+        try:
+            self.runner.run(
+                ["pgrep", "-f", "openclaw-gateway"],
+                timeout=self.SERVER_STATUS_TIMEOUT_SECONDS,
+            )
+        except CommandError:
+            return False
+        return True
+
+    def _gateway_port_listening(self) -> bool:
+        try:
+            result = self.runner.run(
+                ["ss", "-ltn"],
+                timeout=self.SERVER_STATUS_TIMEOUT_SECONDS,
+            )
+        except CommandError:
+            return False
+        needle = f":{self.GATEWAY_PORT}"
+        return any(needle in line for line in result.stdout.splitlines())
 
     def _to_int(self, value) -> Optional[int]:
         if value is None:

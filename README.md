@@ -244,7 +244,7 @@ cd ~/data/agent_manage && python3 scripts/agentctl.py add-agents \
   `dmPolicy = open`，`allowFrom = ["*"]`
 - 会删除该 bot 名下旧的 Telegram binding，再写入一条新的 binding 指向指定 agent
 - 不传 `--bot-name` 时自动生成 `tgbot-xxxxxxxx`
-- 写入配置后总是执行一次 `openclaw gateway restart`
+- 写入配置后会通过 `systemctl --user stop/start openclaw-gateway.service` 重启 gateway，并轮询进程退出和端口监听
 
 ### 远程执行
 
@@ -298,9 +298,9 @@ cd ~/data/agent_manage && python3 scripts/agentctl.py add-tg-bot \
     "gateway_restart": {
       "step": "gateway.restart",
       "result": {
-        "command": "openclaw gateway restart",
-        "returncode": 0,
-        "skipped": false
+        "method": "systemctl_user_stop_start",
+        "service": "openclaw-gateway.service",
+        "port": "18889"
       }
     }
   },
@@ -497,7 +497,7 @@ cd ~/data/agent_manage && python3 scripts/agentctl.py tg-bot-status
 - 直接从 `openclaw.json` 的 `agents.list` 检查目标 agent 是否存在
 - 确保 `plugins.entries.openclaw-weixin.enabled = true`
 - 不检查 `openclaw-weixin` 插件安装状态，不执行自动安装
-- 写入配置后总是执行一次 `openclaw gateway restart`
+- 写入配置后会通过 `systemctl --user stop/start openclaw-gateway.service` 重启 gateway，并轮询进程退出和端口监听
 - 将微信账号状态写入 `~/.openclaw/openclaw-weixin/accounts/<accountId>.json`
 - 将账号索引写入 `~/.openclaw/openclaw-weixin/accounts.json`
 - 将 `channels.openclaw-weixin.accounts.<accountId>` 和绑定关系写入 `openclaw.json`
@@ -556,9 +556,9 @@ cd ~/data/agent_manage && python3 scripts/agentctl.py add-weixin-bot \
         {
           "step": "gateway.restart",
           "result": {
-            "command": "openclaw gateway restart",
-            "returncode": 0,
-            "skipped": false
+            "method": "systemctl_user_stop_start",
+            "service": "openclaw-gateway.service",
+            "port": "18889"
           }
         }
       ]

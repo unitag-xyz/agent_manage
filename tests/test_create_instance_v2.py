@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
-from agent_manage.local import CommandResult
+from agent_manage.local import CommandError, CommandResult
 from agent_manage.models import (
     AddAgentsRequest,
     AddAgentRequest,
@@ -39,11 +39,32 @@ class FakeRunner:
     def run(self, args, timeout=None, stream_output=False):
         argv = list(args)
         self.calls.append(argv)
+        key = tuple(argv)
+        response = self.responses.get(key)
+        if isinstance(response, Exception):
+            raise response
+        if isinstance(response, CommandResult):
+            if response.returncode != 0:
+                raise CommandError(f"Command failed with exit code {response.returncode}", response)
+            return response
+        if argv[:2] == ["pgrep", "-f"]:
+            result = CommandResult(
+                argv=argv,
+                command_text=" ".join(argv),
+                returncode=1,
+                stdout="",
+                stderr="",
+                skipped=self.dry_run,
+            )
+            raise CommandError("Command failed with exit code 1", result)
+        stdout = ""
+        if argv == ["ss", "-ltn"]:
+            stdout = "LISTEN 0 511 0.0.0.0:18889 0.0.0.0:*\n"
         return CommandResult(
             argv=argv,
             command_text=" ".join(argv),
             returncode=0,
-            stdout="",
+            stdout=stdout,
             stderr="",
             skipped=self.dry_run,
         )
@@ -72,6 +93,13 @@ class FailingPopulateManager(InstanceManagerV2):
 
 
 class CreateInstanceV2Test(unittest.TestCase):
+    gateway_service_restart_calls = [
+        ["systemctl", "--user", "stop", "openclaw-gateway.service"],
+        ["pgrep", "-f", "openclaw-gateway"],
+        ["systemctl", "--user", "start", "openclaw-gateway.service"],
+        ["ss", "-ltn"],
+    ]
+
     def setUp(self):
         self.sample_supported_models = [
             {
@@ -806,7 +834,7 @@ class CreateInstanceV2Test(unittest.TestCase):
             saved = json.loads(config_path.read_text(encoding="utf-8"))
             self.assertTrue(result["ok"])
             self.assertTrue(result["bot_name"].startswith("tgbot-"))
-            self.assertEqual(runner.calls, [["openclaw", "gateway", "restart"]])
+            self.assertEqual(runner.calls, self.gateway_service_restart_calls)
             self.assertEqual(
                 saved["channels"]["telegram"]["accounts"][result["bot_name"]],
                 {
@@ -1059,7 +1087,7 @@ class CreateInstanceV2Test(unittest.TestCase):
                     },
                 ],
             )
-            self.assertEqual(runner.calls, [["openclaw", "gateway", "restart"]])
+            self.assertEqual(runner.calls, self.gateway_service_restart_calls)
 
     def test_add_tg_bot_requires_existing_agent(self):
         runner = FakeRunner()
@@ -1240,7 +1268,7 @@ class CreateInstanceV2Test(unittest.TestCase):
             self.assertEqual(result["account_id"], account_id)
             self.assertTrue(result["plugin_prepare"]["install_check_skipped"])
             self.assertTrue(result["plugin_prepare"]["restart_required"])
-            self.assertEqual(runner.calls, [["openclaw", "gateway", "restart"]])
+            self.assertEqual(runner.calls, self.gateway_service_restart_calls)
             self.assertTrue(account_path.exists())
             self.assertTrue(index_path.exists())
             self.assertEqual(
@@ -1297,12 +1325,7 @@ class CreateInstanceV2Test(unittest.TestCase):
             self.assertTrue(result["ok"])
             saved_config = json.loads(config_path.read_text(encoding="utf-8"))
             self.assertTrue(saved_config["plugins"]["entries"]["openclaw-weixin"]["enabled"])
-            self.assertEqual(
-                runner.calls,
-                [
-                    ["openclaw", "gateway", "restart"],
-                ],
-            )
+            self.assertEqual(runner.calls, self.gateway_service_restart_calls)
 
     def test_add_weixin_bot_ignores_sync_sidecar_files_when_clearing_stale_accounts(self):
         runner = FakeRunner()
