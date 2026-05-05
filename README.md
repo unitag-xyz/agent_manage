@@ -847,7 +847,7 @@ cd ~/data/agent_manage && python3 scripts/agentctl.py agents-list
 - 传参必须写完整模型引用，不接受简写
 - 直接执行 `openclaw models set <model_ref>`
 - 用于切换当前默认模型
-- 按当前观察，模型会在运行中逐步切换，不需要额外重启 gateway
+- 切换成功后会通过 `systemctl --user stop/start openclaw-gateway.service` 重启 gateway，并轮询进程退出和端口监听
 
 ### 远程执行
 
@@ -872,6 +872,7 @@ cd ~/data/agent_manage && python3 scripts/agentctl.py set-model \
 
 - `model_ref`
 - `steps`
+- `gateway_restart`
 
 示例：
 
@@ -889,7 +890,15 @@ cd ~/data/agent_manage && python3 scripts/agentctl.py set-model \
           "skipped": false
         }
       }
-    ]
+    ],
+    "gateway_restart": {
+      "step": "gateway.restart",
+      "result": {
+        "method": "systemctl_user_stop_start",
+        "service": "openclaw-gateway.service",
+        "port": "18889"
+      }
+    }
   },
   "error": null,
   "typeCode": 1,

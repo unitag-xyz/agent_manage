@@ -585,6 +585,7 @@ class InstanceManagerV2:
             raise ValueError(f"Unsupported model '{request.model_ref}'. Allowed: {allowed}")
 
         set_result = self.runner.run([self.bin, "models", "set", request.model_ref])
+        restart_result = self._restart_gateway_service()
 
         return {
             "ok": True,
@@ -592,6 +593,7 @@ class InstanceManagerV2:
             "steps": [
                 self._command_step("models.set", set_result),
             ],
+            "gateway_restart": self._build_step_payload("gateway.restart", restart_result),
         }
 
     def get_current_model(self) -> Dict[str, object]:

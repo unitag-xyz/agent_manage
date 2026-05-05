@@ -1602,7 +1602,7 @@ class CreateInstanceV2Test(unittest.TestCase):
             with self.assertRaises(FileNotFoundError):
                 manager.delete_tg_bot(DeleteTelegramBotRequest(bot_name="missingbot"))
 
-    def test_set_model_runs_models_set_only(self):
+    def test_set_model_restarts_gateway_after_models_set(self):
         runner = FakeRunner()
         with tempfile.TemporaryDirectory() as tmpdir:
             config_path = Path(tmpdir) / "openclaw.json"
@@ -1630,7 +1630,13 @@ class CreateInstanceV2Test(unittest.TestCase):
                 runner.calls,
                 [
                     ["openclaw", "models", "set", "unipay-fun/gpt-5.4"],
+                    *self.gateway_service_restart_calls,
                 ],
+            )
+            self.assertEqual(result["gateway_restart"]["step"], "gateway.restart")
+            self.assertEqual(
+                result["gateway_restart"]["result"]["method"],
+                "systemctl_user_stop_start",
             )
 
     def test_set_model_rejects_unsupported_model(self):
