@@ -33,6 +33,8 @@ class InstanceManagerV2:
     GATEWAY_START_TIMEOUT_SECONDS = 180
     GATEWAY_POLL_INTERVAL_SECONDS = 1.0
     GATEWAY_PORT = "18889"
+    LIBRARY_VERIFY_TIMEOUT_SECONDS = 30
+    LIBRARY_INSTALL_TIMEOUT_SECONDS = 600
     WEIXIN_PLUGIN_ID = "openclaw-weixin"
     WEIXIN_PLUGIN_PACKAGE = "@tencent-weixin/openclaw-weixin"
     WEIXIN_DEFAULT_BASE_URL = "https://ilinkai.weixin.qq.com"
@@ -212,6 +214,14 @@ class InstanceManagerV2:
             item["result"] = {
                 "template_prepare": step_results.get(
                     self._scoped_step_name("template.prepare", agent_name),
+                    {},
+                ),
+                "libraries_ensure": step_results.get(
+                    self._scoped_step_name("libraries.ensure", agent_name),
+                    {},
+                ),
+                "common_skills_install": step_results.get(
+                    self._scoped_step_name("common_skills.install", agent_name),
                     {},
                 ),
                 "agents_add": add_result,
@@ -876,6 +886,229 @@ class InstanceManagerV2:
             "copied_from_template_dir": copied,
         }
 
+    def _load_template_manifest(self, template_dir: Path) -> Dict[str, object]:
+        manifest_path = template_dir / "template.yaml"
+        if not manifest_path.is_file():
+            return {}
+        text = manifest_path.read_text(encoding="utf-8")
+        try:
+            import yaml  # type: ignore
+        except ImportError:
+            return self._parse_template_manifest_yaml_subset(text)
+
+        payload = yaml.safe_load(text)
+        if payload is None:
+            return {}
+        if not isinstance(payload, dict):
+            raise ValueError(f"Template manifest must be a YAML object: {manifest_path}")
+        return payload
+
+    def _parse_template_manifest_yaml_subset(self, text: str) -> Dict[str, object]:
+        manifest: Dict[str, object] = {}
+        current_key: Optional[str] = None
+        current_item: Optional[Dict[str, object]] = None
+        list_keys = {"commonSkillFolders", "requiredLibraries"}
+
+        for raw_line in text.splitlines():
+            stripped = raw_line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            indent = len(raw_line) - len(raw_line.lstrip(" "))
+            if indent == 0:
+                current_item = None
+                if ":" not in stripped:
+                    current_key = None
+                    continue
+                key, value = stripped.split(":", 1)
+                key = key.strip()
+                value = value.strip()
+                if key in list_keys and value == "":
+                    manifest[key] = []
+                    current_key = key
+                else:
+                    manifest[key] = self._parse_simple_yaml_value(value)
+                    current_key = None
+                continue
+            if current_key not in list_keys:
+                continue
+            if indent == 2 and stripped.startswith("- "):
+                current_item = {}
+                manifest.setdefault(current_key, [])
+                items = manifest[current_key]
+                if isinstance(items, list):
+                    items.append(current_item)
+                inline = stripped[2:].strip()
+                if inline and ":" in inline:
+                    key, value = inline.split(":", 1)
+                    current_item[key.strip()] = self._parse_simple_yaml_value(value.strip())
+                continue
+            if current_item is not None and indent >= 4 and ":" in stripped:
+                key, value = stripped.split(":", 1)
+                current_item[key.strip()] = self._parse_simple_yaml_value(value.strip())
+        return manifest
+
+    def _parse_simple_yaml_value(self, value: str):
+        if value == "":
+            return ""
+        lowered = value.lower()
+        if lowered == "true":
+            return True
+        if lowered == "false":
+            return False
+        if lowered in {"null", "none"}:
+            return None
+        if value.startswith('"') and value.endswith('"'):
+            try:
+                return json.loads(value)
+            except json.JSONDecodeError:
+                return value[1:-1]
+        if value.startswith("'") and value.endswith("'"):
+            return value[1:-1]
+        return value
+
+    def _required_libraries_from_manifest(
+        self,
+        manifest: Dict[str, object],
+    ) -> List[Dict[str, object]]:
+        libraries = manifest.get("requiredLibraries")
+        if not isinstance(libraries, list):
+            return []
+        return [item for item in libraries if isinstance(item, dict)]
+
+    def _common_skill_sources_from_manifest(
+        self,
+        template_dir: Path,
+        manifest: Dict[str, object],
+    ) -> List[Path]:
+        sources: List[Path] = []
+        seen = set()
+
+        def add_source(path_value: object) -> None:
+            if not isinstance(path_value, str) or not path_value.strip():
+                return
+            source = (template_dir / path_value).resolve()
+            if source in seen:
+                return
+            seen.add(source)
+            sources.append(source)
+
+        configured = manifest.get("commonSkillFolders")
+        if isinstance(configured, list):
+            for item in configured:
+                if isinstance(item, dict):
+                    add_source(item.get("path"))
+                else:
+                    add_source(item)
+
+        common_skills_dir = template_dir / "common-skills"
+        if common_skills_dir.is_dir():
+            for item in sorted(common_skills_dir.iterdir(), key=lambda entry: entry.name):
+                if item.is_dir():
+                    add_source(str(item.relative_to(template_dir)))
+        return sources
+
+    def _ensure_required_libraries(
+        self,
+        libraries: List[Dict[str, object]],
+    ) -> Dict[str, object]:
+        results = []
+        for library in libraries:
+            name = str(library.get("name") or library.get("bin") or "").strip()
+            if not name:
+                raise ValueError(f"requiredLibraries item missing name: {library}")
+            required = library.get("required") is not False
+            installed, check_result = self._library_is_installed(library)
+            item_result: Dict[str, object] = {
+                "name": name,
+                "required": required,
+                "installed_before": installed,
+                "check": check_result,
+            }
+            if installed:
+                item_result["action"] = "continue"
+                results.append(item_result)
+                continue
+
+            install_command = str(library.get("installCommand") or "").strip()
+            if not install_command:
+                if required:
+                    raise RuntimeError(f"Required library '{name}' is not installed and has no installCommand")
+                item_result["action"] = "skipped"
+                item_result["reason"] = "not_required_without_install_command"
+                results.append(item_result)
+                continue
+
+            install_result = self.runner.run(
+                ["/bin/sh", "-lc", install_command],
+                timeout=self.LIBRARY_INSTALL_TIMEOUT_SECONDS,
+            )
+            item_result["action"] = "installed"
+            item_result["install"] = self._command_result_payload(install_result)
+            installed_after, verify_after = self._library_is_installed(library)
+            item_result["installed_after"] = installed_after
+            item_result["verify_after"] = verify_after
+            if not installed_after:
+                raise RuntimeError(f"Required library '{name}' install completed but verification still failed")
+            results.append(item_result)
+
+        return {
+            "library_count": len(libraries),
+            "libraries": results,
+        }
+
+    def _library_is_installed(self, library: Dict[str, object]) -> tuple[bool, Dict[str, object]]:
+        verify_command = str(library.get("verifyCommand") or "").strip()
+        bin_name = str(library.get("bin") or "").strip()
+        if verify_command:
+            command = verify_command
+        elif bin_name:
+            command = f"command -v {bin_name}"
+        else:
+            return False, {"skipped": True, "reason": "missing_verify_command_or_bin"}
+
+        try:
+            result = self.runner.run(
+                ["/bin/sh", "-lc", command],
+                timeout=self.LIBRARY_VERIFY_TIMEOUT_SECONDS,
+            )
+        except CommandError as exc:
+            return False, {
+                "command": exc.result.command_text,
+                "returncode": exc.result.returncode,
+                "stdout": exc.result.stdout,
+                "stderr": exc.result.stderr,
+            }
+        return True, self._command_result_payload(result)
+
+    def _install_common_skills(self, sources: List[Path]) -> Dict[str, object]:
+        target_root = self.config_path.parent / "skills"
+        if self.runner.dry_run:
+            return {
+                "skipped": True,
+                "target_root": str(target_root),
+                "skill_count": len(sources),
+                "skills": [source.name for source in sources],
+            }
+        target_root.mkdir(parents=True, exist_ok=True)
+        installed = []
+        for source in sources:
+            if not source.is_dir():
+                raise FileNotFoundError(f"Common skill folder not found: {source}")
+            destination = target_root / source.name
+            shutil.copytree(source, destination, dirs_exist_ok=True)
+            installed.append(
+                {
+                    "name": source.name,
+                    "source": str(source),
+                    "destination": str(destination),
+                }
+            )
+        return {
+            "target_root": str(target_root),
+            "skill_count": len(installed),
+            "skills": installed,
+        }
+
     def _configure_config_models(
         self,
         model_key: str,
@@ -1083,6 +1316,25 @@ class InstanceManagerV2:
                     template_dir=template_dir,
                 ),
             )
+            manifest = self._load_template_manifest(template_dir)
+            required_libraries = self._required_libraries_from_manifest(manifest)
+            if required_libraries:
+                self._run_timed_step(
+                    steps,
+                    self._scoped_step_name("libraries.ensure", step_scope),
+                    lambda: self._ensure_required_libraries(required_libraries),
+                )
+
+            common_skill_sources = self._common_skill_sources_from_manifest(
+                template_dir=template_dir,
+                manifest=manifest,
+            )
+            if common_skill_sources:
+                self._run_timed_step(
+                    steps,
+                    self._scoped_step_name("common_skills.install", step_scope),
+                    lambda: self._install_common_skills(common_skill_sources),
+                )
 
             if agent_exists:
                 self.runner.log(f"agent exists, skip add: {agent_name}")
@@ -1228,6 +1480,10 @@ class InstanceManagerV2:
         return {}
 
     def _command_step(self, step: str, result) -> Dict[str, object]:
+        payload = self._command_result_payload(result)
+        return {"step": step, "result": payload}
+
+    def _command_result_payload(self, result) -> Dict[str, object]:
         payload = {
             "command": result.command_text,
             "returncode": result.returncode,
@@ -1237,7 +1493,7 @@ class InstanceManagerV2:
             payload["stdout"] = result.stdout
         if result.stderr.strip():
             payload["stderr"] = result.stderr
-        return {"step": step, "result": payload}
+        return payload
 
     def _generate_tg_bot_name(self) -> str:
         return f"tgbot-{uuid.uuid4().hex[:8]}"

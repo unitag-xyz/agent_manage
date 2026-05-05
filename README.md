@@ -22,6 +22,8 @@ python3 scripts/agentctl.py
 - `template_name` 直接作为 `agent_name`
 - workspace 默认创建在 `~/data/{templateName}`，也可通过参数覆盖
 - 从 `~/template/{templateName}.zip` 解压到 `~/template/{templateName}/`
+- 如果模板含 `template.yaml.requiredLibraries`，会先检查每个依赖是否已安装；未安装时执行对应 `installCommand`，安装后再验证
+- 如果模板含 `common-skills/` 或 `template.yaml.commonSkillFolders`，会把其中的 skill 目录复制到 `~/.openclaw/skills/`，作为所有 agent 共用的 skill
 - 再把 `~/template/{templateName}/` 整体复制到 workspace
 - 直接从 `openclaw.json` 的 `agents.list` 检查同名 agent 是否已存在
 - 如果同名 agent 已存在，会跳过 `openclaw agents add`，继续后续步骤
@@ -79,6 +81,8 @@ cd ~/data/agent_manage && python3 scripts/agentctl.py create-instance \
 - `template_dir`
 - `steps`
 
+其中 `libraries.ensure` 和 `common_skills.install` 只在模板声明依赖或存在 common skills 时出现。
+
 示例：
 
 ```json
@@ -93,6 +97,8 @@ cd ~/data/agent_manage && python3 scripts/agentctl.py create-instance \
     "template_dir": "/root/template/unipay-claw-base",
     "steps": [
       {"step": "template.prepare", "result": {}},
+      {"step": "libraries.ensure", "result": {}},
+      {"step": "common_skills.install", "result": {}},
       {"step": "agents.add", "result": {}},
       {"step": "workspace.populate", "result": {}},
       {"step": "models.fetch_catalog", "result": {}},
@@ -117,13 +123,15 @@ cd ~/data/agent_manage && python3 scripts/agentctl.py create-instance \
 - 数组项支持两种写法：
   - 字符串：直接视为 `agent_name`
   - 对象：支持 `agent_name`，可选 `template_name`、`workspace`、`model`
-- 每个条目会按 `create-instance` 的前三步执行：
-  `template.prepare -> agents.add -> workspace.populate`
+- 每个条目会按 `create-instance` 的模板创建流程执行：
+  `template.prepare -> libraries.ensure(可选) -> common_skills.install(可选) -> agents.add -> workspace.populate`
 - 默认 `template_name = agent_name`
 - 会从 `~/template/{templateName}.zip` 解压到 `~/template/{templateName}/`
+- 如果模板声明了 `requiredLibraries`，会先验证/安装依赖
+- 如果模板提供了 `common-skills/` 或 `commonSkillFolders`，会同步到 `~/.openclaw/skills/`
 - 再把 `~/template/{templateName}/` 整体复制到 workspace
 - 未显式传 `workspace` 时，默认使用 `--workspace-root/{agent_name}`，默认根目录仍为 `~/data`
-- 单个 agent 的创建顺序与 `create-instance` 一致，`openclaw agents add` 发生在模板解压之后、workspace 填充之前
+- 单个 agent 的创建顺序与 `create-instance` 一致，`openclaw agents add` 发生在模板解压、依赖检查和 common skills 同步之后、workspace 填充之前
 - 如果同名 agent 已存在，会跳过该项并继续处理剩余项
 - 如果 workspace 已存在且非空，会跳过该项的 `workspace.populate`
 - 批量追加完成后不额外执行 `openclaw gateway restart`
@@ -160,6 +168,8 @@ cd ~/data/agent_manage && python3 scripts/agentctl.py add-agents \
 - `agents`
 - `steps`
 
+其中 `libraries_ensure`、`common_skills_install` 和对应 `steps` 只在模板声明依赖或存在 common skills 时有内容。
+
 示例：
 
 ```json
@@ -184,6 +194,8 @@ cd ~/data/agent_manage && python3 scripts/agentctl.py add-agents \
           "template_prepare": {
             "archive_path": "/root/template/unipay-claw-base.zip"
           },
+          "libraries_ensure": {},
+          "common_skills_install": {},
           "agents_add": {
             "skipped": true,
             "reason": "agent_exists",
@@ -208,6 +220,8 @@ cd ~/data/agent_manage && python3 scripts/agentctl.py add-agents \
           "template_prepare": {
             "archive_path": "/root/template/demo-template.zip"
           },
+          "libraries_ensure": {},
+          "common_skills_install": {},
           "agents_add": {
             "command": "openclaw agents add unipay-claw-demo --workspace /root/data/unipay-claw-demo --non-interactive --json --model openai/gpt-5",
             "returncode": 0
@@ -220,9 +234,13 @@ cd ~/data/agent_manage && python3 scripts/agentctl.py add-agents \
     ],
     "steps": [
       {"step": "template.prepare[unipay-claw-base]", "result": {}},
+      {"step": "libraries.ensure[unipay-claw-base]", "result": {}},
+      {"step": "common_skills.install[unipay-claw-base]", "result": {}},
       {"step": "agents.add[unipay-claw-base]", "result": {}},
       {"step": "workspace.populate[unipay-claw-base]", "result": {}},
       {"step": "template.prepare[unipay-claw-demo]", "result": {}},
+      {"step": "libraries.ensure[unipay-claw-demo]", "result": {}},
+      {"step": "common_skills.install[unipay-claw-demo]", "result": {}},
       {"step": "agents.add[unipay-claw-demo]", "result": {}},
       {"step": "workspace.populate[unipay-claw-demo]", "result": {}}
     ]

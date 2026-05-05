@@ -41,6 +41,8 @@ class FakeRunner:
         self.calls.append(argv)
         key = tuple(argv)
         response = self.responses.get(key)
+        if isinstance(response, list):
+            response = response.pop(0) if response else None
         if isinstance(response, Exception):
             raise response
         if isinstance(response, CommandResult):
@@ -397,6 +399,85 @@ class CreateInstanceV2Test(unittest.TestCase):
             self.assertEqual(result["steps"][4]["step"], "config.configure_models")
             self.assertEqual(result["steps"][-1]["step"], "config.configure_tools")
             self.assertEqual(result["steps"][-2]["step"], "config.configure_gateway_auth")
+
+    def test_create_instance_installs_declared_common_skills_and_checks_libraries(self):
+        runner = FakeRunner()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            template_root = tmp_path / "template"
+            workspace_root = tmp_path / "data"
+            workspace = workspace_root / "unipay-lark-cli"
+            archive_path = template_root / "unipay-lark-cli.zip"
+            config_path = tmp_path / ".openclaw" / "openclaw.json"
+            archive_path.parent.mkdir(parents=True)
+            self._write_archive(
+                archive_path,
+                {
+                    "template.yaml": "\n".join(
+                        [
+                            "id: unipay-lark-cli",
+                            "commonSkillFolders:",
+                            "  - path: common-skills/feishu-delegate-to-unipay-lark-cli",
+                            "    installScope: all_agents",
+                            "requiredLibraries:",
+                            "  - name: lark-cli",
+                            "    required: true",
+                            "    bin: lark-cli",
+                            "    installCommand: \"npm install -g @larksuite/cli\"",
+                            "    verifyCommand: \"lark-cli --version\"",
+                            "",
+                        ]
+                    ),
+                    "SOUL.md": "lark soul\n",
+                    "common-skills/feishu-delegate-to-unipay-lark-cli/SKILL.md": "delegate\n",
+                },
+            )
+            self._write_host_config(config_path, {"agents": {"list": []}})
+
+            manager = InstanceManagerV2(
+                runner,
+                template_root=str(template_root),
+                config_path=str(config_path),
+            )
+            result = manager.create_instance(
+                CreateInstanceRequest(
+                    template_name="unipay-lark-cli",
+                    model_key="test-key",
+                    workspace_root=str(workspace_root),
+                )
+            )
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["steps"][1]["step"], "libraries.ensure")
+            self.assertEqual(result["steps"][1]["result"]["libraries"][0]["action"], "continue")
+            self.assertEqual(result["steps"][2]["step"], "common_skills.install")
+            self.assertEqual(
+                (
+                    config_path.parent
+                    / "skills"
+                    / "feishu-delegate-to-unipay-lark-cli"
+                    / "SKILL.md"
+                ).read_text(encoding="utf-8"),
+                "delegate\n",
+            )
+            self.assertEqual((workspace / "SOUL.md").read_text(encoding="utf-8"), "lark soul\n")
+            self.assertEqual(
+                runner.calls[:2],
+                [
+                    ["/bin/sh", "-lc", "lark-cli --version"],
+                    [
+                        "openclaw",
+                        "agents",
+                        "add",
+                        "unipay-lark-cli",
+                        "--workspace",
+                        str(workspace.resolve()),
+                        "--non-interactive",
+                        "--json",
+                    ],
+                ],
+            )
 
     def test_create_instance_unzips_to_same_named_template_dir_then_copies_to_workspace(self):
         runner = WorkspaceCreatingRunner(
@@ -1007,6 +1088,109 @@ class CreateInstanceV2Test(unittest.TestCase):
             self.assertEqual(result["steps"][1]["step"], "agents.add[base]")
             self.assertEqual(result["steps"][2]["step"], "workspace.populate[base]")
             self.assertIn("agent exists, skip add: base", runner.logs)
+
+    def test_add_agents_installs_missing_required_library_before_add(self):
+        verify_command = ("/bin/sh", "-lc", "lark-cli --version")
+        install_command = ("/bin/sh", "-lc", "npm install -g @larksuite/cli")
+        runner = FakeRunner(
+            responses={
+                verify_command: [
+                    CommandResult(
+                        argv=list(verify_command),
+                        command_text="lark-cli --version",
+                        returncode=127,
+                        stdout="",
+                        stderr="not found",
+                    ),
+                    CommandResult(
+                        argv=list(verify_command),
+                        command_text="lark-cli --version",
+                        returncode=0,
+                        stdout="1.0.0\n",
+                        stderr="",
+                    ),
+                ],
+                install_command: CommandResult(
+                    argv=list(install_command),
+                    command_text="npm install -g @larksuite/cli",
+                    returncode=0,
+                    stdout="installed\n",
+                    stderr="",
+                ),
+            }
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            template_root = tmp_path / "template"
+            archive_path = template_root / "lark-template.zip"
+            config_path = tmp_path / "openclaw.json"
+            archive_path.parent.mkdir(parents=True)
+            self._write_archive(
+                archive_path,
+                {
+                    "template.yaml": "\n".join(
+                        [
+                            "requiredLibraries:",
+                            "  - name: lark-cli",
+                            "    required: true",
+                            "    bin: lark-cli",
+                            "    installCommand: \"npm install -g @larksuite/cli\"",
+                            "    verifyCommand: \"lark-cli --version\"",
+                            "",
+                        ]
+                    ),
+                    "common-skills/delegate/SKILL.md": "delegate\n",
+                    "SOUL.md": "demo soul\n",
+                },
+            )
+            config_path.write_text(json.dumps({"agents": {"list": []}}), encoding="utf-8")
+
+            manager = InstanceManagerV2(
+                runner,
+                template_root=str(template_root),
+                config_path=str(config_path),
+            )
+            result = manager.add_agents(
+                AddAgentsRequest(
+                    agents=[AddAgentRequest(agent_name="demo", template_name="lark-template")],
+                    workspace_root=str(tmp_path / "data"),
+                )
+            )
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(
+                runner.calls,
+                [
+                    list(verify_command),
+                    list(install_command),
+                    list(verify_command),
+                    [
+                        "openclaw",
+                        "agents",
+                        "add",
+                        "demo",
+                        "--workspace",
+                        str((tmp_path / "data" / "demo").resolve()),
+                        "--non-interactive",
+                        "--json",
+                    ],
+                ],
+            )
+            self.assertEqual(result["steps"][1]["step"], "libraries.ensure[demo]")
+            self.assertEqual(
+                result["steps"][1]["result"]["libraries"][0]["action"],
+                "installed",
+            )
+            self.assertEqual(result["steps"][2]["step"], "common_skills.install[demo]")
+            self.assertEqual(
+                result["agents"][0]["result"]["libraries_ensure"]["libraries"][0]["installed_after"],
+                True,
+            )
+            self.assertEqual(
+                (config_path.parent / "skills" / "delegate" / "SKILL.md").read_text(encoding="utf-8"),
+                "delegate\n",
+            )
 
     def test_add_tg_bot_replaces_existing_binding_for_same_bot_name(self):
         runner = FakeRunner()
