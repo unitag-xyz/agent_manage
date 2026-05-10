@@ -123,7 +123,7 @@ class InstanceManagerV2:
             tools_result = self._run_timed_step(
                 steps,
                 "config.configure_tools",
-                self._configure_config_tools,
+                lambda: self._configure_config_tools([agent_name]),
             )
 
             return {
@@ -235,6 +235,12 @@ class InstanceManagerV2:
             else:
                 skipped_count += 1
 
+        tools_result = self._run_timed_step(
+            steps,
+            "config.configure_tools",
+            lambda: self._configure_config_tools([item["agent_name"] for item in agent_results]),
+        )
+
         return {
             "ok": True,
             "requested_count": len(request.agents),
@@ -242,6 +248,7 @@ class InstanceManagerV2:
             "skipped_count": skipped_count,
             "restart_required": False,
             "post_batch_actions": [],
+            "tools_config": tools_result,
             "agents": agent_results,
             "steps": steps,
         }
@@ -1169,8 +1176,9 @@ class InstanceManagerV2:
             "managed_models": managed_model_refs,
         }
 
-    def _configure_config_tools(self) -> Dict[str, object]:
+    def _configure_config_tools(self, agent_names: Optional[List[str]] = None) -> Dict[str, object]:
         config_path = self.config_path
+        normalized_agent_names = self._normalize_agent_to_agent_allow(agent_names or [])
         if self.runner.dry_run:
             return {
                 "skipped": True,
@@ -1179,6 +1187,9 @@ class InstanceManagerV2:
                 "exec_security": "full",
                 "web_search_enabled": False,
                 "web_fetch_enabled": True,
+                "agent_to_agent_enabled": True,
+                "agent_to_agent_allow": normalized_agent_names,
+                "sessions_visibility": "all",
             }
 
         config = self._load_config()
@@ -1192,21 +1203,34 @@ class InstanceManagerV2:
         web = tools.setdefault("web", {})
         web["search"] = {"enabled": False}
         web["fetch"] = {"enabled": True}
+        agent_to_agent = tools.setdefault("agentToAgent", {})
+        agent_to_agent["enabled"] = True
+        agent_to_agent["allow"] = self._merge_agent_to_agent_allow(
+            agent_to_agent.get("allow"),
+            normalized_agent_names,
+        )
+        sessions = tools.setdefault("sessions", {})
+        sessions["visibility"] = "all"
 
         self._write_config(
             config,
-            note="configure tools for create_instance",
+            note="configure tools",
             changed_paths=[
                 "tools.profile",
                 "tools.exec.security",
                 "tools.web.search",
                 "tools.web.fetch",
+                "tools.agentToAgent",
+                "tools.sessions.visibility",
             ],
             extra={
                 "tools_profile": "coding",
                 "exec_security": "full",
                 "web_search_enabled": False,
                 "web_fetch_enabled": True,
+                "agent_to_agent_enabled": True,
+                "agent_to_agent_allow": agent_to_agent["allow"],
+                "sessions_visibility": "all",
             },
         )
         return {
@@ -1215,7 +1239,29 @@ class InstanceManagerV2:
             "exec_security": "full",
             "web_search_enabled": False,
             "web_fetch_enabled": True,
+            "agent_to_agent_enabled": True,
+            "agent_to_agent_allow": agent_to_agent["allow"],
+            "sessions_visibility": "all",
         }
+
+    def _normalize_agent_to_agent_allow(self, agent_names: List[str]) -> List[str]:
+        return self._dedupe_preserve_order(["main", *[name.strip() for name in agent_names if name.strip()]])
+
+    def _merge_agent_to_agent_allow(self, current_allow: object, agent_names: List[str]) -> List[str]:
+        existing = current_allow if isinstance(current_allow, list) else []
+        merged = [str(item).strip() for item in existing if str(item).strip()]
+        merged.extend(agent_names)
+        return self._dedupe_preserve_order(merged)
+
+    def _dedupe_preserve_order(self, values: List[str]) -> List[str]:
+        result = []
+        seen = set()
+        for value in values:
+            if value in seen:
+                continue
+            seen.add(value)
+            result.append(value)
+        return result
 
     def _configure_gateway_auth(self, gateway_token: str) -> Dict[str, object]:
         config_path = self.config_path

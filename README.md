@@ -41,7 +41,9 @@ python3 scripts/agentctl.py
 - 如果模板原先带有 `vllm` 等旧 provider，会在初始化时被覆盖掉，只保留 `unipay-fun`
 - 创建完成后会额外写入 `~/.openclaw/openclaw.json` 的工具默认配置：
   `tools.profile = coding`、`tools.exec.security = full`、
-  `tools.web.search.enabled = false`、`tools.web.fetch.enabled = true`
+  `tools.web.search.enabled = false`、`tools.web.fetch.enabled = true`、
+  `tools.agentToAgent.enabled = true`、`tools.agentToAgent.allow` 包含 `main` 和当前 agent、
+  `tools.sessions.visibility = all`
 - 如执行失败，默认按当前实现做回滚
 
 前置要求：
@@ -134,6 +136,8 @@ cd ~/data/agent_manage && python3 scripts/agentctl.py create-instance \
 - 单个 agent 的创建顺序与 `create-instance` 一致，`openclaw agents add` 发生在模板解压、依赖检查和 common skills 同步之后、workspace 填充之前
 - 如果同名 agent 已存在，会跳过该项并继续处理剩余项
 - 如果 workspace 已存在且非空，会跳过该项的 `workspace.populate`
+- 批量追加完成后会写入 `tools.agentToAgent.enabled = true`，并把 `main` 和本批次 agent 合并进
+  `tools.agentToAgent.allow`；同时设置 `tools.sessions.visibility = all`
 - 批量追加完成后不额外执行 `openclaw gateway restart`
 - 返回体会显式给出 `restart_required = false` 和空的 `post_batch_actions`
 

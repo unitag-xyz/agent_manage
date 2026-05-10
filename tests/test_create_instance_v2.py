@@ -388,6 +388,14 @@ class CreateInstanceV2Test(unittest.TestCase):
             self.assertEqual(saved_config["tools"]["exec"]["timeout"], 30)
             self.assertEqual(saved_config["tools"]["web"]["search"], {"enabled": False})
             self.assertEqual(saved_config["tools"]["web"]["fetch"], {"enabled": True})
+            self.assertEqual(
+                saved_config["tools"]["agentToAgent"],
+                {
+                    "enabled": True,
+                    "allow": ["main", "base"],
+                },
+            )
+            self.assertEqual(saved_config["tools"]["sessions"]["visibility"], "all")
             self.assertNotIn("legacy", saved_config["models"]["providers"])
             self.assertEqual(result["template_dir"], str(template_dir.resolve()))
             self.assertIn("elapsed_ms", result["steps"][0])
@@ -1018,6 +1026,20 @@ class CreateInstanceV2Test(unittest.TestCase):
             self.assertEqual(result["steps"][3]["step"], "template.prepare[demo]")
             self.assertEqual(result["steps"][4]["step"], "agents.add[demo]")
             self.assertEqual(result["steps"][5]["step"], "workspace.populate[demo]")
+            self.assertEqual(result["steps"][6]["step"], "config.configure_tools")
+            saved_config = json.loads(config_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                saved_config["tools"]["agentToAgent"],
+                {
+                    "enabled": True,
+                    "allow": ["main", "base", "demo"],
+                },
+            )
+            self.assertEqual(saved_config["tools"]["sessions"]["visibility"], "all")
+            self.assertEqual(
+                result["tools_config"]["agent_to_agent_allow"],
+                ["main", "base", "demo"],
+            )
             self.assertEqual(result["agents"][1]["template_name"], "demo-template")
             self.assertEqual(
                 result["agents"][0]["result"]["template_prepare"]["archive_path"],
@@ -1088,6 +1110,53 @@ class CreateInstanceV2Test(unittest.TestCase):
             self.assertEqual(result["steps"][1]["step"], "agents.add[base]")
             self.assertEqual(result["steps"][2]["step"], "workspace.populate[base]")
             self.assertIn("agent exists, skip add: base", runner.logs)
+
+    def test_add_agents_appends_agent_to_existing_agent_to_agent_allow(self):
+        runner = FakeRunner()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            template_root = tmp_path / "template"
+            template_root.mkdir(parents=True)
+            self._write_archive(template_root / "demo.zip", {"SOUL.md": "demo soul\n"})
+            config_path = tmp_path / "openclaw.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "agents": {"list": []},
+                        "tools": {
+                            "agentToAgent": {
+                                "enabled": False,
+                                "allow": ["main", "support"],
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            manager = InstanceManagerV2(
+                runner,
+                template_root=str(template_root),
+                config_path=str(config_path),
+            )
+            result = manager.add_agents(
+                AddAgentsRequest(
+                    agents=[AddAgentRequest(agent_name="demo")],
+                    workspace_root=str(tmp_path / "data"),
+                )
+            )
+
+            saved_config = json.loads(config_path.read_text(encoding="utf-8"))
+            self.assertTrue(result["ok"])
+            self.assertEqual(
+                saved_config["tools"]["agentToAgent"],
+                {
+                    "enabled": True,
+                    "allow": ["main", "support", "demo"],
+                },
+            )
+            self.assertEqual(saved_config["tools"]["sessions"]["visibility"], "all")
 
     def test_add_agents_installs_missing_required_library_before_add(self):
         verify_command = ("/bin/sh", "-lc", "lark-cli --version")
