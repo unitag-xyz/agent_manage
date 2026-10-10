@@ -592,17 +592,22 @@ class ModelManagementMixin:
             return preferred_model_ref
         for model_id in self.PREFERRED_PRIMARY_MODEL_IDS:
             for item in supported_models:
+                if str(item["id"]) == model_id:
+                    return item["model_ref"]
+            for item in supported_models:
                 if self._model_id_for_matching(str(item["id"])) == model_id:
                     return item["model_ref"]
         return supported_models[0]["model_ref"]
 
-    def _supported_model_sort_key(self, item: Dict[str, object]) -> tuple[int, str]:
-        model_id = self._model_id_for_matching(str(item["id"]))
+    def _supported_model_sort_key(self, item: Dict[str, object]) -> tuple[int, int, str]:
+        raw_model_id = str(item["id"])
+        model_id = self._model_id_for_matching(raw_model_id)
         try:
             index = self.PREFERRED_PRIMARY_MODEL_IDS.index(model_id)
         except ValueError:
             index = len(self.PREFERRED_PRIMARY_MODEL_IDS)
-        return (index, model_id)
+        match_rank = 0 if raw_model_id == model_id else 1
+        return (index, match_rank, raw_model_id)
 
     def _supported_models_from_config(self, config: Dict[str, object]) -> List[Dict[str, object]]:
         providers = config.get("models", {}).get("providers", {})

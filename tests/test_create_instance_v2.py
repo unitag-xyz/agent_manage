@@ -307,6 +307,38 @@ class CreateInstanceV2Test(unittest.TestCase):
             ["text", "image"],
         )
 
+    def test_primary_model_prefers_bare_catalog_id_before_qualified_fallback(self):
+        manager = InstanceManagerV2(FakeRunner())
+        supported_models = [
+            {
+                "id": "deepseek/deepseek-v4-flash",
+                "model_ref": "fallback/deepseek/deepseek-v4-flash",
+            },
+            {
+                "id": "deepseek-v4-flash",
+                "model_ref": "deepseek/deepseek-v4-flash",
+            },
+        ]
+
+        self.assertEqual(
+            manager._select_primary_model_ref(supported_models),
+            "deepseek/deepseek-v4-flash",
+        )
+
+    def test_primary_model_uses_qualified_catalog_id_as_fallback(self):
+        manager = InstanceManagerV2(FakeRunner())
+        supported_models = [
+            {
+                "id": "deepseek/deepseek-v4-flash",
+                "model_ref": "fallback/deepseek/deepseek-v4-flash",
+            }
+        ]
+
+        self.assertEqual(
+            manager._select_primary_model_ref(supported_models),
+            "fallback/deepseek/deepseek-v4-flash",
+        )
+
     def test_provider_catalog_removes_image_video_and_audio_models(self):
         manager = InstanceManagerV2(FakeRunner())
         result = manager._normalize_provider_catalog_models(

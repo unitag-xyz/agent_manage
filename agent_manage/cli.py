@@ -56,6 +56,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     configure_instance = subparsers.add_parser("configure-instance")
     _add_instance_arguments(configure_instance)
 
+    activate_instance = subparsers.add_parser("activate-instance")
+    _add_instance_arguments(activate_instance, activation=True)
+
     add_agent = subparsers.add_parser("add-agent")
     add_agent.add_argument("--template-name", required=True)
     add_agent.add_argument("--agent-name")
@@ -166,6 +169,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     sensitive_values: List[str] = []
     try:
         args = parser.parse_args(argv)
+        if args.command == "activate-instance":
+            InstanceManagerV2.require_fly_activation()
         _reject_container_path_overrides(raw_argv)
         container_runtime = os.environ.get("UNITAG_AGENT_MANAGER_RUNTIME") == "container"
         client = InstanceManagerV2(
@@ -178,9 +183,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             config_path=args.config_path,
         )
 
-        if args.command in ("create-instance", "configure-instance"):
+        if args.command in ("create-instance", "configure-instance", "activate-instance"):
             request = CreateInstanceRequest(
-                template_name=args.template_name,
+                template_name=getattr(args, "template_name", ""),
                 model_key=_secret_argument(
                     args.model_key,
                     args.model_key_stdin,
@@ -189,19 +194,27 @@ def main(argv: Optional[List[str]] = None) -> int:
                 ),
                 model_env=args.model_env,
                 ai_shop=args.ai_shop,
-                model=args.model,
+                model=getattr(args, "model", None),
                 image_quality=args.image_quality,
                 base_url=args.base_url,
-                workspace_root=args.workspace_root
+                workspace_root=getattr(args, "workspace_root", None)
                 or (
                     InstanceManagerV2.CONTAINER_WORKSPACE_ROOT
                     if container_runtime
-                    else ("~/.openclaw/data" if args.local else "~/data")
+                    else ("~/.openclaw/data" if getattr(args, "local", False) else "~/data")
                 ),
-                rollback_on_fail=not args.no_rollback,
-                agent_zip=args.agent_zip,
-                local=args.local,
+                rollback_on_fail=not getattr(args, "no_rollback", False),
+                agent_zip=getattr(args, "agent_zip", None),
+                local=getattr(args, "local", False),
             )
+            if args.command == "activate-instance":
+                sensitive_values.append(request.model_key.strip())
+                result = client.activate_instance(request)
+                activation_required = bool(result.pop("activationRequired", False))
+                response = _success_response(result, client)
+                response["activationRequired"] = activation_required
+                print_json(response)
+                return 0
             result = (
                 client.create_instance(request)
                 if args.command == "create-instance"
@@ -476,12 +489,16 @@ def _parse_add_agents(raw: str) -> List[AddAgentRequest]:
     return agents
 
 
-def _add_instance_arguments(parser) -> None:
-    parser.add_argument("--template-name")
-    parser.add_argument("--agent-zip")
-    parser.add_argument("--local", action="store_true")
+def _add_instance_arguments(parser, *, activation: bool = False) -> None:
+    if not activation:
+        parser.add_argument("--template-name")
+        parser.add_argument("--agent-zip")
+        parser.add_argument("--local", action="store_true")
     model_key = parser.add_mutually_exclusive_group(required=True)
-    model_key.add_argument("--model-key")
+    if not activation:
+        model_key.add_argument("--model-key")
+    else:
+        parser.set_defaults(model_key=None)
     model_key.add_argument("--model-key-stdin", action="store_true")
     parser.add_argument(
         "--model-env",
@@ -493,15 +510,17 @@ def _add_instance_arguments(parser) -> None:
         default=DEFAULT_AI_SHOP,
         help=f"model shop path (default: {DEFAULT_AI_SHOP})",
     )
-    parser.add_argument("--model")
+    if not activation:
+        parser.add_argument("--model")
     parser.add_argument(
         "--image-quality",
         choices=IMAGE_QUALITY_CHOICES,
         default=DEFAULT_IMAGE_QUALITY,
     )
     parser.add_argument("--base-url")
-    parser.add_argument("--workspace-root")
-    parser.add_argument("--no-rollback", action="store_true")
+    if not activation:
+        parser.add_argument("--workspace-root")
+        parser.add_argument("--no-rollback", action="store_true")
 
 
 def _read_secret_from_stdin() -> str:
