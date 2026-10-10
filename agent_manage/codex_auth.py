@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -52,12 +53,16 @@ class CodexAuthMixin:
         if not metadata.is_file():
             raise ValueError("Cannot locate the server OpenClaw package from its executable")
         info = json.loads(metadata.read_text())
-        if info.get("name") != "openclaw" or info.get("version") not in {"2026.7.1", "2026.7.1-1", "2026.7.1-2"}:
+        version = info.get("version")
+        if info.get("name") != "openclaw" or not isinstance(version, str) or not re.fullmatch(r"2026\.7\.[1-9][0-9]*(?:-[1-9][0-9]*)?", version):
             raise ValueError(
                 "Codex global authentication currently supports server OpenClaw "
-                "2026.7.1 / 2026.7.1-1 / 2026.7.1-2 only; "
+                "2026.7.* stable releases only (including numeric packaging revisions); "
                 f"detected name={info.get('name')!r}, version={info.get('version')!r}, package={package}"
             )
+        for relative in ("dist/plugin-sdk/provider-auth.js", "dist/extensions/openai/openai-chatgpt-device-code.js"):
+            if not (package / relative).is_file():
+                raise ValueError(f"Server OpenClaw {version} is missing the required Codex SDK module: {relative}")
         root = self.config_path.parent
         config = self._load_config()
         agents = self._codex_auth_agents(config)
@@ -153,7 +158,7 @@ class CodexAuthMixin:
                         "credentials_shared": True, "account": auth["account"]}
             if auth["canonical_auth_available"]:
                 return self._codex_finish_login_locked()
-            # Resolve/validate the pinned SDK before starting an asynchronous task.
+            # Resolve/validate the server SDK before starting an asynchronous task.
             self._codex_bridge_input("device-login")
             job = {"config_path": str(self.config_path), "id": uuid.uuid4().hex, "status": "starting",
                    "expires_at": int(time.time() * 1000) + 30000}

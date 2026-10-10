@@ -253,7 +253,7 @@ class GlobalCodexTest(unittest.TestCase):
             with self.assertRaisesRegex(FileExistsError, "codex-logout"):
                 self.manager.codex_login()
 
-    def test_runtime_resolution_follows_server_symlink_and_rejects_newer_version(self):
+    def test_runtime_resolution_accepts_july_stable_and_rejects_other_versions(self):
         package = self.path.parent / "fake-openclaw"
         package.mkdir()
         metadata = package / "package.json"
@@ -264,11 +264,18 @@ class GlobalCodexTest(unittest.TestCase):
         link.symlink_to(binary)
         self.manager.runner = LocalRunner(str(link))
         self.manager.bin = str(link)
-        for version in ("2026.7.1", "2026.7.1-1", "2026.7.1-2"):
+        modules = ("dist/plugin-sdk/provider-auth.js", "dist/extensions/openai/openai-chatgpt-device-code.js")
+        for relative in modules:
+            module = package / relative
+            module.parent.mkdir(parents=True, exist_ok=True)
+            module.write_text("")
+        for version in ("2026.7.1", "2026.7.1-1", "2026.7.1-2", "2026.7.35", "2026.7.36", "2026.7.35-1"):
             with self.subTest(version=version):
                 metadata.write_text(json.dumps({"name": "openclaw", "version": version}))
                 self.assertEqual(self.manager._codex_bridge_input("inspect")["package"], str(package))
-        for name, version in (("openclaw", "2026.9.2"), ("other-package", "2026.7.1")):
+        for name, version in (("other-package", "2026.7.1"), *[("openclaw", version) for version in (
+                "2026.6.35", "2026.8.35", "2026.9.2", "2027.7.1", "2026.7.2-beta.5", "2026.7.35-rc.1",
+                "2026.7.35garbage", "2026.7.35\n", "2026.7.0", None)]):
             with self.subTest(name=name, version=version):
                 metadata.write_text(json.dumps({"name": name, "version": version}))
                 with self.assertRaisesRegex(ValueError, "server OpenClaw") as error:
@@ -276,6 +283,29 @@ class GlobalCodexTest(unittest.TestCase):
                 self.assertIn(repr(name), str(error.exception))
                 self.assertIn(repr(version), str(error.exception))
                 self.assertIn(str(package), str(error.exception))
+        metadata.write_text(json.dumps({"name": "openclaw", "version": "2026.7.35"}))
+        for relative in modules:
+            module = package / relative
+            module.unlink()
+            with self.assertRaisesRegex(ValueError, "missing the required Codex SDK module"):
+                self.manager._codex_bridge_input("inspect")
+            module.write_text("")
+
+    def test_missing_sdk_exports_fail_before_auth_store_mutation(self):
+        import subprocess
+        package = self.path.parent / "incompatible-openclaw"
+        sdk = package / "dist/plugin-sdk/provider-auth.js"
+        sdk.parent.mkdir(parents=True)
+        (package / "package.json").write_text(json.dumps({"type": "module"}))
+        marker = self.path.parent / "auth-mutated"
+        sdk.write_text("import fs from 'node:fs';\nexport function updateAuthProfileStoreWithLock(){"
+                       f"fs.writeFileSync({json.dumps(str(marker))},'changed'); throw new Error('unexpected');" + "}")
+        result = subprocess.run(["node", str(Path(__file__).resolve().parents[1] / "agent_manage/codex_auth_bridge.mjs")],
+                                input=json.dumps({"package": str(package), "action": "inspect"}),
+                                text=True, capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(json.loads(result.stdout)["error_code"], "CODEX_SDK_INCOMPATIBLE")
+        self.assertFalse(marker.exists())
 
 
 @unittest.skipUnless(os.environ.get("AGENT_MANAGE_TEST_OPENCLAW_BIN"), "Set pinned server OpenClaw for native auth tests")

@@ -1,4 +1,4 @@
-// Deliberately use the pinned server SDK: it owns SQLite, inheritance and refresh.
+// Deliberately use the server SDK: it owns SQLite, inheritance and refresh.
 // Secret input/output stays on private process pipes, never LocalRunner logs.
 import fs from 'node:fs';
 import path from 'node:path';
@@ -63,6 +63,15 @@ function staticOrders(backup) {
 }
 
 try {
+  // A July maintenance release must still expose the native auth contract.
+  // Check before touching any credential stores.
+  for (const name of ['updateAuthProfileStoreWithLock', 'hasUsableOAuthCredential',
+    'resolveOpenAICodexAuthIdentity', 'buildOpenAICodexCredentialExtra']) {
+    if (typeof sdk[name] !== 'function') {
+      emit({event: 'error', error_code: 'CODEX_SDK_INCOMPATIBLE'});
+      process.exit(1);
+    }
+  }
   if (input.action === 'device-login') {
     const {loginOpenAICodexDeviceCode} = await import(pathToFileURL(path.join(input.package, 'dist/extensions/openai/openai-chatgpt-device-code.js')));
     const credential = await loginOpenAICodexDeviceCode({
