@@ -80,24 +80,108 @@ class CodexManagementTest(unittest.TestCase):
         self.assertEqual([call[0][1:] for call in self.fixture.runner.calls], [["config", "validate"]])
         self.assertFalse(result["restart_required"])
 
-    def test_preserves_original_media_api_routing(self):
+    def test_image_uses_codex_and_audio_keeps_original_api_routing(self):
         config = json.loads(self.path.read_text())
         config["tools"]["media"] = {"audio": {"models": [{"provider": "openai", "model": "audio-model"}]}}
         self.path.write_text(json.dumps(config))
         result = self.login()
         changed = json.loads(self.path.read_text())
         provider = changed["models"]["providers"]["openai"]
-        self.assertEqual(provider["api"], "openai-completions")
-        self.assertEqual(provider["baseUrl"], config["models"]["providers"]["openai"]["baseUrl"])
+        self.assertEqual(provider["api"], self.manager.CODEX_API)
+        self.assertEqual(provider["baseUrl"], self.manager.CODEX_BASE_URL)
         self.assertEqual(provider["apiKey"], "test-image-key")
-        self.assertEqual(provider["models"][0], config["models"]["providers"]["openai"]["models"][0])
+        self.assertEqual(provider["models"][0]["baseUrl"], config["models"]["providers"]["openai"]["baseUrl"])
+        self.assertEqual(provider["models"][0]["api"], "openai-completions")
         for row in provider["models"][1:]:
             self.assertEqual(row["baseUrl"], self.manager.CODEX_BASE_URL)
             self.assertEqual(row["api"], self.manager.CODEX_API)
             self.assertNotIn("apiKey", row)
-        self.assertEqual(changed["agents"]["defaults"]["imageGenerationModel"], config["agents"]["defaults"]["imageGenerationModel"])
+        self.assertEqual(changed["agents"]["defaults"]["imageGenerationModel"]["primary"], "openai/gpt-image-2")
+        self.assertEqual(changed["agents"]["defaults"]["imageGenerationModel"]["fallbacks"], [])
+        self.assertEqual(changed["tools"]["media"]["audio"]["models"], [
+            {"provider": "openai", "model": "audio-model", "baseUrl": config["models"]["providers"]["openai"]["baseUrl"]}])
+        self.assertTrue(result["media"]["image_generation_switched"])
+        self.assertFalse(result["media"]["audio_switched"])
+        self.manager._codex_restore_models()
+        self.assertEqual(json.loads(self.path.read_text()), config)
+
+    def test_media_switch_restores_other_image_and_preserves_non_openai_audio(self):
+        config = json.loads(self.path.read_text())
+        config["agents"]["defaults"]["imageGenerationModel"] = {
+            "primary": "google/other-image", "fallbacks": ["custom/image"], "timeoutMs": 240000}
+        config["tools"]["media"] = {"audio": {"enabled": True, "models": [
+            {"provider": "deepgram", "model": "nova-3"},
+            {"provider": "openai", "model": "gpt-4o-transcribe", "baseUrl": "https://audio.example/v1"}]}}
+        self.path.write_text(json.dumps(config))
+        self.login()
+        changed = json.loads(self.path.read_text())
+        self.assertEqual(changed["agents"]["defaults"]["imageGenerationModel"], {
+            "primary": "openai/gpt-image-2", "fallbacks": [], "timeoutMs": 240000})
         self.assertEqual(changed["tools"]["media"], config["tools"]["media"])
-        self.assertEqual(result["media"], {"image_generation_switched": False, "audio_switched": False})
+        self.manager._codex_restore_models()
+        self.assertEqual(json.loads(self.path.read_text()), config)
+
+    def test_legacy_active_login_upgrades_media_without_changing_original_backup(self):
+        self.login()
+        state = self.state()
+        state["restore"].pop("media")
+        state["provider_mode"] = "mixed_api_and_codex"
+        self.manager._codex_state_path().write_text(json.dumps(state))
+        config = json.loads(self.path.read_text())
+        config["models"]["providers"]["openai"]["baseUrl"] = self.original["models"]["providers"]["openai"]["baseUrl"]
+        config["models"]["providers"]["openai"]["api"] = "openai-completions"
+        config["models"]["providers"]["openai"]["models"][0].pop("baseUrl")
+        config["models"]["providers"]["openai"]["models"][0].pop("api")
+        config["tools"].pop("media")
+        config["agents"]["defaults"]["imageGenerationModel"] = self.original["agents"]["defaults"]["imageGenerationModel"]
+        self.path.write_text(json.dumps(config))
+        result = self.login()
+        self.assertTrue(result["media"]["image_generation_switched"])
+        self.assertEqual(self.state()["restore"]["provider"], state["restore"]["provider"])
+        self.assertEqual(self.state()["restore"]["default_fields"], state["restore"]["default_fields"])
+        self.manager._codex_restore_models()
+        self.assertEqual(json.loads(self.path.read_text()), self.original)
+
+    def test_restore_string_or_missing_image_keeps_later_settings(self):
+        for image in ("google/custom-image", None):
+            with self.subTest(image=image):
+                config = json.loads(self.path.read_text())
+                if image is None:
+                    config["agents"]["defaults"].pop("imageGenerationModel", None)
+                else:
+                    config["agents"]["defaults"]["imageGenerationModel"] = image
+                self.path.write_text(json.dumps(config))
+                self.login()
+                changed = json.loads(self.path.read_text())
+                changed["agents"]["defaults"]["imageGenerationModel"]["timeoutMs"] = 240000
+                changed["tools"]["media"]["audio"]["enabled"] = False
+                self.path.write_text(json.dumps(changed))
+                self.manager._codex_restore_models()
+                restored = json.loads(self.path.read_text())
+                self.assertEqual(restored["agents"]["defaults"]["imageGenerationModel"],
+                                 {"timeoutMs": 240000, **({"primary": image} if image else {})})
+                self.assertEqual(restored["tools"]["media"], {"audio": {"enabled": False}})
+                self.path.write_text(json.dumps(self.original))
+
+    def test_legacy_media_upgrade_failure_preserves_original_restore_record(self):
+        self.login()
+        state = self.state()
+        state["restore"].pop("media")
+        self.manager._codex_state_path().write_text(json.dumps(state))
+        original_state = self.manager._codex_state_path().read_bytes()
+        original_config = self.path.read_bytes()
+        from agent_manage.codex_management import _private_json
+
+        def fail_active(path, body):
+            if path == self.manager._codex_state_path() and body.get("status") == "active":
+                raise OSError("state write failed")
+            return _private_json(path, body)
+
+        with patch("agent_manage.codex_management._private_json", side_effect=fail_active):
+            with self.assertRaisesRegex(OSError, "state write failed"):
+                self.login()
+        self.assertEqual(self.path.read_bytes(), original_config)
+        self.assertEqual(self.manager._codex_state_path().read_bytes(), original_state)
 
     def test_pure_codex_provider_has_native_format_and_no_key(self):
         config = json.loads(self.path.read_text())

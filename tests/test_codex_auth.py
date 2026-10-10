@@ -316,6 +316,46 @@ for(const dir of process.argv.slice(2)){
         self.assertTrue(all(agent["shared_auth"] for agent in status["agents"]))
         self.assertNotIn("test-existing-access", json.dumps(status))
         self.assertNotIn("test-existing-refresh", json.dumps(status))
+        # Exercise the pinned image plugin with a mocked service response:
+        # a retained media API key must not take precedence over global OAuth.
+        routing = self.path.parent / "check-media-routing.mjs"
+        routing.write_text("""
+import fs from 'node:fs';
+import {pathToFileURL} from 'node:url';
+const cfg=JSON.parse(fs.readFileSync(process.env.OPENCLAW_CONFIG_PATH,'utf8'));
+let imageCalls=0,audioCalls=0;
+globalThis.fetch=async(url,opts)=>{
+ const headers=new Headers(opts.headers);
+ if(String(url)==='https://chatgpt.com/backend-api/codex/responses'){
+   if(headers.get('authorization')!=='Bearer test-existing-access')throw new Error('Wrong image credential');
+   const body=JSON.parse(opts.body);
+   if(body.tools[0].type!=='image_generation'||body.tools[0].model!=='gpt-image-2')throw new Error('Wrong image tool');
+   imageCalls++;
+   return new Response('data: '+JSON.stringify({type:'response.completed',response:{output:[{type:'image_generation_call',result:'aW1hZ2U='}]}})+'\\n\\n',{headers:{'content-type':'text/event-stream'}});
+ }
+ if(String(url)==='https://api.dola.io/aigateway/mystore/v1/audio/transcriptions'){
+   if(headers.get('authorization')!=='Bearer test-image-key')throw new Error('Wrong audio credential');
+   audioCalls++;
+   return new Response(JSON.stringify({text:'mock transcript'}),{headers:{'content-type':'application/json'}});
+ }
+ throw new Error('Unexpected media endpoint');
+};
+// The SDK deliberately uses undici unless an injected fetch is marked as mocked.
+globalThis.fetch.mock={};
+const imageModule=await import(pathToFileURL(process.argv[2]+'/dist/extensions/openai/image-generation-provider.js'));
+const image=await imageModule.buildOpenAIImageGenerationProvider().generateImage({
+ cfg,agentDir:process.argv[3],model:'gpt-image-2',prompt:'test',quality:'low'});
+if(image.images.length!==1)throw new Error('Missing mock image');
+const audioModule=await import(pathToFileURL(process.argv[2]+'/dist/extensions/openai/media-understanding-provider.js'));
+const entry=cfg.tools.media.audio.models[0];
+const audio=await audioModule.transcribeOpenAiAudio({buffer:Buffer.alloc(2048),fileName:'test.wav',mime:'audio/wav',
+ apiKey:cfg.models.providers.openai.apiKey,baseUrl:entry.baseUrl,model:entry.model,timeoutMs:5000});
+if(audio.text!=='mock transcript'||imageCalls!==1||audioCalls!==1)throw new Error('Media route failed');
+""")
+        media_check = subprocess.run(["node", str(routing), payload["package"], payload["main"]], capture_output=True,
+                                    env={**os.environ, "OPENCLAW_STATE_DIR": str(self.path.parent),
+                                         "OPENCLAW_CONFIG_PATH": str(self.path)}, timeout=20)
+        self.assertEqual(media_check.returncode, 0, media_check.stderr.decode())
         # New agents inherit the main account without copying the refresh token.
         config = json.loads(self.path.read_text())
         config["agents"]["list"].append({"id": "new"})
