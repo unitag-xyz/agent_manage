@@ -211,7 +211,7 @@ def _error_code_for_exception(exc: Exception, payload: Dict[str, Any]) -> str:
     if isinstance(exc, ValueError):
         return "VALIDATION_ERROR"
     if isinstance(exc, CommandError):
-        return "COMMAND_EXECUTION_FAILED"
+        return getattr(exc, "error_code", "COMMAND_EXECUTION_FAILED")
     if payload:
         if payload.get("rollback"):
             return "OPERATION_FAILED_WITH_ROLLBACK"

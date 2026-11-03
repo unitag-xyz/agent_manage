@@ -66,6 +66,17 @@ class ActivateInstanceTest(unittest.TestCase):
                 pass
         self.assertEqual(self.manager.config_path, self.config_path)
 
+    def test_install_hook_uses_published_config_and_failure_preserves_it(self):
+        from agent_manage.agent_hooks import HookError
+        (self.workspace / "install.sh").write_text(
+            'test "$OPENCLAW_CONFIG_PATH" = "' + str(self.config_path) + '" || exit 19\n'
+            'echo activation-hook-error >&2\nexit 8\n')
+        with self.assertRaises(HookError) as caught:
+            self.manager.activate_instance(self.request)
+        self.assertEqual(caught.exception.result.returncode, 8)
+        self.assertNotEqual(self.config_path.read_bytes(), self.original)
+        self.assertTrue((self.workspace / "install.sh").exists())
+
     def test_atomic_single_publication_backup_hash_and_configure_data(self):
         real_replace = os.replace
         publications = []

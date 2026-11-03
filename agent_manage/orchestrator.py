@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import os
 from contextlib import ExitStack
 from pathlib import Path
 from time import perf_counter
 from typing import Dict, List
 
+from .agent_hooks import HookError, run_hook, start_agents
 from .channel_management import ChannelManagementMixin
 from .activation import FlyActivationMixin
 from .gateway_management import GatewayManagementMixin
@@ -128,6 +130,8 @@ class InstanceManagerV2(
                 "steps": steps,
                 "total_elapsed_ms": self._elapsed_ms(execution_started_at),
             }
+        except HookError:
+            raise
         except Exception as exc:
             rollback_steps: List[Dict[str, object]] = []
             if request.rollback_on_fail and config_snapshot is not None:
@@ -179,6 +183,34 @@ class InstanceManagerV2(
                              lambda: self._configure_config_tools(agent_names))
         self._run_timed_step(steps, "workspace.configure_image_generation",
                              lambda: self._configure_workspace_defaults(workspaces, quality=quality, base_url=base_url))
+        if not getattr(self, "_defer_agent_hooks", False):
+            self._install_agent_hooks(steps, agent_names, workspaces)
+
+    def _install_agent_hooks(self, steps, agent_names, workspaces):
+        # Docker build has no buyer credentials. Configure/activate runs hooks later.
+        if os.environ.get("UNITAG_AGENT_HOOKS_DEFER") == "1":
+            return []
+        results = []
+        for name, workspace in zip(agent_names, workspaces):
+            if not (workspace / "install.sh").exists() and not (workspace / "install.sh").is_symlink():
+                continue
+            results.append(self._run_timed_step(
+                steps, f"{name}.install.sh",
+                lambda name=name, workspace=workspace: run_hook(
+                    self.config_path, name, workspace, "install", dry_run=self.runner.dry_run)))
+        return results
+
+    def start_agent_services(self):
+        return start_agents(self.config_path, dry_run=self.runner.dry_run)
+
+    def install_agent_service(self, agent_name):
+        config = self._load_config()
+        for agent in self._extract_agent_list(config):
+            if agent.get("id") == agent_name and agent.get("workspace"):
+                return run_hook(self.config_path, agent_name, Path(agent["workspace"]), "install",
+                                dry_run=self.runner.dry_run, force=True)
+        raise FileNotFoundError(f"Agent not found: {agent_name}")
+
 
     def _provision_additional_agents(self, steps, specs, provisions, *, rollback_on_fail: bool) -> List[Dict[str, object]]:
         agents = []
@@ -354,6 +386,8 @@ class InstanceManagerV2(
                 "steps": steps,
                 "total_elapsed_ms": self._elapsed_ms(execution_started_at),
             }
+        except HookError:
+            raise
         except Exception as exc:
             payload = self._embedded_error_payload(exc)
             if payload.get("rollback") and not (created_agent or created_workspace or additional_provisions):
@@ -498,6 +532,8 @@ class InstanceManagerV2(
                 "steps": steps,
                 "total_elapsed_ms": self._elapsed_ms(execution_started_at),
             }
+        except HookError:
+            raise
         except Exception as exc:
             payload = self._embedded_error_payload(exc)
             if payload.get("rollback") and not (created_agent or created_workspace or additional_provisions):
@@ -743,19 +779,25 @@ class InstanceManagerV2(
                     if isinstance(preserved_template_dir, Path) and preserved_template_dir.exists():
                         self._safe_purge_template_dir(preserved_template_dir)
 
+                hook_results = self._install_agent_hooks(
+                    steps, [item["agent_name"] for item in agent_results],
+                    [Path(item["workspace"]) for item in agent_results])
+
                 return {
                     "ok": True,
                     "requested_count": len(request.agents),
                     "added_count": added_count,
                     "skipped_count": skipped_count,
                     "restart_required": added_count > 0,
-                    "post_batch_actions": [],
+                    "post_batch_actions": hook_results,
                     "base_url": public_base_url,
                     "tools_config": tools_result,
                     "workspace_defaults": workspace_defaults,
                     "agents": agent_results,
                     "steps": steps,
                 }
+        except HookError:
+            raise
         except Exception:
             rollback_steps: List[Dict[str, object]] = []
             for provision in reversed(completed_provisions):

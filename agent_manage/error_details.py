@@ -20,4 +20,4 @@ def command_error_details(exc: Exception) -> dict:
         return {}
     return {"command": exc.result.command_text, "returncode": exc.result.returncode,
             "stdout": exc.result.stdout, "stderr": exc.result.stderr,
-            "timed_out": exc.result.timed_out}
+            "timed_out": exc.result.timed_out, **getattr(exc, "hook_details", {})}

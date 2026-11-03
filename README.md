@@ -1721,3 +1721,30 @@ cd ~/data/agent_manage && python3 scripts/agentctl.py current-gateway-token
 - `COMMAND_EXECUTION_FAILED`
 - `OPERATION_FAILED_WITH_ROLLBACK`
 - `INTERNAL_ERROR`
+
+## Agent 安装与开机启动脚本
+
+Agent workspace 根目录可选放置 `install.sh` 和 `start.sh`，无需可执行权限，通过 `bash` 执行；不接受符号链接入口。模板脚本属于可执行代码，只交付可信模板。
+
+- `create-instance`、`configure-instance`、`add-agent` / `add-agents` 在整批 Agent、模型、Skill 和 workspace 配置完成后执行各自的 `install.sh`。`activate-instance` 等正式配置提交后再执行，不使用暂存配置。
+- 同一 workspace、同一安装脚本成功执行后，普通重复配置跳过安装；脚本变化或上次失败会重新执行。`--dry-run` 不执行、不写状态。镜像构建通过仅作用于构建命令的 `UNITAG_AGENT_HOOKS_DEFER=1` 延后安装，运行实例配置完成后才安装。
+- 安装失败返回非零退出码，`error.code=AGENT_INSTALL_FAILED`；`error.details` 包含 `agent_name`、`hook`、`workspace`、`returncode`、`timed_out`、`stdout`、`stderr`。每个输出流只保留末尾约 16 KiB，屏蔽已知配置/环境凭据和常见敏感字段。脚本仍须避免输出凭据，特别是自己生成的裸密码。
+- 脚本可能产生外部副作用，因此安装失败保留 Agent、配置及 workspace，返回 `workspace_preserved=true`、`rollback_performed=false`，不声称已回滚安装。修复后可单独重试：
+
+```bash
+agent-manage agent-install --agent <agent-id>
+```
+
+该命令显式重新执行已注册 Agent 的 `install.sh`，即使此前成功；换 key 后需重新配置应用时也可使用。没有安装入口时返回跳过，不会自动创建脚本。
+
+容器启动器在启动 nginx 和 OpenClaw 进程后，后台逐个执行已注册 Agent 的 `start.sh`。启动失败不阻止其他 Agent、不退出 OpenClaw；安装未成功的 Agent 不启动。有 `start.sh` 且没有 `install.sh` 的 Agent 可直接启动。不会因 Gateway 内部热加载而重复触发。也可由外部主机启动流程统一调用：
+
+```bash
+agent-manage agents-start
+```
+
+`agents-start` 汇总所有 Agent 的结果；任一脚本失败，命令返回非零。单个脚本默认安装超时 30 分钟、启动超时 120 秒；同一 Agent 的安装/启动互斥，超时终止脚本及同进程组子进程，已自行脱离进程组的服务不能保证清理。`start.sh` 需要启动后台服务后退出，零退出码只代表脚本完成，不代表平台额外执行过业务健康检查。
+
+运行上下文：`cwd` 为 workspace，环境包含 `AGENT_ID`、`AGENT_WORKSPACE`、`OPENCLAW_CONFIG_PATH`；兼容 DeepTutor 的 `DEEPTUTOR_OPENCLAW_CONFIG`。不把 API key 放进命令参数，不代替应用选择模型。root 执行时，脚本降权为 OpenClaw 环境目录属主（环境本身属于 root 时仍为 root）。状态及脱敏输出存于 `<OpenClaw 环境>/agent-manage/hooks/<agent-id>.json`。
+
+部署注意：既有容器需要更新启动器/镜像才能自动调用；只更新 CLI 不会更换正在运行的 PID 1。普通 VPS 的开机服务须调用 `agents-start`。Server API 的命令超时应覆盖安装耗时，否则平台请求可能先超时；本仓库不会修改后台超时设置。现有手工安装过的应用如带 `install.sh` 但无成功记录，应先用 `agent-install` 完成登记。`refresh-agent` 只更新模板，不自动运行安装脚本。

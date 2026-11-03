@@ -48,6 +48,7 @@ SIMPLE_COMMAND_HANDLERS = {
     "feishu-bot-status": "get_feishu_bot_status",
     "weixin-bot-status": "get_weixin_bot_status",
     "agents-list": "list_agents",
+    "agents-start": "start_agent_services",
     "current-model": "get_current_model",
     "models": "get_supported_models",
     "update-model": "update_model_catalog",
@@ -88,6 +89,10 @@ def _main(argv: Optional[List[str]] = None) -> int:
 
     activate_instance = subparsers.add_parser("activate-instance")
     _add_instance_arguments(activate_instance, activation=True)
+
+    subparsers.add_parser("agents-start")
+    install_agent = subparsers.add_parser("agent-install")
+    install_agent.add_argument("--agent", required=True)
 
     add_agent = subparsers.add_parser("add-agent")
     add_agent.add_argument("--template-name", required=True)
@@ -237,9 +242,20 @@ def _main(argv: Optional[List[str]] = None) -> int:
             timing.calls["cliSetupMs"] = 1
 
 
+        if args.command == "agent-install":
+            print_json(_success_response(client.install_agent_service(args.agent), client))
+            return 0
+
         handler = SIMPLE_COMMAND_HANDLERS.get(args.command)
         if handler is not None:
-            print_json(_success_response(getattr(client, handler)(), client))
+            result = getattr(client, handler)()
+            if args.command == "agents-start" and not result["ok"]:
+                print_json(build_error_response(RuntimeError(json.dumps({
+                    "error": "One or more agent start.sh scripts failed",
+                    "details": {"returncode": 1, "agents": result["agents"]},
+                }))))
+                return 1
+            print_json(_success_response(result, client))
             return 0
 
         if args.command in ("create-instance", "configure-instance", "activate-instance"):

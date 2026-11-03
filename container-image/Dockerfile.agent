@@ -19,7 +19,7 @@ RUN mkdir -p /home/node/.openclaw/templates \
     && chown -R node:node /home/node/template /home/node/.openclaw/templates
 
 USER node
-RUN python3 /opt/unitag/agent-manager/scripts/agentctl.py add-agent \
+RUN UNITAG_AGENT_HOOKS_DEFER=1 python3 /opt/unitag/agent-manager/scripts/agentctl.py add-agent \
       --template-name "${TEMPLATE_IDENTIFY}" \
       --workspace-root /home/node/.openclaw/data
 

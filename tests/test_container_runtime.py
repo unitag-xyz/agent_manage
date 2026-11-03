@@ -31,6 +31,31 @@ class ContainerRuntimeTest(unittest.TestCase):
             "}\n"
         )
 
+    def test_container_dispatches_start_hooks_after_launching_services(self):
+        import os
+        import threading
+        started = threading.Event()
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "openclaw.json"
+            config.write_text("{}")
+            nginx, gateway = MagicMock(), MagicMock()
+            nginx.poll.return_value = None
+            def gateway_poll():
+                self.assertTrue(started.wait(2))
+                return 0
+            gateway.poll.side_effect = gateway_poll
+            def restore(path, **kwargs):
+                self.assertEqual(path, config)
+                started.set()
+                return {"ok": True, "agents": []}
+            with patch.dict(os.environ, {"OPENCLAW_CONFIG_PATH": str(config)}), \
+                 patch.object(container_runtime, "select_nginx_config", return_value=Path(tmp)/"nginx.conf"), \
+                 patch.object(container_runtime.subprocess, "Popen", side_effect=[nginx, gateway]), \
+                 patch.object(container_runtime.signal, "signal"), \
+                 patch.object(container_runtime, "start_agents", side_effect=restore) as hooks:
+                self.assertEqual(container_runtime.run_container(["openclaw"], 80), 0)
+            hooks.assert_called_once()
+
     def test_resolve_nginx_port_defaults_to_port_80(self):
         self.assertEqual(container_runtime.resolve_nginx_port(None), 80)
         self.assertEqual(container_runtime.resolve_nginx_port("8080"), 8080)

@@ -60,7 +60,7 @@ RUN mkdir -p /opt/unitag/openclaw-seed \
     && chown -R node:node /home/node/template /home/node/.openclaw /opt/unitag/openclaw-seed
 
 USER node
-RUN python3 /opt/unitag/agent-manager/scripts/agentctl.py add-agent \
+RUN UNITAG_AGENT_HOOKS_DEFER=1 python3 /opt/unitag/agent-manager/scripts/agentctl.py add-agent \
       --template-name "${TEMPLATE_IDENTIFY}" \
       --workspace-root /home/node/.openclaw/data \
     && openclaw plugins install "@tencent-weixin/openclaw-weixin@${WEIXIN_PLUGIN_VERSION}" \

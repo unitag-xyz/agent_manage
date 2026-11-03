@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .agent_hooks import HookError
+
 import copy
 import errno
 import hashlib
@@ -63,6 +65,7 @@ class FlyActivationMixin:
             ))
             staged = copy.copy(self)
             staged.config_path = stage_path
+            staged._defer_agent_hooks = True
             result = staged._configure_existing_instance(replace(request, rollback_on_fail=False))
             result.pop("restart_required", None)
             steps.extend(result["steps"])
@@ -98,10 +101,13 @@ class FlyActivationMixin:
                 return {"config_path": str(config_path), "backup_path": str(backup_path)}
 
             self._run_timed_step(steps, "activation.commit", commit)
+            self._install_agent_hooks(steps, result["agent_names"], [Path(p) for p in result["workspaces"]])
             result.update(steps=steps, total_elapsed_ms=self._elapsed_ms(started_at),
                           activationRequired=True, requestedConfigSha256=digest)
             # Success data contains no model key; substring redaction would corrupt hashes/paths.
             return self._activation_public_paths(result, stage_path, config_path)
+        except HookError:
+            raise
         except Exception as exc:
             payload = self._embedded_error_payload(exc)
             steps.extend(payload.get("steps", []))

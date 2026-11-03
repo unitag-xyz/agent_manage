@@ -6,6 +6,10 @@ import signal
 import subprocess
 import sys
 import time
+import threading
+import json
+
+from .agent_hooks import start_agents
 from pathlib import Path
 from typing import Sequence
 
@@ -201,6 +205,18 @@ def run_container(command: Sequence[str], port: int) -> int:
 
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
+    cancel_hooks = threading.Event()
+    def restore_services():
+        path = Path(os.environ.get("OPENCLAW_CONFIG_PATH", "/home/node/.openclaw/openclaw.json"))
+        if not path.is_file():
+            return
+        try:
+            report = start_agents(path, cancel=cancel_hooks)
+            print("agent services: " + json.dumps(report, ensure_ascii=False), file=sys.stderr, flush=True)
+        except Exception as exc:
+            print(f"agent services: startup failed ({type(exc).__name__})", file=sys.stderr, flush=True)
+    hook_thread = threading.Thread(target=restore_services, name="agent-start-hooks", daemon=True)
+    hook_thread.start()
     try:
         while not stopping:
             nginx_code = nginx.poll()
@@ -212,6 +228,8 @@ def run_container(command: Sequence[str], port: int) -> int:
             time.sleep(0.2)
         return 0
     finally:
+        cancel_hooks.set()
+        hook_thread.join(timeout=5)
         _terminate(openclaw)
         _terminate(nginx)
 
