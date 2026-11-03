@@ -13,6 +13,7 @@ from typing import Dict, List, Optional
 from .local import LocalRunner
 from .error_details import command_error_details, embedded_error_payload
 from .file_io import atomic_write_bytes, encode_json, stage_bytes
+from .restart_policy import host_restart_required, standard_host_reload_available
 from .settings import (
     DEFAULT_AI_SHOP,
     DEFAULT_IMAGE_QUALITY,
@@ -225,6 +226,27 @@ class ManagerCore:
             return None
         token = os.environ.get("OPENCLAW_GATEWAY_TOKEN")
         return token.strip() if isinstance(token, str) and token.strip() else None
+
+    def _host_reload_available(self) -> bool:
+        return standard_host_reload_available(self.bin, container_runtime=self.container_runtime)
+
+    def _instance_restart_required(self, snapshot, *, legacy_required: bool = True) -> bool:
+        if self.restart_required:
+            return True
+        if not self._host_reload_available():
+            return legacy_required
+        if self.runner.dry_run:
+            return False
+        if snapshot is None:
+            return True
+        try:
+            before = json.loads(snapshot[0])
+            if not isinstance(before, dict):
+                return True
+            after = self._load_config()
+            return host_restart_required(before, after)
+        except (OSError, ValueError, TypeError):
+            return True
 
     def _snapshot_config_file(self) -> tuple[bytes, int] | None:
         if self.runner.dry_run or not self.config_path.exists():
