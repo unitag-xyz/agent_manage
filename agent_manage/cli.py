@@ -123,6 +123,9 @@ def _main(argv: Optional[List[str]] = None) -> int:
     refresh_source = refresh.add_mutually_exclusive_group()
     refresh_source.add_argument("--template-dir")
     refresh_source.add_argument("--agent-zip")
+    refresh_source.add_argument("--template-zip-url")
+    refresh.add_argument("--template-version")
+    refresh.add_argument("--template-zip-sha256")
     refresh.add_argument("--template-name")
     refresh_scope = refresh.add_mutually_exclusive_group()
     refresh_scope.add_argument("--models-only", action="store_true")
@@ -360,6 +363,9 @@ def _main(argv: Optional[List[str]] = None) -> int:
                 template_dir=args.template_dir,
                 agent_zip=args.agent_zip,
                 template_name=args.template_name,
+                template_zip_url=args.template_zip_url,
+                template_zip_sha256=args.template_zip_sha256,
+                template_version=args.template_version,
                 models_only=args.models_only,
                 template_only=args.template_only,
                 replace_modified=args.replace_modified,

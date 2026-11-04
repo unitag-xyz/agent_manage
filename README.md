@@ -182,6 +182,12 @@ python3 scripts/agentctl.py --dry-run add-skill --common --skill-dir /path/to/we
 
 ## refresh-agent
 
+平台“更新到新版”从授权发布记录取得目标版本与 ZIP 地址，向 `agent.refresh-agent` 的
+`parameters` 传 `agent`、`template-version` 和 `template-zip-url`。缓存 ZIP 的模板版本与目标相同时直接复用，否则下载并核对包内版本。
+可选 `template-zip-sha256` 仅用于验证本次下载。结果里的 `template.archive_cache_hit` 表示是否复用缓存。
+预览只下载到临时目录；实际刷新同步成功后保留新版 ZIP，再运行 workspace 的安装脚本。
+仅传 Agent 名时沿用主机已有模板。
+
 刷新已存在的 agent，默认同时刷新模型目录和模板文件。模型目录和公共 Skill
 作用于当前整个 OpenClaw 环境；私有模板文件作用于指定 agent 的实际 workspace。
 兼容目标沿用服务器的 OpenClaw `2026.7.1-2`，保留该版 `imageGenerationModel` 配置，

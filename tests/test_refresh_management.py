@@ -104,6 +104,54 @@ class RefreshManagementTest(unittest.TestCase):
     def state(self):
         return json.loads((self.config_path.parent / "agent-manage/agents/demo.json").read_text())
 
+    def test_remote_refresh_validates_then_caches_and_runs_new_package(self):
+        from unittest.mock import MagicMock
+
+        cache = self.manager.template_root / "demo.zip"
+        cache.parent.mkdir()
+        def package(version):
+            stream = io.BytesIO()
+            with zipfile.ZipFile(stream, "w") as archive:
+                archive.writestr("template.yaml", f"version: {version}\n")
+                archive.writestr("install.sh", f"echo {version} > deployed-version\n")
+            return stream.getvalue()
+
+        old, new = package("0.1.2"), package("0.1.3")
+        cache.write_bytes(old)
+        self.manager.refresh_agent(RefreshAgentRequest("demo", template_only=True))
+        url = "https://cdn.example.test/demo.zip"
+        req = RefreshAgentRequest("demo", template_only=True, template_zip_url=url,
+                                  template_version="0.1.3")
+        with patch("agent_manage.template_download.build_opener") as opener:
+            def respond(*args, **kwargs):
+                response = MagicMock()
+                response.__enter__.return_value = response
+                response.geturl.return_value = url
+                response.read.side_effect = [new, b""]
+                response.headers = {}
+                return response
+            opener.return_value.open.side_effect = respond
+            self.runner.dry_run = True
+            self.assertEqual(self.manager.refresh_agent(req)["template"]["version_after"], "0.1.3")
+            self.assertEqual(cache.read_bytes(), old)
+            self.runner.dry_run = False
+            self.runner.fail_validate = True
+            with self.assertRaises(RuntimeError):
+                self.manager.refresh_agent(req)
+            self.assertEqual(cache.read_bytes(), old)
+            self.assertEqual((self.workspace / "deployed-version").read_text().strip(), "0.1.2")
+            self.runner.fail_validate = False
+            result = self.manager.refresh_agent(req)
+            self.assertFalse(result["template"]["archive_cache_hit"])
+            (self.workspace / "deployed-version").unlink()
+            opener.reset_mock()
+            result = self.manager.refresh_agent(req)
+            opener.assert_not_called()
+            self.assertTrue(result["template"]["archive_cache_hit"])
+        self.assertEqual(result["template"]["version_after"], "0.1.3")
+        self.assertEqual(cache.read_bytes(), new)
+        self.assertEqual((self.workspace / "deployed-version").read_text().strip(), "0.1.3")
+
     def test_refresh_installs_synced_website_and_reruns_unchanged_script(self):
         self.write_source("website.txt", "first")
         self.write_source("install.sh", "cp website.txt deployed.txt\necho run >> installs.log\n")

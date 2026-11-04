@@ -212,7 +212,9 @@ class ProvisioningMixin:
         manifest_path = template_dir / "template.yaml"
         if not manifest_path.is_file():
             return {}
-        text = manifest_path.read_text(encoding="utf-8")
+        return self._parse_template_manifest(manifest_path.read_text(encoding="utf-8"), manifest_path)
+
+    def _parse_template_manifest(self, text: str, manifest_path: Path) -> Dict[str, object]:
         try:
             import yaml  # type: ignore
         except ImportError:

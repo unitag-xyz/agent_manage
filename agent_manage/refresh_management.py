@@ -12,7 +12,7 @@ import stat
 import tempfile
 import uuid
 import zipfile
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,6 +21,7 @@ from .agent_hooks import HookError, run_hook
 from .skill_permissions import prepare_shared_skill_path
 from .models import RefreshAgentRequest
 from .file_io import atomic_write_bytes as _atomic_bytes, write_private_json as _private_json
+from .template_download import download_template_archive, replace_template_archive, validate_template_url
 from .template_safety import validate_safe_name, validate_template_archive
 
 
@@ -58,20 +59,41 @@ def _safe_target(root: Path, relative: str) -> Path:
 
 
 class RefreshManagementMixin:
+    def _cached_template_version(self, path: Path) -> str | None:
+        if path.is_symlink() or not path.is_file():
+            return None
+        try:
+            with zipfile.ZipFile(path) as archive:
+                roots = {name.split("/", 1)[0] for name in archive.namelist()
+                         if not name.startswith("__MACOSX/")}
+                member = "template.yaml"
+                if len(roots) == 1 and member not in roots:
+                    member = f"{roots.pop()}/template.yaml"
+                if archive.getinfo(member).file_size > 1024 * 1024:
+                    return None
+                manifest = self._parse_template_manifest(archive.read(member).decode(), path)
+                return str(manifest.get("version") or "").strip()
+        except (KeyError, ValueError, zipfile.BadZipFile):
+            return None
+
     def refresh_agent(self, request: RefreshAgentRequest) -> dict:
         name = validate_safe_name(request.agent_name, "agent_name")
         if request.models_only and request.template_only:
             raise ValueError("Choose only one refresh scope")
-        if request.template_dir and request.agent_zip:
+        if sum(bool(value) for value in (request.template_dir, request.agent_zip, request.template_zip_url)) > 1:
             raise ValueError("Choose only one template source")
-        if request.models_only and (request.template_dir or request.agent_zip or request.template_name):
+        if bool(request.template_zip_url) != bool((request.template_version or "").strip()):
+            raise ValueError("Remote refresh requires both template_zip_url and template_version")
+        if request.template_zip_sha256 and not request.template_zip_url:
+            raise ValueError("template_zip_sha256 requires template_zip_url")
+        if request.models_only and (request.template_zip_url or request.template_dir or request.agent_zip or request.template_name):
             raise ValueError("Model-only refresh does not accept a template source")
         workspace = self._skill_agent_workspace(name)
         state_root = self.config_path.parent / "agent-manage"
         if self.config_path.is_relative_to(workspace) or state_root.is_relative_to(workspace):
             raise ValueError("Agent workspace must not contain the environment config or refresh state")
         # Resolve sources before mutating anything. Dry-run creates no persistent state.
-        with self._refresh_lock(state_root), tempfile.TemporaryDirectory(prefix="agent-manage-refresh-") as temporary:
+        with self._refresh_lock(state_root), tempfile.TemporaryDirectory(prefix="agent-manage-refresh-") as temporary, ExitStack() as archives:
             if self._skill_agent_workspace(name) != workspace:
                 raise RuntimeError("Agent workspace changed while preparing refresh; retry")
             state_path = state_root / "agents" / f"{name}.json"
@@ -91,11 +113,30 @@ class RefreshManagementMixin:
             template_result = {"skipped": True}
             stage = Path(temporary)
             if not request.models_only:
-                source, template_name = self._refresh_source(request, previous, stage)
+                archive_override = None
+                if request.template_zip_url:
+                    template_name = validate_safe_name(request.template_name or previous.get("template_name") or name, "template_name")
+                    destination = self.template_root / f"{template_name}.zip"
+                    url = validate_template_url(request.template_zip_url)
+                    cache_hit = self._cached_template_version(destination) == request.template_version.strip()
+                    if cache_hit:
+                        archive_override = destination
+                    elif self.runner.dry_run:
+                        archive_override = download_template_archive(url, stage / "preview.zip",
+                                                                     expected_sha256=request.template_zip_sha256)
+                    else:
+                        archives.enter_context(replace_template_archive(url=url,
+                                                                       expected_sha256=request.template_zip_sha256,
+                                                                       destination=destination))
+                source, template_name = self._refresh_source(request, previous, stage, archive_override)
                 new_state, plan, conflicts, template_result = self._refresh_template_plan(
                     name, workspace, source, template_name, previous, stage,
                     request.replace_modified,
                 )
+                if request.template_zip_url:
+                    if template_result["version_after"] != request.template_version.strip():
+                        raise ValueError(f"Template version mismatch: expected {request.template_version}, got {template_result['version_after']}")
+                    template_result["archive_cache_hit"] = cache_hit
             result = {"ok": True, "agent_name": name, "config_path": str(self.config_path),
                       "workspace": str(workspace), "models": models_result,
                       "template": template_result, "conflicts": conflicts,
@@ -152,6 +193,7 @@ class RefreshManagementMixin:
                     self._activate_refresh()
                     result.update(gateway_restarted=True, activation_verified=True, restart_required=False)
                 result["backup_path"] = None
+                archives.close()
                 return self._refresh_install(request, workspace, result)
             job_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ-") + uuid.uuid4().hex[:12]
             backup = state_root / "backups" / job_id
@@ -273,6 +315,7 @@ class RefreshManagementMixin:
                                 "rollback_errors": errors, "runtime_restored": runtime_restored,
                                 "cause": str(exc)}}, ensure_ascii=False)) from exc
 
+            archives.close()  # Keep the synced archive even if installation needs a retry.
             # Installation may change dependencies, services and external files.
             # Run after the refresh transaction, never pretend to roll it back.
             return self._refresh_install(request, workspace, result)
@@ -313,12 +356,12 @@ class RefreshManagementMixin:
             finally:
                 fcntl.flock(handle, fcntl.LOCK_UN)
 
-    def _refresh_source(self, request, previous, stage):
+    def _refresh_source(self, request, previous, stage, archive_override=None):
         name = validate_safe_name(request.template_name or previous.get("template_name") or request.agent_name, "template_name")
         if request.template_dir:
             source = Path(request.template_dir).expanduser()
         else:
-            archive_path = Path(request.agent_zip).expanduser() if request.agent_zip else self.template_root / f"{name}.zip"
+            archive_path = archive_override or (Path(request.agent_zip).expanduser() if request.agent_zip else self.template_root / f"{name}.zip")
             if not request.agent_zip and not archive_path.exists():
                 source = self.template_root / name
             else:

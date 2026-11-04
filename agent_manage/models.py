@@ -57,6 +57,9 @@ class RefreshAgentRequest:
     template_only: bool = False
     replace_modified: bool = False
     restart: bool = False
+    template_version: str | None = None
+    template_zip_url: str | None = None
+    template_zip_sha256: str | None = None
 
 
 @dataclass
