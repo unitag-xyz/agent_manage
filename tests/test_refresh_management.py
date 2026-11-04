@@ -104,6 +104,50 @@ class RefreshManagementTest(unittest.TestCase):
     def state(self):
         return json.loads((self.config_path.parent / "agent-manage/agents/demo.json").read_text())
 
+    def test_refresh_installs_synced_website_and_reruns_unchanged_script(self):
+        self.write_source("website.txt", "first")
+        self.write_source("install.sh", "cp website.txt deployed.txt\necho run >> installs.log\n")
+        result = self.manager.refresh_agent(self.request())
+        self.assertFalse(result["install"].get("skipped", False))
+        self.assertEqual((self.workspace / "deployed.txt").read_text(), "first")
+        self.write_source("website.txt", "second")
+        self.manager.refresh_agent(self.request())
+        result = self.manager.refresh_agent(self.request())
+        self.assertIsNone(result["backup_path"])
+        self.assertEqual((self.workspace / "deployed.txt").read_text(), "second")
+        self.assertEqual((self.workspace / "installs.log").read_text(), "run\n" * 3)
+
+    def test_refresh_install_failure_preserves_synced_files_and_can_retry(self):
+        from agent_manage.agent_hooks import HookError
+        self.write_source("install.sh", "echo started > install-marker\nexit 7\n")
+        with self.assertRaises(HookError) as caught:
+            self.manager.refresh_agent(self.request())
+        error = caught.exception
+        self.assertEqual(error.error_code, "AGENT_INSTALL_FAILED")
+        self.assertTrue(error.hook_details["template_refreshed"])
+        self.assertFalse(error.hook_details["rollback_performed"])
+        self.assertTrue((self.workspace / "install-marker").exists())
+        self.assertEqual((self.workspace / "SOUL.md").read_text(), "version one\n")
+        manifest = Path(error.hook_details["backup_path"]) / "manifest.json"
+        self.assertEqual(json.loads(manifest.read_text())["status"], "complete")
+        self.write_source("install.sh", "echo fixed > install-marker\n")
+        self.manager.refresh_agent(self.request())
+        self.assertEqual((self.workspace / "install-marker").read_text(), "fixed\n")
+
+    def test_refresh_preview_models_only_and_failed_sync_do_not_install(self):
+        self.write_source("install.sh", "touch should-not-run\n")
+        (self.workspace / "install.sh").write_text("touch should-not-run\n")
+        with patch("agent_manage.refresh_management.run_hook") as hook:
+            self.runner.dry_run = True
+            self.manager.refresh_agent(self.request())
+            self.runner.dry_run = False
+            self.manager.refresh_agent(RefreshAgentRequest("demo", models_only=True))
+            self.runner.fail_validate = True
+            with self.assertRaises(RuntimeError):
+                self.manager.refresh_agent(self.request())
+            hook.assert_not_called()
+        self.assertFalse((self.workspace / "should-not-run").exists())
+
     def test_template_refresh_records_real_version_and_preserves_memory(self):
         before = self.config_path.read_bytes()
         result = self.manager.refresh_agent(self.request())

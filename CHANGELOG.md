@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `refresh-agent` 同步模板后重新执行 `install.sh`，支持更新网站和应用；无文件变化也可重试安装，模型单独刷新与预览不执行。安装失败返回脱敏错误并保留已同步文件和安装现场。
+
 ## 0.5.7 - 2026-11-03
 
 - Agent 安装完成后支持运行根目录 `install.sh`，返回脱敏错误和退出码，失败保留现场；新增 `agent-install --agent` 重试和 `agents-start` 启动入口。

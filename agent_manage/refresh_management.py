@@ -17,6 +17,7 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .agent_hooks import HookError, run_hook
 from .skill_permissions import prepare_shared_skill_path
 from .models import RefreshAgentRequest
 from .file_io import atomic_write_bytes as _atomic_bytes, write_private_json as _private_json
@@ -151,7 +152,7 @@ class RefreshManagementMixin:
                     self._activate_refresh()
                     result.update(gateway_restarted=True, activation_verified=True, restart_required=False)
                 result["backup_path"] = None
-                return result
+                return self._refresh_install(request, workspace, result)
             job_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ-") + uuid.uuid4().hex[:12]
             backup = state_root / "backups" / job_id
             backup.mkdir(parents=True, mode=0o700)
@@ -215,7 +216,6 @@ class RefreshManagementMixin:
                     _private_json(state_path, new_state)
                 manifest["status"] = "complete"
                 _private_json(backup / "manifest.json", manifest)
-                return result
             except Exception as exc:
                 errors = []
                 for item in reversed(attempted):
@@ -272,6 +272,24 @@ class RefreshManagementMixin:
                     "details": {"backup_path": str(backup), "rollback_ok": not errors,
                                 "rollback_errors": errors, "runtime_restored": runtime_restored,
                                 "cause": str(exc)}}, ensure_ascii=False)) from exc
+
+            # Installation may change dependencies, services and external files.
+            # Run after the refresh transaction, never pretend to roll it back.
+            return self._refresh_install(request, workspace, result)
+
+    def _refresh_install(self, request, workspace, result):
+        if request.models_only:
+            return result
+        try:
+            result["install"] = run_hook(self.config_path, request.agent_name, workspace,
+                                         "install", force=True)
+        except HookError as exc:
+            exc.hook_details.update(template_refreshed=True,
+                                    backup_path=result.get("backup_path"),
+                                    partial=result["partial"],
+                                    skipped_conflicts=result["skipped_conflicts"])
+            raise
+        return result
 
     @contextmanager
     def _refresh_lock(self, root: Path):

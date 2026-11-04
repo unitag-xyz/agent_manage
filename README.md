@@ -1747,4 +1747,4 @@ agent-manage agents-start
 
 运行上下文：`cwd` 为 workspace，环境包含 `AGENT_ID`、`AGENT_WORKSPACE`、`OPENCLAW_CONFIG_PATH`；兼容 DeepTutor 的 `DEEPTUTOR_OPENCLAW_CONFIG`。不把 API key 放进命令参数，不代替应用选择模型。root 执行时，脚本降权为 OpenClaw 环境目录属主（环境本身属于 root 时仍为 root）。状态及脱敏输出存于 `<OpenClaw 环境>/agent-manage/hooks/<agent-id>.json`。
 
-部署注意：既有容器需要更新启动器/镜像才能自动调用；只更新 CLI 不会更换正在运行的 PID 1。普通 VPS 的开机服务须调用 `agents-start`。Server API 的命令超时应覆盖安装耗时，否则平台请求可能先超时；本仓库不会修改后台超时设置。现有手工安装过的应用如带 `install.sh` 但无成功记录，应先用 `agent-install` 完成登记。`refresh-agent` 只更新模板，不自动运行安装脚本。
+部署注意：既有容器需要更新启动器/镜像才能自动调用；只更新 CLI 不会更换正在运行的 PID 1。普通 VPS 的开机服务须调用 `agents-start`。Server API 的命令超时应覆盖安装耗时，否则平台请求可能先超时；本仓库不会修改后台超时设置。现有手工安装过的应用如带 `install.sh` 但无成功记录，应先用 `agent-install` 完成登记。`refresh-agent` 在模板同步成功后强制重跑根目录 `install.sh`（即使脚本或模板未变化），用于重新下载、构建和部署网站；`--models-only` 和 `--dry-run` 不执行。返回 `install` 执行结果，无脚本时跳过。安装失败返回 `AGENT_INSTALL_FAILED` 和脱敏输出，保留已同步模板与安装现场，不回滚脚本的外部副作用；可再次刷新或用 `agent-install` 重试。冲突文件仍按原规则跳过，安装使用同步后的实际 workspace；脚本应支持重复执行并保留用户数据。
