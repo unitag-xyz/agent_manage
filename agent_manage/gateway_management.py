@@ -259,6 +259,15 @@ class GatewayManagementMixin:
         return None
 
     def _restart_gateway_service(self) -> Dict[str, object]:
+        context = getattr(self, "runtime_context", None)
+        if context and context.lifecycle == "external":
+            self.restart_required = True
+            return {"deferred": True, "method": "external_controller", "runtime_id": context.runtime_id}
+        if context and context.lifecycle != "legacy":
+            # Verify native daemon/config ownership before asking it to restart.
+            self._assert_refresh_gateway_scope()
+            self._activate_refresh()
+            return {"method": "scoped_gateway_restart", "runtime_id": context.runtime_id}
         if self.container_runtime:
             self.restart_required = True
             return {

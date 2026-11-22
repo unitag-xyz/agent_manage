@@ -1,5 +1,25 @@
 # Agent Manage
 
+## 1.0 统一接口
+
+本分支新增独立的 HTTP/WSS 服务、运行环境隔离、持久化操作与当前 OpenClaw 适配。
+现有 `agent-manage` CLI、参数、输出协议和测试继续保留；不需要部署新服务即可使用旧命令。
+接入验证版本和已有实例的升级限制见 [CHANGELOG.md](CHANGELOG.md)。
+
+- [架构、职责与迁移边界](docs/v1-architecture.md)
+- [接口、鉴权、消息与事件合同](docs/v1-api.md)
+- [部署、验证与恢复](docs/v1-operations.md)
+- [独立服务配置示例](examples/v1-server.json)
+
+```bash
+python3 -m pip install '.[server]'
+python3 -m agent_manage.server --config /absolute/path/server.json
+```
+
+服务默认仅监听回环地址。远程入口使用 TLS 代理及短期授权；本机浏览器也不会自动获得管理权限。
+当前实现检测 OpenClaw 2026.7.x，并对 `2026.7.1-2` 做真实 Gateway 集成测试。
+其他底座、新版 OpenClaw、分享、Site 注册和容器创建仍按能力查询明确返回不支持，不会伪装为已实现。
+
 ## Chat 多段历史（OpenClaw 2026.7.x）
 
 新增只读命令，可读取同一逻辑线程重置前的物理段，支持双向分页、完整消息补读及图片/音频附件分块读取：

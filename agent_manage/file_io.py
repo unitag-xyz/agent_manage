@@ -31,12 +31,22 @@ def atomic_write_bytes(path: Path, content: bytes, mode: int = 0o600) -> None:
     temporary = stage_bytes(path, content, mode)
     try:
         os.replace(temporary, path)
+        sync_directory(path.parent)
     finally:
         temporary.unlink(missing_ok=True)
 
 
 def encode_json(payload: object) -> bytes:
     return (json.dumps(payload, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+
+
+def sync_directory(path: Path) -> None:
+    """Persist rename metadata as well as file data (Linux/macOS local filesystems)."""
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 def write_private_json(path: Path, payload: object) -> None:

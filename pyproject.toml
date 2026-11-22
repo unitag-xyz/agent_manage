@@ -8,6 +8,9 @@ dynamic = ["version"]
 description = "Local agent management script for OpenClaw servers."
 requires-python = ">=3.10"
 
+[project.optional-dependencies]
+server = ["aiohttp>=3.13,<4", "cryptography>=46,<47"]
+
 [tool.setuptools.dynamic]
 version = {attr = "agent_manage.__version__"}
 

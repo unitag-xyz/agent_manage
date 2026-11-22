@@ -1,0 +1,313 @@
+"""Transport-independent authorization, admission and durable command dispatch."""
+import asyncio
+import contextvars
+import json
+import logging
+import re
+import time
+from concurrent.futures import ThreadPoolExecutor
+
+from ..adapters.base import RuntimeAdapter
+from .auth import LeaseAuthority
+from .contracts import METHODS, schema
+from .errors import APIError
+from .store import Store, canonical
+from .runtime import CURRENT_WRITE_GUARD
+
+LOG = logging.getLogger("agent_manage.api")
+
+
+class Workers:
+    def __init__(self, count, name, queue_limit=0):
+        self.pool = ThreadPoolExecutor(max_workers=count, thread_name_prefix=name)
+        self.capacity, self.active = count, 0
+        self.waiting, self.queue_limit = 0, queue_limit
+        self.slots = asyncio.Semaphore(count)
+
+    async def __call__(self, function, *args):
+        if self.active + self.waiting >= self.capacity + self.queue_limit:
+            raise APIError("BUSY", "Worker capacity reached; retry later", retryable=True)
+        self.waiting += 1
+        try:
+            await self.slots.acquire()
+        finally:
+            self.waiting -= 1
+        self.active += 1
+        def execute():
+            guard = CURRENT_WRITE_GUARD.get()
+            if guard:
+                guard()
+            return function(*args)
+        try:
+            future = asyncio.get_running_loop().run_in_executor(self.pool, contextvars.copy_context().run, execute)
+        except Exception:
+            self.active -= 1
+            self.slots.release()
+            raise
+        def finished(_):
+            self.active -= 1
+            self.slots.release()
+        future.add_done_callback(finished)
+        return await asyncio.shield(future)
+
+    def close(self):
+        self.pool.shutdown(wait=False, cancel_futures=True)
+
+
+def safe_result(value):
+    """Management metadata is public; native logs and secret-shaped fields are not."""
+    if isinstance(value, dict):
+        return {key: safe_result(child) for key, child in value.items()
+                if not re.search(r"token|secret|password|api.?key|credential|authorization", key, re.I)
+                and key not in ("stdout", "stderr", "command", "command_text", "argv", "raw")}
+    if isinstance(value, list):
+        return [safe_result(child) for child in value]
+    return value
+
+
+class Service:
+    def __init__(self, directory, *, audience="agent-manager", workers=4):
+        self.store = Store(directory)
+        self.auth = LeaseAuthority(self.store, audience)
+        self.read_workers = Workers(workers, "manager-read")
+        self.write_workers = Workers(2, "manager-control", queue_limit=16)
+        self.media_workers = Workers(2, "manager-media")
+        self.adapters: dict[str, RuntimeAdapter] = {}
+        self.tasks = set()
+        self.listeners = set()
+        self.sequence = 0
+        self.epoch = __import__("uuid").uuid4().hex
+        self.closed = False
+        self._owner = None
+        self.ticket_issuer = None
+
+    async def redeem(self, ticket):
+        return await self.ticket_issuer.redeem(ticket) if self.ticket_issuer else self.auth.redeem(ticket)
+
+    async def start(self):
+        from .transactions import runtime_write_lock
+        self._owner = runtime_write_lock(self.store.path.parent, timeout=0)
+        self._owner.__enter__()
+        self.store.recover_operations()
+        for identifier in self.adapters:
+            for row in self.store.objects("run", identifier):
+                if row["data"].get("status") in ("accepted", "running", "cancel_requested"):
+                    self.store.object("run", identifier, row["native"], {**row["data"], "observation": "unknown"})
+
+    def register(self, adapter: RuntimeAdapter):
+        if adapter.runtime_id in self.adapters:
+            raise ValueError("Duplicate runtime registration")
+        context = adapter.context
+        for existing in self.adapters.values():
+            left, right = existing.context.state_dir, context.state_dir
+            if left.is_relative_to(right) or right.is_relative_to(left):
+                raise ValueError("Runtimes must not overlap state directories")
+            if existing.context.environment_id != context.environment_id and existing.context.home == context.home:
+                raise ValueError("Different environments need explicit distinct home directories")
+        self.adapters[adapter.runtime_id] = adapter
+        adapter.control_workers = self.write_workers
+        adapter.media_workers = self.media_workers
+        self.store.object("runtime", adapter.runtime_id, adapter.runtime_id,
+            {"engine": adapter.engine, "environmentId": context.environment_id, "configPath": str(context.config_path)})
+
+    def adapter(self, runtime) -> RuntimeAdapter:
+        if runtime not in self.adapters:
+            raise APIError("NOT_FOUND", "Runtime is not registered")
+        return self.adapters[runtime]
+
+    def authorize(self, lease, method, params):
+        spec = METHODS[method]
+        runtime = params.get("runtimeId")
+        lease = self.auth.authorize(lease, method, runtime)
+        if spec.scope == "operation":
+            operation = self.store.operation(params["operationId"], lease.context, runtime)
+            return self.auth.authorize(lease, method, runtime, operation["agentId"], runtime_wide=operation["agentId"] is None)
+        agent = self.adapter(runtime).resolve_scope(method, params) if runtime else None
+        return self.auth.authorize(lease, method, runtime, agent, runtime_wide=spec.scope == "runtime")
+
+    @staticmethod
+    def validate(request):
+        if not isinstance(request, dict) or not isinstance(request.get("requestId"), str) or not 1 <= len(request["requestId"]) <= 128:
+            raise APIError("INVALID_ARGUMENT", "A requestId of 1-128 characters is required")
+        if set(request) - {"requestId", "method", "params", "type"}:
+            raise APIError("INVALID_ARGUMENT", "Unknown request field")
+        method, params = request.get("method"), request.get("params", {})
+        if not isinstance(method, str) or method not in METHODS:
+            raise APIError("UNSUPPORTED", "Unknown or unsupported method")
+        if not isinstance(params, dict):
+            raise APIError("INVALID_ARGUMENT", "params must be an object")
+        spec = METHODS[method]
+        allowed = {"runtimeId", *spec.required, *spec.optional}
+        if spec.write:
+            allowed.add("clientRequestId")
+        if set(params) - allowed or any(field not in params for field in spec.required):
+            raise APIError("INVALID_ARGUMENT", "Parameters do not match the method contract", details={"required": list(spec.required)})
+        if spec.scope != "system" and not isinstance(params.get("runtimeId"), str):
+            raise APIError("INVALID_ARGUMENT", "runtimeId is required")
+        if spec.write and (not isinstance(params.get("clientRequestId"), str) or not 1 <= len(params["clientRequestId"]) <= 128):
+            raise APIError("INVALID_ARGUMENT", "Writes require clientRequestId of 1-128 characters")
+        for key in ("agentId", "threadId", "segmentId", "messageId", "runId", "resourceId", "operationId", "modelId", "title", "message"):
+            if key in params and (not isinstance(params[key], str) or not params[key] or len(params[key]) > (256000 if key == "message" else 8192)):
+                raise APIError("INVALID_ARGUMENT", f"Invalid {key}")
+        if "expectedCurrentSegmentId" in params and params["expectedCurrentSegmentId"] is not None and (not isinstance(params["expectedCurrentSegmentId"], str) or not 1 <= len(params["expectedCurrentSegmentId"]) <= 128):
+            raise APIError("INVALID_ARGUMENT", "expectedCurrentSegmentId must be a segment ID or null for a new empty thread")
+        if "limit" in params and (type(params["limit"]) is not int or not 1 <= params["limit"] <= 200):
+            raise APIError("INVALID_ARGUMENT", "limit must be 1-200")
+        if "omitThinking" in params and type(params["omitThinking"]) is not bool:
+            raise APIError("INVALID_ARGUMENT", "omitThinking must be a boolean")
+        if "options" in params and not isinstance(params["options"], dict):
+            raise APIError("INVALID_ARGUMENT", "options must be an object")
+        if "edge" in params and (params["edge"] not in ("start", "end") or "cursor" in params):
+            raise APIError("INVALID_ARGUMENT", "edge must be start/end and cannot accompany cursor")
+        if "view" in params and params["view"] not in ("full", "compact"):
+            raise APIError("INVALID_ARGUMENT", "Unknown message projection")
+        return method, params
+
+    async def dispatch(self, lease, request):
+        started = time.monotonic()
+        request_id = request.get("requestId") if isinstance(request, dict) else None
+        method = None
+        try:
+            method, params = self.validate(request)
+            lease = self.authorize(lease, method, params)
+            if self.closed:
+                raise APIError("NOT_READY", "Manager is shutting down")
+            if METHODS[method].write:
+                if len(self.tasks) >= 16:
+                    raise APIError("BUSY", "Command capacity reached", retryable=True)
+                adapter = self.adapter(params["runtimeId"])
+                agent = adapter.resolve_scope(method, params) if METHODS[method].scope != "runtime" else None
+                thread = params.get("threadId")
+                if method == "runs.cancel":
+                    thread = self.store.get(params["runId"], kind="run", runtime=params["runtimeId"])["data"]["threadId"]
+                operation, created = self.store.claim(lease.context, params["runtimeId"], method, params["clientRequestId"], params,
+                                                     agent_id=agent, thread_id=thread)
+                if created:
+                    task = asyncio.create_task(self.execute(operation["operationId"], lease, method, params))
+                    self.tasks.add(task)
+                    task.add_done_callback(self.tasks.discard)
+                result = operation
+            else:
+                result = await self.read(lease, method, params)
+            # Recheck even if expiry/revocation happened while native I/O was in flight.
+            lease = self.authorize(lease, method, params)
+            return {"requestId": request_id, "ok": True, "result": result, "authContext": lease.public(),
+                    "timings": {"managerElapsedMs": round((time.monotonic() - started) * 1000, 3)}}
+        except APIError as exc:
+            return self.error_response(lease, request_id, exc)
+        except Exception as exc:
+            return self.error_response(lease, request_id, self.translate_error(exc))
+        finally:
+            LOG.info("rpc method=%s duration_ms=%.2f", method, (time.monotonic() - started) * 1000)
+
+    def error_response(self, lease, identifier, error):
+        context = {}
+        try:
+            context = {"authContext": self.auth.authenticate(lease.token).public()}
+        except APIError:
+            pass
+        return {"requestId": identifier, "ok": False, "error": error.payload(), **context}
+
+    @staticmethod
+    def translate_error(exc):
+        if isinstance(exc, APIError):
+            return exc
+        from ..response import ProtocolError
+        if isinstance(exc, ProtocolError):
+            return APIError(exc.code, str(exc))
+        if isinstance(exc, (ValueError, TypeError)):
+            return APIError("INVALID_ARGUMENT", "Native command rejected the supplied arguments")
+        if isinstance(exc, FileNotFoundError):
+            return APIError("NOT_FOUND", "A required local file or executable was not found")
+        LOG.error("native operation failed type=%s", type(exc).__name__)
+        return APIError("OPERATION_FAILED", "Native operation failed; inspect protected host logs and backups")
+
+    async def execute(self, operation_id, lease, method, params):
+        guard_token = CURRENT_WRITE_GUARD.set(lambda: self.authorize(lease, method, params))
+        try:
+            self.authorize(lease, method, params)
+            self.store.finish(operation_id, "running")
+            adapter = self.adapter(params["runtimeId"])
+            result = await adapter.invoke(method, {**params, "_operationId": operation_id})
+            result = safe_result(result)
+            if len(canonical(result).encode()) > 1024 * 1024:
+                raise APIError("RESULT_TOO_LARGE", "Command completed but result exceeds the metadata budget")
+            self.store.finish(operation_id, "completed", result=result)
+        except Exception as exc:
+            error = self.translate_error(exc)
+            # A timeout or a generic native failure can have partial external effects.
+            status = "unknown" if error.code in ("DISPATCH_UNKNOWN", "OPERATION_FAILED", "RESULT_TOO_LARGE") or (error.details or {}).get("partialEffects") else "failed"
+            self.store.finish(operation_id, status, error=error.payload())
+        finally:
+            CURRENT_WRITE_GUARD.reset(guard_token)
+
+    async def read(self, lease, method, params):
+        if method == "system.info":
+            from .. import __version__
+            return {"apiVersion": "1.0", "implementationVersion": __version__, "epoch": self.epoch,
+                    "transports": ["http", "websocket"], "methods": schema(), "eventReplay": False}
+        if method in ("runtimes.list", "targets.list", "environments.list"):
+            allowed = [adapter for identifier, adapter in self.adapters.items()
+                       if identifier in lease.context["runtimeIds"] or "*" in lease.context["runtimeIds"]]
+            if method == "runtimes.list":
+                return {"items": [self.runtime_info(adapter) for adapter in allowed]}
+            if method == "environments.list":
+                return {"items": list({adapter.context.environment_id: {"environmentId": adapter.context.environment_id,
+                    "targetId": adapter.registration.get("targetId", "local"), "kind": adapter.registration.get("environmentKind", "local"),
+                    "lifecycleOwner": "external"} for adapter in allowed}.values())}
+            return {"items": [{"targetId": identifier, "kind": "local"} for identifier in sorted({adapter.registration.get("targetId", "local") for adapter in allowed})]}
+        adapter = self.adapter(params["runtimeId"])
+        if method == "capabilities.get":
+            result = adapter.capabilities()
+            for action, value in result["methods"].items():
+                value["authorized"] = "*" in lease.context["actions"] or action in lease.context["actions"]
+                if action in METHODS and METHODS[action].scope == "runtime" and "*" not in lease.context["agentIds"]:
+                    value["authorized"] = False
+            return result
+        if method == "runtimes.get":
+            return self.runtime_info(adapter)
+        if method == "operations.get":
+            return self.store.operation(params["operationId"], lease.context, params["runtimeId"])
+        if method in ("operations.list", "operations.lookup"):
+            return {"items": self.store.operations(lease.context, params["runtimeId"], params.get("clientRequestId"), agent_ids=lease.context["agentIds"])}
+        if method == "runs.lookup":
+            operations = self.store.operations(lease.context, params["runtimeId"], params["clientRequestId"],
+                agent_ids=lease.context["agentIds"], thread_id=params["threadId"], method="runs.create")
+            result = await adapter.invoke(method, params)
+            permitted = {op["operationId"] for op in operations}
+            result["items"] = [run for run in result["items"] if run.get("operationId") in permitted]
+            return {**result, "operations": operations, "acceptance": "unknown" if any(op["status"] == "unknown" for op in operations)
+                    else "accepted" if operations else "not_accepted"}
+        if method.startswith("events."):
+            raise APIError("TRANSPORT_REQUIRED", "Subscriptions require WebSocket transport")
+        result = await adapter.invoke(method, params)
+        if method == "agents.list" and "*" not in lease.context["agentIds"]:
+            result["items"] = [item for item in result["items"] if item["agentId"] in lease.context["agentIds"]]
+        return result
+
+    @staticmethod
+    def runtime_info(adapter):
+        return {"runtimeId": adapter.runtime_id, "environmentId": adapter.context.environment_id,
+                "engine": adapter.engine, "engineVersion": adapter.version,
+                "lifecycleOwner": adapter.context.lifecycle, "supported": adapter.supported}
+
+    async def publish(self, runtime, thread, payload):
+        self.sequence += 1
+        event = {"runtimeId": runtime, "threadId": thread, "epoch": self.epoch,
+                 "sequence": self.sequence, **payload}
+        for listener in tuple(self.listeners):
+            listener(event)
+
+    async def close(self):
+        self.closed = True
+        if self.tasks:
+            await asyncio.gather(*self.tasks, return_exceptions=True)
+        for adapter in self.adapters.values():
+            await adapter.close()
+        if self.ticket_issuer:
+            await self.ticket_issuer.close()
+        for pool in (self.read_workers, self.write_workers, self.media_workers):
+            pool.close()
+        if self._owner:
+            self._owner.__exit__(None, None, None)
+            self._owner = None

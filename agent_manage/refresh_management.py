@@ -201,6 +201,23 @@ class RefreshManagementMixin:
             backup.chmod(0o700)
             manifest = self._backup_refresh(backup, plan, original_config, config_mode,
                                             state_path, previous, new_state, name, job_id)
+            # Journal all intended bytes BEFORE the first live write. A killed process
+            # can then be recovered without executing installation scripts again.
+            from .file_io import encode_json
+            from .core.recovery import fingerprint
+            recovery_entries = list(manifest["files"])
+            recovery_entries.append({"path": str(self.config_path),
+                "before": fingerprint(self.config_path), "backup_file": "openclaw.json",
+                "after": {"sha256": hashlib.sha256(encode_json(candidate) if candidate != config else original_config).hexdigest(),
+                          "mode": 0o600 if candidate != config else config_mode}})
+            if metadata_changed:
+                new_state["baseline_path"] = str(backup / "baseline")
+                new_state["last_refresh_id"] = job_id
+                recovery_entries.append({"path": str(state_path), "before": fingerprint(state_path),
+                    "backup_file": "state.json" if state_path.exists() else None,
+                    "after": {"sha256": hashlib.sha256(encode_json(new_state)).hexdigest(), "mode": 0o600}})
+            manifest["recovery_entries"] = recovery_entries
+            _private_json(backup / "manifest.json", manifest)
             result.update(backup_id=job_id, backup_path=str(backup))
             attempted = []
             config_written = False
@@ -216,6 +233,8 @@ class RefreshManagementMixin:
                     attempted.append(item)
                     if item["action"] == "delete":
                         target.unlink()
+                        from .file_io import sync_directory
+                        sync_directory(target.parent)
                     else:
                         missing = []
                         parent = target.parent
@@ -250,8 +269,7 @@ class RefreshManagementMixin:
                     ]
                     for index in range(len(new_state["files"])):
                         source_path = stage / "managed" / str(index)
-                        shutil.copyfile(source_path, baseline / str(index))
-                        (baseline / str(index)).chmod(0o600)
+                        _atomic_bytes(baseline / str(index), source_path.read_bytes())
                     new_state["baseline_path"] = str(baseline)
                     new_state["last_refresh_id"] = job_id
                     state_written = True
@@ -269,6 +287,8 @@ class RefreshManagementMixin:
                             raise RuntimeError("File changed independently; retain it and report rollback conflict")
                         if item["before"] is None:
                             item["target"].unlink(missing_ok=True)
+                            from .file_io import sync_directory
+                            sync_directory(item["target"].parent)
                         else:
                             _atomic_bytes(item["target"], (backup / item["backup_file"]).read_bytes(), item["before"]["mode"])
                             if item["root"] == self.config_path.parent / "skills":
@@ -339,22 +359,24 @@ class RefreshManagementMixin:
         if self.runner.dry_run:
             yield
             return
-        for path in [root, root / "agents", root / "backups"]:
-            if path.is_symlink():
-                raise ValueError(f"Refresh state links are not allowed: {path}")
-            path.mkdir(parents=True, exist_ok=True, mode=0o700)
-            path.chmod(0o700)
-        lock = root / "refresh.lock"
-        fd = os.open(lock, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
-        with os.fdopen(fd, "w") as handle:
-            try:
-                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError as exc:
-                raise FileExistsError("Another refresh is running in this environment; retry later") from exc
-            try:
-                yield
-            finally:
-                fcntl.flock(handle, fcntl.LOCK_UN)
+        from .core.transactions import runtime_write_lock
+        with runtime_write_lock(root.parent):
+            for path in [root, root / "agents", root / "backups"]:
+                if path.is_symlink():
+                    raise ValueError(f"Refresh state links are not allowed: {path}")
+                path.mkdir(parents=True, exist_ok=True, mode=0o700)
+                path.chmod(0o700)
+            lock = root / "refresh.lock"
+            fd = os.open(lock, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(fd, "w") as handle:
+                try:
+                    fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError as exc:
+                    raise FileExistsError("Another refresh is running in this environment; retry later") from exc
+                try:
+                    yield
+                finally:
+                    fcntl.flock(handle, fcntl.LOCK_UN)
 
     def _refresh_source(self, request, previous, stage, archive_override=None):
         name = validate_safe_name(request.template_name or previous.get("template_name") or request.agent_name, "template_name")

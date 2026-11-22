@@ -1,0 +1,23 @@
+{
+  "stateDirectory": "/srv/agent-manager/state",
+  "audience": "agent-manager:host-001",
+  "listenHost": "127.0.0.1",
+  "listenPort": 18900,
+  "allowedOrigins": ["https://chat.example.com"],
+  "runtimes": [
+    {
+      "id": "openclaw-primary",
+      "engine": "openclaw",
+      "environmentId": "environment-primary",
+      "environmentKind": "local",
+      "targetId": "local",
+      "home": "/srv/environment-primary/home",
+      "configPath": "/srv/environment-primary/home/.openclaw/openclaw.json",
+      "templateRoot": "/srv/environment-primary/templates",
+      "executable": "/opt/openclaw-july/openclaw.mjs",
+      "gatewayUrl": "ws://127.0.0.1:18789",
+      "gatewayOrigin": "http://127.0.0.1:18789",
+      "lifecycle": "external"
+    }
+  ]
+}

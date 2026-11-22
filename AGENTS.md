@@ -1,5 +1,18 @@
 # agent_manage Project Context
 
+## 1.0 开发分支
+
+`codex/v1-unified-agent-api` 正在建立独立统一服务；以下 MVP 说明保留为现有业务背景。
+改动前阅读 `docs/v1-architecture.md`、`docs/v1-api.md`、`docs/v1-operations.md`。
+
+- 新服务按 core → adapter → 保留的执行服务分层，HTTP/WSS 共用方法合同；方法登记在 `core/contracts.py`。
+- 所有底座（含 DSH）从首个版本起就在 `adapters/<engine>/<version_family>/` 实现 `RuntimeAdapter`，并在 `adapters/registry.py` 注册底座工厂。工厂探测安装版本，并按原生协议和数据格式选择实现。目录和接口规则见 [新底座与版本适配](docs/v1-architecture.md#新底座与版本适配)。
+- CLI 入口、已有参数、输出包装及旧测试保留，不强迫旧部署启动新服务。
+- 环境、版本、权限和原生能力必须显式确认；不把未实现的 DSH、新版 OpenClaw、远程或 Dola 产品功能标为支持。
+- Dola 账号/订单/套餐由上层维护，Manager 负责验证和执行授权范围；本机浏览器不自动获得管理员权限。
+- 管理写操作遵守公共 Runtime 锁与日志恢复；外部脚本副作用不能包装成已回滚。
+- 发布仍遵守下方版本规则；开发分支存在 1.0 API 不等于已经发布 1.0 软件版本。
+
 本仓库当前主要承载 `agent_manage` 这一层：运行在 OpenClaw 实例主机上的本机执行器，用来管理该主机内的 OpenClaw 实例与渠道配置。它不是网站前端，不是 Unipay 后台，也不是 AWS 控制台。
 
 ## 项目整体目标

@@ -9,6 +9,7 @@ from typing import Any, Dict
 from .local import CommandError
 from .error_details import command_error_details, embedded_error_payload as _embedded_error_payload
 from .segment_timing import CURRENT
+from .core.errors import APIError
 
 TYPE_CODE_SUCCESS = 1
 TYPE_CODE_ACCEPTED = 2
@@ -67,6 +68,8 @@ def build_error_response(exc: Exception) -> Dict[str, object]:
     }
 
     details = payload.get("details") if payload else None
+    if isinstance(exc, APIError):
+        details = exc.details
     if not details and isinstance(exc, CommandError):
         details = command_error_details(exc)
     if details:
@@ -165,6 +168,8 @@ def _server_timestamp() -> str:
 
 
 def _type_code_for_exception(exc: Exception, payload: Dict[str, Any]) -> int:
+    if isinstance(exc, APIError):
+        return TYPE_CODE_CONFLICT if exc.code in {"RECOVERY_REQUIRED", "BUSY"} else TYPE_CODE_INTERNAL_ERROR
     if isinstance(exc, ProtocolError):
         return exc.type_code
     if isinstance(exc, FileNotFoundError):
@@ -185,6 +190,8 @@ def _type_code_for_exception(exc: Exception, payload: Dict[str, Any]) -> int:
 
 
 def _error_code_for_exception(exc: Exception, payload: Dict[str, Any]) -> str:
+    if isinstance(exc, APIError):
+        return exc.code
     if isinstance(exc, ProtocolError):
         return exc.code
     message = (payload.get("error") if payload else None) or str(exc)

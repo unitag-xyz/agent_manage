@@ -191,6 +191,12 @@ def _terminate(process: subprocess.Popen[bytes], timeout: float = 10.0) -> None:
 def run_container(command: Sequence[str], port: int) -> int:
     if not command:
         raise ValueError("OpenClaw command is required")
+    runtime_config = Path(os.environ.get("OPENCLAW_CONFIG_PATH", "/home/node/.openclaw/openclaw.json"))
+    if runtime_config.is_file():
+        from .core.transactions import runtime_write_lock
+        from .core.recovery import recover_refreshes
+        with runtime_write_lock(runtime_config.parent):
+            recover_refreshes(runtime_config)
     config_path = select_nginx_config(port)
 
     nginx = subprocess.Popen(
@@ -211,7 +217,11 @@ def run_container(command: Sequence[str], port: int) -> int:
         if not path.is_file():
             return
         try:
-            report = start_agents(path, cancel=cancel_hooks)
+            from .core.transactions import runtime_write_lock
+            from .core.recovery import recover_refreshes
+            with runtime_write_lock(path.parent):
+                recover_refreshes(path)
+                report = start_agents(path, cancel=cancel_hooks)
             print("agent services: " + json.dumps(report, ensure_ascii=False), file=sys.stderr, flush=True)
         except Exception as exc:
             print(f"agent services: startup failed ({type(exc).__name__})", file=sys.stderr, flush=True)

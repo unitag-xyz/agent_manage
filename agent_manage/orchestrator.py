@@ -23,8 +23,10 @@ from .skill_management import SkillManagementMixin
 from .refresh_management import RefreshManagementMixin
 from .codex_management import CodexManagementMixin
 from .segment_management import SegmentManagementMixin
+from .core.compat import install_boundaries
 
 
+@install_boundaries
 class InstanceManagerV2(
     FlyActivationMixin,
     ChannelManagementMixin,

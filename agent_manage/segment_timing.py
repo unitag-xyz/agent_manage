@@ -10,7 +10,8 @@ CURRENT = ContextVar("segment_timing", default=None)
 class ReadTiming:
     def __init__(self):
         self.started = time.perf_counter()
-        self.cpu_started = time.process_time()
+        self.cpu_clock = getattr(time, "thread_time", time.process_time)
+        self.cpu_started = self.cpu_clock()
         self.started_at = int(time.time() * 1000)
         self.phases = {}
         self.calls = {}
@@ -33,7 +34,7 @@ class ReadTiming:
             "startedAtUnixMs": self.started_at,
             "measuredAtUnixMs": int(time.time() * 1000),
             "hostElapsedMs": round((time.perf_counter() - self.started) * 1000, 3),
-            "hostCpuMs": round((time.process_time() - self.cpu_started) * 1000, 3),
+            "hostCpuMs": round((self.cpu_clock() - self.cpu_started) * 1000, 3),
             "phasesMs": {key: round(value, 3) for key, value in self.phases.items()},
             "phaseCalls": dict(self.calls),
             "counts": dict(self.counts),

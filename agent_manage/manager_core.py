@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import secrets
 import shutil
@@ -261,6 +262,9 @@ class ManagerCore:
         snapshot: tuple[bytes, int],
     ) -> Dict[str, object]:
         try:
+            owned = getattr(self, "_last_config_write", None)
+            if owned and owned[0] == self.config_path and self._config_digest() != owned[1]:
+                raise RuntimeError("Config changed independently; refusing to overwrite it during rollback")
             atomic_write_bytes(self.config_path, snapshot[0], snapshot[1])
             return {
                 "step": "rollback.config.restore",
@@ -279,10 +283,15 @@ class ManagerCore:
         self.runner.log(f"config: load {self.config_path}")
         if not self.config_path.exists():
             raise FileNotFoundError(f"Config file not found: {self.config_path}")
-        config = json.loads(self.config_path.read_text(encoding="utf-8"))
+        raw = self.config_path.read_bytes()
+        self._config_read_revision = (self.config_path, hashlib.sha256(raw).hexdigest())
+        config = json.loads(raw)
         if not isinstance(config, dict):
             raise ValueError(f"Config must be a JSON object: {self.config_path}")
         return config
+
+    def _config_digest(self):
+        return hashlib.sha256(self.config_path.read_bytes()).hexdigest() if self.config_path.exists() else None
 
     def _write_config(
         self,
@@ -304,6 +313,10 @@ class ManagerCore:
             payload["note"] = note
             return payload
 
+        observed = getattr(self, "_config_read_revision", None)
+        if observed and observed[0] == self.config_path and self._config_digest() != observed[1]:
+            raise RuntimeError("Config changed during operation; retry from a fresh read")
+
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
         backup_path = self.config_path.with_suffix(self.config_path.suffix + ".bak")
         tmp_path = stage_bytes(self.config_path, encode_json(config))
@@ -312,6 +325,10 @@ class ManagerCore:
                 shutil.copy2(self.config_path, backup_path)
                 os.chmod(backup_path, 0o600)
             tmp_path.replace(self.config_path)
+            from .file_io import sync_directory
+            sync_directory(self.config_path.parent)
+            self._last_config_write = (self.config_path, self._config_digest())
+            self._config_read_revision = self._last_config_write
         finally:
             tmp_path.unlink(missing_ok=True)
         payload["backup_path"] = str(backup_path) if backup_path.exists() else None

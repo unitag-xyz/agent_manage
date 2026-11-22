@@ -195,6 +195,17 @@ class LocalRunner:
 
     def _command_env(self) -> dict[str, str]:
         env = os.environ.copy()
+        from .core.runtime import CURRENT_RUNTIME
+        context = CURRENT_RUNTIME.get()
+        if context is not None:
+            if not context.inherit_process_env:
+                env = {key: value for key, value in env.items() if key in {
+                    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "LC_CTYPE",
+                    "TMPDIR", "TMP", "TEMP", "SYSTEMROOT", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"}}
+            # A profile inherited from the manager's shell must not select another runtime.
+            for key in ("OPENCLAW_PROFILE", "OPENCLAW_CONFIG_PATH", "OPENCLAW_STATE_DIR"):
+                env.pop(key, None)
+            env.update(context.environment())
         home = env.get("HOME") or str(Path.home())
         runtime_dir = env.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
         dbus_address = env.get("DBUS_SESSION_BUS_ADDRESS") or f"unix:path={runtime_dir}/bus"

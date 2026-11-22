@@ -2,3 +2,6 @@
 __pycache__/
 .pytest_cache/
 openclaw_docs/
+.venv/
+build/
+*.egg-info/

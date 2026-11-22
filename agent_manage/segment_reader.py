@@ -14,6 +14,8 @@ import os
 import re
 import stat
 import time
+import threading
+from collections import OrderedDict
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote, unquote, urlparse
@@ -34,6 +36,10 @@ EXTENSIONS = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", 
               ".aac": "audio/aac", ".webm": "video/webm", ".mp4": "video/mp4", ".avif": "image/avif",
               ".heic": "image/heic", ".pdf": "application/pdf"}
 MISSING = object()
+# Hashes only, never media bytes. File identity includes ctime to detect rewrites.
+_MEDIA_HASHES = OrderedDict()
+_MEDIA_HASH_LOCK = threading.Lock()
+_MEDIA_HASH_LIMIT = 256
 
 
 def fail(code, message):
@@ -324,11 +330,16 @@ class SegmentReader:
         boundary = snapshot.get("bytes") if snapshot else opened.st_size
         if type(boundary) is not int or not 0 <= boundary <= opened.st_size:
             fail("CURSOR_EXPIRED", "Transcript was truncated")
+        if self.input.get("maxTranscriptBytes") and boundary > self.input["maxTranscriptBytes"]:
+            fail("TRANSCRIPT_TOO_LARGE", "Transcript exceeds this service's read budget")
         records, hasher, committed, at = [], hashlib.sha256(), 0, 0
         # Buffered readline avoids repeatedly copying large incomplete lines.
         with os.fdopen(os.dup(fd), "rb") as stream:
             while at < boundary:
-                line = stream.readline(boundary - at)
+                record_limit = self.input.get("maxRecordBytes", boundary - at)
+                line = stream.readline(min(boundary - at, record_limit + 1))
+                if len(line) > record_limit:
+                    fail("MESSAGE_TOO_LARGE", "Stored record exceeds this service's read budget")
                 if not line:
                     fail("CURSOR_EXPIRED", "Transcript changed during read")
                 end = at + len(line)
@@ -354,6 +365,8 @@ class SegmentReader:
                 records.append({"meta": {key: raw[key] for key in ("type", "id", "parentId", "targetId", "appendMode", "appendParentId") if key in raw},
                                 "start": at, "length": len(line), "timestamp": millis(raw.get("timestamp") if raw.get("timestamp") is not None else message.get("timestamp")),
                                 "role": message.get("role"), "preview": short_text(message), "hasMessage": isinstance(raw.get("message"), dict)})
+                if self.input.get("maxRecords") and len(records) > self.input["maxRecords"]:
+                    fail("TRANSCRIPT_TOO_LARGE", "Transcript record count exceeds this service's read budget")
                 hasher.update(line)
                 committed = end
                 at = end
@@ -395,6 +408,8 @@ class SegmentReader:
         latest = self.entry()
         if "segment" in payload:
             payload["segment"]["isCurrent"] = latest.get("sessionId") == self.session_id
+        if self.input.get("includeSnapshot"):
+            payload["snapshotId"] = digest(dumps([self.scope, self.snapshot]).encode())
         return payload
 
     def ref_token(self, kind, **values):
@@ -417,7 +432,7 @@ class SegmentReader:
         return isinstance(value, str) and not re.match(r"https?://", value, re.I) and Path(value).suffix.lower() in EXTENSIONS
 
     @timed("mediaReadAndHashMs")
-    def local_media_read(self, value, *, with_bytes=False):
+    def local_media_read(self, value, *, with_bytes=False, offset=0, length=MEDIA_CHUNK_BYTES):
         if not self.local_media(value):
             fail("FORBIDDEN", "Unsupported media reference")
         if value.startswith("file://"):
@@ -438,23 +453,40 @@ class SegmentReader:
                 return value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns
             before = signature()
             key = (file, before)
-            if not with_bytes and key in self.media_identities:
+            with _MEDIA_HASH_LOCK:
+                result = _MEDIA_HASHES.get(key)
+                if result is not None:
+                    _MEDIA_HASHES.move_to_end(key)
+            if result is None:
+                hasher = hashlib.sha256()
+                while True:
+                    block = os.read(fd, 128 * 1024)
+                    if not block:
+                        break
+                    hasher.update(block)
+                    count("mediaBytesRead", len(block))
+                if signature() != before:
+                    fail("CURSOR_EXPIRED", "Media changed during read")
+                result = {"sha256": hasher.hexdigest(), "contentType": EXTENSIONS[file.suffix.lower()],
+                          "totalBytes": before[2]}
+                with _MEDIA_HASH_LOCK:
+                    _MEDIA_HASHES[key] = result
+                    _MEDIA_HASHES.move_to_end(key)
+                    while len(_MEDIA_HASHES) > _MEDIA_HASH_LIMIT:
+                        _MEDIA_HASHES.popitem(last=False)
+            else:
                 count("mediaCacheHits")
-                return self.media_identities[key]
-            hasher, parts = hashlib.sha256(), []
-            while True:
-                block = os.read(fd, 128 * 1024)
-                if not block:
-                    break
-                hasher.update(block)
-                count("mediaBytesRead", len(block))
-                if with_bytes:
-                    parts.append(block)
+            data = None
+            if with_bytes:
+                if type(offset) is not int or not 0 <= offset <= before[2]:
+                    fail("CURSOR_EXPIRED", "Invalid chunk boundary")
+                data = os.pread(fd, min(length, before[2] - offset), offset)
+                count("mediaBytesRead", len(data))
+                if len(data) != min(length, before[2] - offset):
+                    fail("CURSOR_EXPIRED", "Media changed during read")
             if signature() != before:
                 fail("CURSOR_EXPIRED", "Media changed during read")
-            result = {"sha256": hasher.hexdigest(), "contentType": EXTENSIONS[file.suffix.lower()]}
-            self.media_identities[key] = result
-            return {**result, **({"bytes": b"".join(parts)} if with_bytes else {})}
+            return {**result, **({"bytes": data} if with_bytes else {})}
         finally:
             os.close(fd)
 
@@ -468,13 +500,14 @@ class SegmentReader:
             raise ValueError("Invalid base64")
         return data
 
-    def media_ref(self, row, pointer, source, value):
+    def media_ref(self, row, pointer, source, value, purpose="unknown"):
         media_hash = None
         try:
             media_hash = digest(self.inline_bytes(value)) if source == "base64" else self.local_media_read(value)["sha256"]
         except (OSError, ValueError, ProtocolError):
             pass
-        return {**({"mediaId": "sha256:" + media_hash} if media_hash else {}), "method": "sessions.segments.media.get",
+        return {**({"mediaId": "sha256:" + media_hash} if media_hash else {}),
+                **({"purpose": purpose} if self.input.get("includeSnapshot") else {}), "method": "sessions.segments.media.get",
                 "params": {"sessionKey": self.key, "sessionId": self.session_id,
                            "ref": self.ref_token("media", messageId=self.identifier(row), pointer=pointer, source=source,
                                                  **({"mediaHash": media_hash} if media_hash else {}))}}
@@ -488,19 +521,22 @@ class SegmentReader:
         media, identities = [], set()
 
         def add(reference):
-            if reference.get("mediaId") in identities:
+            identity = (reference.get("mediaId"), reference.get("purpose"))
+            if identity in identities:
                 return
             if reference.get("mediaId"):
-                identities.add(reference["mediaId"])
+                identities.add(identity)
             media.append(reference)
 
-        def visit(value, pointer, media_array=False):
+        def visit(value, pointer, media_array=False, purpose="unknown"):
             if isinstance(value, list):
                 # July/Node references use Object.entries array keys as strings.
                 children = [(str(index), child) for index, child in enumerate(value)]
             elif isinstance(value, dict):
+                if value.get("type") in {"toolCall", "tool_call", "tool_use", "functionCall"}:
+                    purpose = "tool_input"
                 if value.get("type") in {"image", "base64"} and isinstance(value.get("data"), str):
-                    reference = self.media_ref(row, [*pointer, "data"], "base64", value.pop("data"))
+                    reference = self.media_ref(row, [*pointer, "data"], "base64", value.pop("data"), purpose)
                     value["mediaRef"] = reference
                     add(reference)
                 children = list(value.items())
@@ -510,14 +546,15 @@ class SegmentReader:
                 if key == "mediaRef":
                     continue
                 if isinstance(child, str) and (media_array or key in {"url", "path", "filePath", "MediaPath"}) and self.local_media(child):
-                    add(self.media_ref(row, [*pointer, key], "path", child))
+                    add(self.media_ref(row, [*pointer, key], "path", child, purpose))
                 elif isinstance(child, str) and key in {"text", "content"}:
                     for match in re.finditer(r'MEDIA:\s*([^\s"<>]+)', child):
                         if self.local_media(match[1]):
-                            add(self.media_ref(row, [*pointer, key], "text:" + match[1], match[1]))
+                            add(self.media_ref(row, [*pointer, key], "text:" + match[1], match[1], purpose))
                 elif isinstance(child, (dict, list)):
-                    visit(child, [*pointer, key], isinstance(child, list) and key in {"paths", "savedPaths", "mediaUrls", "MediaPaths"})
-        visit(message, [])
+                    visit(child, [*pointer, key], isinstance(child, list) and key in {"paths", "savedPaths", "mediaUrls", "MediaPaths"}, purpose)
+        visit(message, [], purpose={"user": "user_input", "assistant": "assistant_output", "toolResult": "tool_output",
+                                   "tool": "tool_output", "function": "tool_output"}.get(message.get("role"), "unknown"))
         if media:
             message["mediaRefs"] = media
         if omit_thinking:
@@ -537,11 +574,13 @@ class SegmentReader:
         return self.by_id[identifier]
 
     @timed("chunkEncodeMs")
-    def chunk(self, data, offset, reference, **extra):
-        if type(offset) is not int or not 0 <= offset <= len(data):
+    def chunk(self, data, offset, reference, *, total_size=None, **extra):
+        total = len(data) if total_size is None else total_size
+        if type(offset) is not int or not 0 <= offset <= total:
             fail("CURSOR_EXPIRED", "Invalid chunk boundary")
-        chunk_bytes = MEDIA_CHUNK_BYTES if self.input["action"] == "media" else CHUNK_BYTES
-        end = min(len(data), offset + chunk_bytes)
+        chunk_bytes = self.input.get("mediaLength", MEDIA_CHUNK_BYTES) if self.input["action"] == "media" else CHUNK_BYTES
+        end = min(total, offset + chunk_bytes)
+        part = data[offset:end] if total_size is None else data[:end - offset]
         count("chunkBytes", end - offset)
         values = {"action": self.input["action"], "messageId": extra["messageId"], "offset": end}
         if self.input["action"] == "media":
@@ -550,8 +589,8 @@ class SegmentReader:
             values["view"] = extra["view"]
             values["omitThinking"] = extra.get("omitThinking", False)
             values["format"] = 2
-        return {**extra, "encoding": "base64", "data": base64.b64encode(data[offset:end]).decode(), "offset": offset,
-                "totalBytes": len(data), "nextCursor": self.ref_token("chunk", **values) if end < len(data) else None}
+        return {**extra, "encoding": "base64", "data": base64.b64encode(part).decode(), "offset": offset,
+                "totalBytes": total, "nextCursor": self.ref_token("chunk", **values) if end < total else None}
 
     def run(self):
         entry = self.entry()
@@ -585,6 +624,11 @@ class SegmentReader:
             if action == "media":
                 if not reference or cursor and reference.get("action") != "media":
                     fail("CURSOR_EXPIRED", "Invalid media reference")
+                if "mediaOffset" in self.input:
+                    offset, length = self.input["mediaOffset"], self.input["mediaLength"]
+                    if type(offset) is not int or offset < 0 or type(length) is not int or not 1 <= length <= MEDIA_CHUNK_BYTES:
+                        fail("CURSOR_EXPIRED", "Invalid media range")
+                    reference = {**reference, "offset": offset}
                 row = self.locate(reference.get("messageId"))
                 raw = self.raw(row)
                 value = raw.get("message") or {"content": raw.get("content")}
@@ -602,6 +646,7 @@ class SegmentReader:
                 if not isinstance(value, str):
                     fail("MEDIA_NOT_FOUND", "Media reference is no longer present")
                 source = reference.get("source", "")
+                total_size = None
                 if source == "base64":
                     data = self.inline_bytes(value)
                     content_type = next((parent[key] for key in ("mimeType", "media_type", "mime_type") if parent.get(key)), "application/octet-stream")
@@ -610,11 +655,12 @@ class SegmentReader:
                     target = source[5:] if source.startswith("text:") else value
                     if source.startswith("text:") and "MEDIA:" + target not in value and "MEDIA: " + target not in value:
                         fail("MEDIA_NOT_FOUND", "Media marker changed")
-                    media = self.local_media_read(target, with_bytes=True)
+                    media = self.local_media_read(target, with_bytes=True, offset=reference.get("offset", 0), length=self.input.get("mediaLength", MEDIA_CHUNK_BYTES))
+                    total_size = media["totalBytes"]
                     data, content_type, media_hash = media["bytes"], media["contentType"], media["sha256"]
                 if reference.get("mediaHash") and reference["mediaHash"] != media_hash:
                     fail("CURSOR_EXPIRED", "Media changed during chunk read")
-                return self.finish(self.chunk(data, reference.get("offset", 0), reference, **base, messageId=self.identifier(row), contentType=content_type, sha256=media_hash))
+                return self.finish(self.chunk(data, reference.get("offset", 0), reference, total_size=total_size, **base, messageId=self.identifier(row), contentType=content_type, sha256=media_hash))
             view = self.input.get("view") or (reference.get("view", "full") if reference else "compact")
             if reference and self.input.get("view") and view != reference.get("view", "full"):
                 fail("CURSOR_EXPIRED", "Page view changed; reopen the segment")
@@ -657,7 +703,7 @@ class SegmentReader:
                     reached_user = True
             times = [row["timestamp"] for row in records if row["timestamp"] is not None]
             preview = [next((row["preview"] for row in reversed(self.rows) if row["role"] == role), "") for role in ("user", "assistant")]
-            return self.finish({**base, "view": view, "segment": {"startedAt": min(times) if times else None, "endedAt": max(times) if times else None,
+            return self.finish({**base, "view": view, **({"omitThinking": omit_thinking} if self.input.get("includeSnapshot") else {}), "segment": {"startedAt": min(times) if times else None, "endedAt": max(times) if times else None,
                 "isCurrent": entry.get("sessionId") == self.session_id, "readable": True, "preview": preview}, "messages": messages, "reachedUser": reached_user,
                 "olderCursor": self.ref_token("page", position=start, direction="older", view=view, omitThinking=omit_thinking) if start > 0 else None,
                 "newerCursor": self.ref_token("page", position=stop, direction="newer", view=view, omitThinking=omit_thinking) if stop < len(self.rows) else None})
