@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 1.0.002 - 2026-11-22
+
+- v1 沿用 0.5 的平台鉴权与主机派发分工。Server API 通过私有 Unix socket 委托本地授权并调用 Manager，移除 Dola 回调兑换和服务凭据配置。旧 CLI 派发方式继续可用。
+- HTTP、WSS 和媒体接口统一通过 `stateDirectory/manager.sock` 访问。平台 Server API 需要接入该 socket。升级旧验证环境时按[迁移说明](docs/v1-operations.md#安装和接入)移除旧鉴权与监听配置。
+
+Git tag 和 CLI 版本为 `1.0.002`。Python 安装包版本为 `1.0.2`。
+
 ## 1.0.001 - 2026-11-22
 
 ### 1.0 统一接口接入验证

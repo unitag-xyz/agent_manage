@@ -79,10 +79,6 @@ class Service:
         self.epoch = __import__("uuid").uuid4().hex
         self.closed = False
         self._owner = None
-        self.ticket_issuer = None
-
-    async def redeem(self, ticket):
-        return await self.ticket_issuer.redeem(ticket) if self.ticket_issuer else self.auth.redeem(ticket)
 
     async def start(self):
         from .transactions import runtime_write_lock
@@ -304,8 +300,6 @@ class Service:
             await asyncio.gather(*self.tasks, return_exceptions=True)
         for adapter in self.adapters.values():
             await adapter.close()
-        if self.ticket_issuer:
-            await self.ticket_issuer.close()
         for pool in (self.read_workers, self.write_workers, self.media_workers):
             pool.close()
         if self._owner:

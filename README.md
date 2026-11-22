@@ -16,7 +16,7 @@ python3 -m pip install '.[server]'
 python3 -m agent_manage.server --config /absolute/path/server.json
 ```
 
-服务默认仅监听回环地址。远程入口使用 TLS 代理及短期授权；本机浏览器也不会自动获得管理权限。
+服务仅在 `stateDirectory/manager.sock` 提供内部 HTTP/WSS，由已验证用户和实例权限的 Server API 调用。Dola 继续负责用户入口，Manager 执行 Server API 传入的授权范围。
 当前实现检测 OpenClaw 2026.7.x，并对 `2026.7.1-2` 做真实 Gateway 集成测试。
 其他底座、新版 OpenClaw、分享、Site 注册和容器创建仍按能力查询明确返回不支持，不会伪装为已实现。
 

@@ -1,9 +1,6 @@
 {
   "stateDirectory": "/srv/agent-manager/state",
   "audience": "agent-manager:host-001",
-  "listenHost": "127.0.0.1",
-  "listenPort": 18900,
-  "allowedOrigins": ["https://chat.example.com"],
   "runtimes": [
     {
       "id": "openclaw-primary",

@@ -1,4 +1,4 @@
-"""Scoped leases; ticket issuance belongs to the caller's trusted identity system."""
+"""Scoped tickets and leases for grants delegated by the trusted server."""
 import hashlib
 import json
 import secrets
@@ -25,11 +25,7 @@ class Lease:
 
 
 class LeaseAuthority:
-    """Embedding boundary: Dola verifies its account and grants before issue_ticket.
-
-    This service deliberately has no public 'issue an arbitrary grant' endpoint.
-    A standalone caller can use this Python API over an OS-protected local channel.
-    """
+    """Enforce delegated scopes and the lifetime of local tickets and leases."""
     def __init__(self, store, audience):
         self.store, self.audience = store, audience
 
@@ -50,6 +46,36 @@ class LeaseAuthority:
             db.execute("DELETE FROM tickets WHERE expires<?", (now_ms(),))
             db.execute("INSERT INTO tickets VALUES(?,?,?)", (token_hash(ticket), now_ms() + ttl_seconds * 1000, canonical(context)))
         return ticket
+
+    def issue_delegated_ticket(self, grant):
+        """Accept a grant only from the OS-protected Server API transport."""
+        required = {"issuer", "subject", "audience", "runtimeIds", "agentIds", "actions", "authzVersion"}
+        optional = {"tenantId", "ttlSeconds", "leaseSeconds"}
+        if not isinstance(grant, dict) or not required <= grant.keys() or grant.keys() - required - optional:
+            raise APIError("INVALID_ARGUMENT", "A complete server authorization grant is required")
+        if grant["audience"] != self.audience:
+            raise APIError("FORBIDDEN", "Grant audience does not match this Manager")
+        principals = [grant["issuer"], grant["subject"]]
+        if grant.get("tenantId") is not None:
+            principals.append(grant["tenantId"])
+        if not all(isinstance(value, str) and 0 < len(value) <= 256 for value in principals):
+            raise APIError("INVALID_ARGUMENT", "Invalid grant principal")
+        for key in ("runtimeIds", "agentIds", "actions"):
+            scope = grant[key]
+            if not isinstance(scope, list) or not 1 <= len(scope) <= 256 or not all(
+                isinstance(value, str) and 0 < len(value) <= 128 for value in scope
+            ):
+                raise APIError("INVALID_ARGUMENT", "Invalid grant scope", details={"field": key})
+        version = grant["authzVersion"]
+        ttl = grant.get("ttlSeconds", 60)
+        lease = grant.get("leaseSeconds", 300)
+        if type(version) is not int or version < 0 or type(ttl) is not int or not 1 <= ttl <= 60 or type(lease) is not int or not 1 <= lease <= 300:
+            raise APIError("INVALID_ARGUMENT", "Invalid grant authorization version or lifetime")
+        return self.issue_ticket(
+            issuer=grant["issuer"], subject=grant["subject"], tenant_id=grant.get("tenantId"),
+            runtime_ids=grant["runtimeIds"], agent_ids=grant["agentIds"], actions=grant["actions"],
+            authz_version=version, ttl_seconds=ttl, lease_seconds=lease,
+        )
 
     def redeem(self, ticket):
         with self.store.connect() as db:
@@ -74,25 +100,6 @@ class LeaseAuthority:
         context = json.loads(row["context"])
         if context["audience"] != self.audience:
             raise APIError("UNAUTHENTICATED", "Authorization audience mismatch")
-        return Lease(token, context)
-
-    def import_verified_grant(self, grant):
-        """Only a trusted issuer adapter may call this, never an RPC request body."""
-        required = ("issuer", "subject", "audience", "runtimeIds", "agentIds", "actions", "authzVersion", "expiresAt")
-        if not isinstance(grant, dict) or any(key not in grant for key in required):
-            raise APIError("UNAUTHENTICATED", "Ticket issuer returned an invalid grant")
-        if grant["audience"] != self.audience or type(grant["expiresAt"]) is not int or not now_ms() < grant["expiresAt"] <= now_ms() + 300000:
-            raise APIError("UNAUTHENTICATED", "Ticket issuer returned an invalid audience or expiry")
-        if not all(isinstance(grant[key], str) and 0 < len(grant[key]) <= 256 for key in ("issuer", "subject")) or type(grant["authzVersion"]) is not int or grant["authzVersion"] < 0:
-            raise APIError("UNAUTHENTICATED", "Ticket issuer returned an invalid principal or version")
-        for key in ("runtimeIds", "agentIds", "actions"):
-            if not isinstance(grant[key], list) or not 1 <= len(grant[key]) <= 256 or not all(isinstance(value, str) and 0 < len(value) <= 128 for value in grant[key]):
-                raise APIError("UNAUTHENTICATED", "Ticket issuer returned invalid scopes")
-        context = {key: grant[key] for key in (*required, "tenantId") if key in grant}
-        context["leaseId"] = uuid.uuid4().hex
-        token = secrets.token_urlsafe(32)
-        with self.store.connect() as db:
-            db.execute("INSERT INTO leases VALUES(?,?,?,?,0)", (token_hash(token), context["leaseId"], context["expiresAt"], canonical(context)))
         return Lease(token, context)
 
     def revoke(self, lease_id):

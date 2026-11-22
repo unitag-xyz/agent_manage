@@ -3,24 +3,19 @@
 服务端方法的机器可读清单来自 `core/contracts.py`，通过 `system.info.result.methods` 返回。
 CLI 继续使用原有 0.x 协议；本文件只描述新服务。适配器支持状态与当前账号授权是两件事。
 
-## 传输与授权
+## 私有传输与授权
 
-HTTP：`POST /v1/rpc`，`Authorization: Bearer <leaseToken>`。
-WSS：`/v1/ws`，第一帧 `{"type":"auth","ticket":"一次性短票据"}`，不把凭据放 URL。
-两种传输均要求授权；来源为 localhost 不自动成为管理员。
+Dola 沿用 0.5 的用户鉴权和实例派发。以下接口由主机侧 Server API 通过 `stateDirectory/manager.sock` 调用。浏览器继续使用平台入口。
 
-独立使用：受 OS 保护的调用方通过 `LeaseAuthority.issue_ticket` 签发限定范围票据。
-Dola 使用：由 Dola 登录/账号系统签发一次性票据，Manager 向配置的可信 `ticketIssuer.url` 兑换。
-账号、订单、权限分配仍由调用方维护，Manager 执行验证。这个兑换地址需平台提供，仓库没有虚构生产地址。
+1. Server API 验证用户和实例访问权后，从可信派发信息构造 grant，调用 `POST /v1/auth/tickets`。Manager 校验 audience、主体和显式范围后返回 `{"ok":true,"ticket":"..."}`。[授权示例](v1-operations.md#安装和接入)。
+2. **HTTP** 调用 `POST /v1/auth/redeem`，以 `{"ticket":"..."}` 换取 `leaseToken` 和 `authContext`。随后用 `Authorization: Bearer <leaseToken>` 调用 `POST /v1/rpc` 和媒体接口。
+3. **WSS** 由 Server API 连接 `/v1/ws`，首帧发送 `{"type":"auth","ticket":"..."}`。`hello` 返回可用于内部 HTTP 的租约。Server API 代理实时请求和事件，租约和票据保存在服务端。
 
-HTTP 用 `POST /v1/auth/redeem {"ticket":"..."}` 换 `leaseToken` 和 `authContext`。
-WSS 首次 `hello` 也返回同一形式的 leaseToken，可用于当前客户端的媒体 HTTP 请求。
-token 仅保存在客户端内存，日志中不记录。票据最长 60 秒、一次性；本地租约最长 300 秒。
-长期浏览需上层获取新票据；WSS 发送 `auth.refresh`。刷新不改变 issuer/subject/tenant/audience，清空订阅和旧缓冲，客户端重新订阅、同步历史。
+票据一次性，有效期最长 60 秒。租约最长 300 秒。Server API 对同一授权范围可在有效期内复用租约。长连接续期前重新校验用户范围，再签领新票据并发送 `auth.refresh`。刷新要求 issuer、subject、tenant 和 audience 一致，连接重新订阅并同步历史。
 
 ```json
 {"type":"hello","apiVersion":"1.0","epoch":"服务进程周期","eventReplay":false,
- "leaseToken":"仅当前客户端持有",
+ "leaseToken":"仅主机侧 Server API 持有",
  "authContext":{"leaseId":"...","authzVersion":1,"expiresAt":1794480300000}}
 ```
 
@@ -139,7 +134,7 @@ reachedUser 不表示整个对话完成；快照也不是事件重放 watermark�
 大消息返回 completeness=reference 和 `fullMessageRef`（统一的 messages.get 请求）。补读最多 8 MiB 原始消息，超出明确报 MESSAGE_TOO_LARGE，不静默截断。
 正文与已省略工具参数不能混为一谈：工具精简内容不会通过消息补读恢复。
 资源默认不是 Artifact：role 区分 user_input、assistant_output、tool_input、tool_output、unknown；工具参数中的图标记 tool_input，不作为生成交付物。正式交付物登记后续独立实现。
-媒体 URL 需要 Bearer lease；浏览器用带 Authorization 的 fetch 获取 Blob，不把 lease 放 query 参数。
+Manager 的媒体 URL 是内部地址。Server API 在平台入口完成鉴权后，用内部 Bearer lease 代理资源流并传递 Range，浏览器只请求平台地址。
 已过期媒体快照返回 CURSOR_EXPIRED，重新打开相应历史段刷新引用。
 这是新资源合同，不能把 resourceId 填进旧 Chat 的签名 mediaRef 下载器。历史灰度也需同时接入新下载器，验证缩略图/原图、租约过期重取和工具输入图过滤；旧 CLI 原有媒体返回仍保留。
 

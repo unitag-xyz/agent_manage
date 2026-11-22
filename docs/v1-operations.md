@@ -8,53 +8,28 @@ python3 -m venv .venv
 .venv/bin/python -m agent_manage.server --config /absolute/path/server.json
 ```
 
-复制 `examples/v1-server.json` 后填写当前实例的真实绝对路径和端口。
+复制 `examples/v1-server.json` 后填写当前实例的真实路径和原生 Gateway 地址。
 Manager 状态目录必须由服务运行用户所有、权限 0700；不能放在 Agent workspace/public 中。
 运行用户需要操作底座文件的权限；Manager 不通过 root 或 Docker socket 绕过目录权限。
 每个 Runtime 的 executable/configPath/stateDir/HOME 必须对应同一个环境。使用 NFS/共享磁盘前须单独验证 flock、SQLite WAL、rename/fsync 语义，本实现按本地文件系统设计。
 新服务要求原生 workspace、agentDir 和 session.store 使用绝对路径，避免不同 HOME 下的 `~` 指向错误目录；旧 CLI 不增加此限制。安装选项中的 `~` 按注册的 Runtime HOME 展开。
 
-默认回环 HTTP，仅在 TLS 反向代理后提供远程 HTTPS/WSS。代理保留 Upgrade/Connection；媒体关闭整响应缓存，不把租约记录到访问日志。
-allowedOrigins 是网站精确 Origin 白名单，不是身份校验的替代品。
+Manager 仅监听 `stateDirectory/manager.sock`。将状态目录和 socket 置于 Server API 与 Manager 的可信 OS 用户边界内。该目录权限为 0700，部署时应和不受信的工具、Agent 及脚本使用的 OS 身份隔离。同一 UID 的进程共享这一信任边界。
+Dola 平台入口负责 HTTPS/WSS 和用户鉴权。主机侧 Server API 建立到 Manager 的内部连接，独立构造授权信息，过滤客户端的 Origin、内部授权头与鉴权帧。浏览器只持有平台登录凭据。媒体代理保留 Range 和流式响应。
 Gateway 使用独立的 gatewayOrigin 和原生设备身份，拒绝配对/Origin 时明确报 NATIVE_AUTH_REQUIRED；不会自动关闭生产 OpenClaw 的设备验证。
 连接后还会核对协议、Gateway 返回的精确版本和 `config.get` 的配置路径；版本或路径不符时停止调度，避免端口指向另一个 Runtime。后端原生身份需要读取该配置快照的权限，原始配置不发送给浏览器。
 
-需要 Dola 或独立账号服务时，在服务配置增加：
-
-```json
-{"ticketIssuer":{
-  "issuer":"dola",
-  "url":"https://your-trusted-service.example/manager-ticket/redeem",
-  "credentialFile":"/private/path/issuer-service-credential"
-}}
-```
-
-这是接口示例，不是 Dola 已有的生产 URL。credentialFile 为仅服务用户可读的 0600 文件。
-Manager 向它 POST `{ticket,audience}`，使用服务凭据 Bearer 认证；不跟随重定向、不自动重试。
-签发服务必须原子消费票据，成功直接返回以下 grant：
+主机侧 Server API 复用现有平台派发的用户与实例身份，向 `POST /v1/auth/tickets` 发送以下格式的授权：
 
 ```json
 {"issuer":"dola","subject":"account-id","tenantId":"optional-team-id",
  "audience":"agent-manager:host-001","runtimeIds":["openclaw-primary"],
- "agentIds":["*"],"actions":["*"],"authzVersion":1,"expiresAt":1794480300000}
+ "agentIds":["agent_..."],"actions":["threads.list","messages.list"],
+ "authzVersion":1,"ttlSeconds":60,"leaseSeconds":300}
 ```
 
-expiresAt 必须是未来 300 秒内的 Unix 毫秒；Chat 使用最小 actions/agentIds，管理员才用 `*`。
-平台即时撤销可在可信本机集成调用 `LeaseAuthority.revoke(leaseId)`；本次未定义公网无保护的撤销入口。
-缺少撤销推送时依靠短租约到期失效；需要秒级账户封禁时，上层必须补齐可信撤销通知通道。
-
-独立本机部署可以通过受 OS 保护的 Python 集成签发票据：
-
-```python
-from agent_manage.core.store import Store
-from agent_manage.core.auth import LeaseAuthority
-authority = LeaseAuthority(Store('/srv/agent-manager/state'), 'agent-manager:host-001')
-ticket = authority.issue_ticket(
-    issuer='local-os', subject='operator', runtime_ids=['openclaw-primary'],
-    actions=['system.info', 'capabilities.get', 'agents.list', 'threads.list',
-             'segments.list', 'messages.list', 'messages.get', 'resources.get'])
-# 通过受信任的应用内通道交给本次客户端；不要写进日志或 URL。
-```
+Chat 使用明确的最小范围，管理员才用 `*`。平台撤销用户权限时，Server API 应停止该用户的转发、关闭相关 WSS 并停止复用其租约。票据和租约使用细节见 [v1 对接合同](v1-api.md#私有传输与授权)。
+从 1.0.001 的旧验证配置迁移时，删除 `ticketIssuer`、`listenHost`、`listenPort` 和 `allowedOrigins`，再接入本地 socket。旧 CLI 仍按原平台方式派发。
 
 旧 CLI 不需要这套网络授权，也不需要安装 server extra。
 

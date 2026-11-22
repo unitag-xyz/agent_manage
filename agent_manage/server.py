@@ -7,6 +7,7 @@ import asyncio
 import base64
 import json
 import re
+import socket
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -23,10 +24,10 @@ SERVICE = web.AppKey("service", Service)
 
 
 def build_service(config):
+    obsolete = {"ticketIssuer", "listenHost", "listenPort", "allowedOrigins"} & config.keys()
+    if obsolete:
+        raise ValueError("Manager v1 uses the private Server API socket; remove: " + ", ".join(sorted(obsolete)))
     service = Service(Path(config["stateDirectory"]).expanduser().resolve(), audience=config.get("audience", "agent-manager"))
-    if config.get("ticketIssuer"):
-        from .adapters.ticket_issuer import TicketIssuer
-        service.ticket_issuer = TicketIssuer(service.auth, config["ticketIssuer"])
     for runtime in config.get("runtimes", []):
         if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", runtime["id"]):
             raise ValueError("Invalid runtime id")
@@ -37,8 +38,7 @@ def build_service(config):
     return service
 
 
-def create_app(service, *, allowed_origins=()):
-    origins = frozenset(allowed_origins)
+def create_app(service):
     http_slots, media_slots, websocket_slots = asyncio.Semaphore(8), asyncio.Semaphore(4), asyncio.Semaphore(64)
 
     @asynccontextmanager
@@ -53,10 +53,10 @@ def create_app(service, *, allowed_origins=()):
 
     @web.middleware
     async def boundary(request, handler):
-        origin = request.headers.get("Origin")
-        if origin and origin not in origins:
-            return web.json_response({"ok": False, "error": {"code": "FORBIDDEN", "message": "Origin is not allowed"}}, status=403)
         try:
+            transport_socket = request.transport.get_extra_info("socket") if request.transport else None
+            if transport_socket is None or transport_socket.family != socket.AF_UNIX or "Origin" in request.headers:
+                raise APIError("FORBIDDEN", "Manager requires a private Server API connection")
             response = await handler(request)
         except APIError as exc:
             response = web.json_response({"ok": False, "error": exc.payload()}, status=401 if exc.code == "UNAUTHENTICATED" else 403 if exc.code == "FORBIDDEN" else 400)
@@ -65,9 +65,6 @@ def create_app(service, *, allowed_origins=()):
         if not response.prepared:
             response.headers["Cache-Control"] = "no-store"
             response.headers["X-Content-Type-Options"] = "nosniff"
-            if origin:
-                response.headers["Access-Control-Allow-Origin"] = origin
-                response.headers["Vary"] = "Origin"
         return response
 
     app = web.Application(middlewares=[boundary], client_max_size=MAX_REQUEST)
@@ -79,13 +76,13 @@ def create_app(service, *, allowed_origins=()):
             raise APIError("UNAUTHENTICATED", "A scoped bearer lease is required")
         return service.auth.authenticate(value[7:])
 
-    async def options(request):
-        return web.Response(headers={"Access-Control-Allow-Methods": "POST, GET, OPTIONS",
-            "Access-Control-Allow-Headers": "Authorization, Content-Type, Range", "Access-Control-Max-Age": "300"})
+    async def issue_ticket(request):
+        ticket = service.auth.issue_delegated_ticket(await request.json())
+        return web.json_response({"ok": True, "ticket": ticket})
 
     async def redeem(request):
         body = await request.json()
-        lease = await service.redeem(body["ticket"])
+        lease = service.auth.redeem(body["ticket"])
         return web.json_response({"ok": True, "leaseToken": lease.token, "authContext": lease.public()})
 
     async def rpc(request):
@@ -97,8 +94,6 @@ def create_app(service, *, allowed_origins=()):
             if len(encoded) > MAX_RESPONSE:
                 raise APIError("RESPONSE_TOO_LARGE", "Response exceeds transport budget; use a smaller page")
             headers = {"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"}
-            if request.headers.get("Origin"):
-                headers.update({"Access-Control-Allow-Origin": request.headers["Origin"], "Vary": "Origin"})
             response = web.Response(body=encoded, content_type="application/json", headers=headers)
             await response.prepare(request)
             await asyncio.wait_for(response.write_eof(), 10)
@@ -198,7 +193,7 @@ def create_app(service, *, allowed_origins=()):
             frame = await asyncio.wait_for(ws.receive_json(), 10)
             if not isinstance(frame, dict) or frame.get("type") != "auth":
                 raise APIError("UNAUTHENTICATED", "The first WebSocket frame must be auth")
-            lease = await service.redeem(frame.get("ticket"))
+            lease = service.auth.redeem(frame.get("ticket"))
             await send({"type": "hello", "apiVersion": "1.0", "epoch": service.epoch,
                         "eventReplay": False, "authContext": lease.public(), "leaseToken": lease.token})
             service.listeners.add(listen)
@@ -211,7 +206,7 @@ def create_app(service, *, allowed_origins=()):
                 if not isinstance(frame, dict):
                     raise APIError("INVALID_ARGUMENT", "Frame must be an object")
                 if frame.get("type") == "auth.refresh":
-                    new_lease = await service.redeem(frame.get("ticket"))
+                    new_lease = service.auth.redeem(frame.get("ticket"))
                     if any(new_lease.context.get(key) != lease.context.get(key) for key in ("issuer", "subject", "tenantId", "audience")):
                         raise APIError("FORBIDDEN", "Refresh cannot change the connection principal")
                     service.auth.revoke(lease.context["leaseId"])
@@ -276,9 +271,6 @@ def create_app(service, *, allowed_origins=()):
                    "X-Content-Type-Options": "nosniff", "Content-Disposition": "attachment",
                    "Content-Security-Policy": "sandbox", "X-Agent-Manager-Lease-Id": lease.context["leaseId"],
                    "X-Agent-Manager-Authz-Version": str(lease.context["authzVersion"])}
-        if request.headers.get("Origin"):
-            headers["Access-Control-Allow-Origin"] = request.headers["Origin"]
-            headers["Vary"] = "Origin"
         if "Range" in request.headers:
             headers["Content-Range"] = f"bytes {start}-{end}/{total}"
         response = web.StreamResponse(status=206 if "Range" in request.headers else 200, headers=headers)
@@ -313,11 +305,11 @@ def create_app(service, *, allowed_origins=()):
     async def cleanup(app):
         await service.close()
 
+    app.router.add_post("/v1/auth/tickets", issue_ticket)
     app.router.add_post("/v1/auth/redeem", redeem)
     app.router.add_post("/v1/rpc", rpc)
     app.router.add_get("/v1/ws", websocket)
     app.router.add_get("/v1/resources/{identifier}", resource)
-    app.router.add_route("OPTIONS", "/v1/{tail:.*}", options)
     app.on_startup.append(startup)
     app.on_cleanup.append(cleanup)
     return app
@@ -328,11 +320,9 @@ def main():
     parser.add_argument("--config", required=True)
     args = parser.parse_args()
     config = json.loads(Path(args.config).read_text())
-    host = config.get("listenHost", "127.0.0.1")
-    if host not in ("127.0.0.1", "::1", "localhost"):
-        raise ValueError("Bind to loopback and use an authenticated TLS reverse proxy for remote access")
-    web.run_app(create_app(build_service(config), allowed_origins=config.get("allowedOrigins", [])),
-                host=host, port=config.get("listenPort", 18900), access_log=None)
+    service = build_service(config)
+    socket_path = service.store.path.with_name("manager.sock")
+    web.run_app(create_app(service), path=str(socket_path), access_log=None)
 
 
 if __name__ == "__main__":

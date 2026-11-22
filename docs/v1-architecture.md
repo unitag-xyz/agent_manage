@@ -7,8 +7,9 @@
 
 ```mermaid
 flowchart TD
-    Chat[Chat / 管理端] --> HTTP[HTTP RPC / WSS / 二进制媒体]
-    Issuer[Dola 或独立授权服务] --> Auth[一次性票据 / 短期租约]
+    Chat[Chat / 管理端] --> Dola[Dola 平台鉴权与派发]
+    Dola --> Host[主机侧 Server API]
+    Host --> HTTP[私有 Unix socket 上的 HTTP / WSS]
     HTTP --> Auth
     Auth --> Core[统一调度 / 能力 / 幂等 / 操作状态]
     Core --> Store[SQLite 注册映射与操作记录]
@@ -31,8 +32,8 @@ flowchart TD
 | `core/service.py` | 调度、授权、限流、持久化操作 | 不向客户端提供任意 native RPC 或 shell 转发 |
 | `adapters/registry.py` | 按 Runtime 注册信息中的 `engine` 选择底座工厂 | 不承载原生协议 |
 | `adapters/openclaw/` | 探测实际版本，选择协议实现，桥接原生能力 | 不将不同 OpenClaw 版本直接视为相同实现 |
-| `adapters/ticket_issuer.py` | 与可信票据签发方兑换短期授权 | 不猜测 Dola 生产接口，也不自动信任任意远程服务器 |
-| `server.py` | HTTP/WSS、Origin、请求/输出预算、流量背压 | 不决定谁购买了哪个 Agent |
+| 主机侧 Server API | 接收平台鉴权后的派发和流量，向本机 Manager 委托范围 | 不向浏览器暴露 Manager 的内部凭据或 socket |
+| `server.py` | Unix socket 上的 HTTP/WSS、接收委托、请求/输出预算、流量背压 | 不决定谁购买了哪个 Agent |
 | 原 mixin 模块与 CLI | 原有安装、刷新、模型、渠道、Codex、Fly、历史命令 | 不要求所有旧用户立即运行新服务 |
 
 保留旧应用服务并由 adapter 调用，使现有测试继续约束业务语义；没有复制一套创建、刷新和登录实现。

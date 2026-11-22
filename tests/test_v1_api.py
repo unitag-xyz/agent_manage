@@ -8,8 +8,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 try:
-    from aiohttp import web
-    from aiohttp.test_utils import TestClient, TestServer
+    from aiohttp import ClientSession, UnixConnector, web
+    from aiohttp.test_utils import TestServer
     from agent_manage.server import build_service, create_app
     SERVER_AVAILABLE = True
 except ModuleNotFoundError:
@@ -156,8 +156,11 @@ class APITest(unittest.IsolatedAsyncioTestCase):
         self.service = build_service({"stateDirectory": str(self.root / "manager"), "runtimes": [{"id": "one", "environmentId": "env", "engine": "openclaw",
             "configPath": str(self.config), "executable": str(binary), "gatewayUrl": str(self.native.make_url("/")).replace("http:", "ws:")}]})
         self.adapter = self.service.adapters["one"]
-        self.client = TestClient(TestServer(create_app(self.service, allowed_origins=["https://chat.example"])))
-        await self.client.start_server()
+        socket_path = self.service.store.path.with_name("manager.sock")
+        self.manager_runner = web.AppRunner(create_app(self.service))
+        await self.manager_runner.setup()
+        await web.UnixSite(self.manager_runner, str(socket_path)).start()
+        self.client = ClientSession(base_url="http://agent-manager", connector=UnixConnector(path=str(socket_path)))
         self.lease = self.service.auth.redeem(self.ticket())
         self.agent = self.adapter.agents()[0]["agentId"]
         self.thread = self.adapter.threads(self.agent)[0]["threadId"]
@@ -167,6 +170,7 @@ class APITest(unittest.IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self):
         await self.client.close()
+        await self.manager_runner.cleanup()
         await self.native.close()
         self.tmp.cleanup()
 
@@ -255,7 +259,7 @@ class APITest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response["error"]["code"], "FORBIDDEN")
 
     async def test_idempotent_send_native_stream_and_cancel(self):
-        ws = await self.client.ws_connect("/v1/ws", headers={"Origin": "https://chat.example"})
+        ws = await self.client.ws_connect("/v1/ws")
         await ws.send_json({"type": "auth", "ticket": self.ticket()})
         hello = await ws.receive_json()
         self.assertEqual(hello["type"], "hello")
@@ -323,6 +327,40 @@ class APITest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result["eventReplay"])
         self.assertEqual(result["methods"]["dola.shares.create"]["support"], "unsupported")
         self.assertEqual(result["engineVersion"], "2026.7.1-2")
+
+    async def test_server_can_delegate_scoped_tickets_over_the_unix_socket(self):
+        grant = {"issuer": "dola", "subject": "signed-in-user", "audience": self.service.auth.audience,
+                 "runtimeIds": ["one"], "agentIds": [self.agent], "actions": ["agents.list"], "authzVersion": 1}
+        for invalid, status in (({**grant, "agentIds": []}, 400), ({**grant, "audience": "other-manager"}, 403)):
+            response = await self.client.post("/v1/auth/tickets", json=invalid)
+            self.assertEqual(response.status, status)
+        response = await self.client.post("/v1/auth/tickets", headers={"Origin": "https://chat.example"}, json=grant)
+        self.assertEqual(response.status, 403)
+        for transport in ("http", "websocket"):
+            response = await self.client.post("/v1/auth/tickets", json=grant)
+            self.assertEqual(response.status, 200)
+            ticket = (await response.json())["ticket"]
+            if transport == "http":
+                response = await self.client.post("/v1/auth/redeem", json={"ticket": ticket})
+                lease = self.service.auth.authenticate((await response.json())["leaseToken"])
+                result = await self.rpc("agents.list", lease=lease)
+                denied = await self.rpc("models.list", lease=lease)
+                self.assertEqual(denied["error"]["code"], "FORBIDDEN")
+            else:
+                async with self.client.ws_connect("/v1/ws") as ws:
+                    await ws.send_json({"type": "auth", "ticket": ticket})
+                    self.assertEqual((await ws.receive_json())["type"], "hello")
+                    await ws.send_json({"type": "request", "requestId": "list", "method": "agents.list",
+                                        "params": {"runtimeId": "one"}})
+                    result = await ws.receive_json()
+            self.assertEqual([item["agentId"] for item in result["result"]["items"]], [self.agent])
+
+    async def test_loopback_tcp_cannot_issue_tickets(self):
+        await web.TCPSite(self.manager_runner, "127.0.0.1", 0).start()
+        port = next(address[1] for address in self.manager_runner.addresses if isinstance(address, tuple))
+        async with ClientSession() as client:
+            response = await client.post(f"http://127.0.0.1:{port}/v1/auth/tickets", json={})
+            self.assertEqual(response.status, 403)
 
     async def test_delta_only_streams_are_accumulated_once_and_terminal_is_sticky(self):
         received = []
