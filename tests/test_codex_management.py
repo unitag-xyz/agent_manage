@@ -3,6 +3,7 @@ import json
 import os
 import stat
 import unittest
+import zipfile
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
@@ -420,16 +421,123 @@ class CodexManagementTest(unittest.TestCase):
         self.fixture.runner.fail_validate = False
         self.assertTrue(self.manager._codex_restore_models()["models_restored"])
 
-    def test_model_refresh_does_not_overwrite_codex_configuration(self):
+    def test_dola_model_refresh_does_not_overwrite_codex_configuration(self):
         self.login()
         before = self.path.read_bytes()
         self.assertEqual(self.manager.get_supported_models()["supported_model_refs"], self.login()["supported_model_refs"])
         self.assertEqual(self.manager.update_model_catalog()["reason"], "codex_login_active")
-        refreshed = self.manager.refresh_agent(RefreshAgentRequest("demo", models_only=True))
-        self.assertEqual(refreshed["models"]["reason"], "codex_login_active")
         with self.assertRaisesRegex(FileExistsError, "Log out of Codex"):
             self.manager._configure_config_models(model_key="test-key", supported_models=self.fixture.catalog["models"])
         self.assertEqual(self.path.read_bytes(), before)
+
+    def test_agent_refresh_syncs_codex_catalog_and_logout_restores_original_models(self):
+        self.login()
+        before = json.loads(self.path.read_text())
+        restore = self.manager._codex_state_path().read_bytes()
+        before["agents"]["list"].append({"id": "new"})
+        self.path.write_text(json.dumps(before))
+        rows = [{"id": "gpt-6.2-sol", "name": "GPT-6.2 Sol", "input": ["text"]}]
+        request = RefreshAgentRequest("demo", template_dir=str(self.fixture.source))
+        with patch.object(self.manager, "_codex_bridge", return_value={"models": rows}) as bridge:
+            result = self.manager.refresh_agent(request)
+        bridge.assert_called_once_with("list-models")
+        expected = ["openai/gpt-6.2-sol", "openai/gpt-6.1-sol"]
+        self.assertEqual(result["models"]["supported_model_refs"], expected)
+        self.assertEqual(result["models"]["retained_model_refs"], ["openai/gpt-6.1-sol"])
+        self.assertEqual(self.manager.get_supported_models()["supported_model_refs"], expected)
+        self.assertEqual(self.manager._codex_state_path().read_bytes(), restore)
+        self.assertEqual((self.fixture.workspace / "SOUL.md").read_text(), "version one\n")
+        active = json.loads(self.path.read_text())
+        self.assertEqual(active["agents"]["defaults"]["model"], before["agents"]["defaults"]["model"])
+        self.assertEqual(active["agents"]["defaults"]["imageGenerationModel"],
+                         before["agents"]["defaults"]["imageGenerationModel"])
+        self.assertEqual(active["tools"], before["tools"])
+        self.assertEqual(active["agents"]["list"][0]["model"], before["agents"]["list"][0]["model"])
+        self.assertIn("openai/gpt-6.2-sol", active["agents"]["list"][1]["models"])
+        active["agents"]["list"][-1]["model"] = "openai/gpt-6.2-sol"
+        self.path.write_text(json.dumps(active))
+        self.assertEqual(self.login()["supported_model_refs"], expected)
+        self.manager._codex_restore_models()
+        restored = json.loads(self.path.read_text())
+        self.assertEqual(restored["agents"]["list"].pop(), {"id": "new"})
+        self.assertEqual(restored, self.original)
+
+    def test_unavailable_codex_catalog_keeps_models_and_refreshes_template(self):
+        self.login()
+        before = self.path.read_bytes()
+        request = RefreshAgentRequest("demo", template_dir=str(self.fixture.source))
+        with patch.object(self.manager, "_codex_bridge", side_effect=RuntimeError("upstream unavailable")):
+            result = self.manager.refresh_agent(request)
+        self.assertEqual(result["models"]["reason"], "codex_catalog_unavailable")
+        self.assertTrue(result["models"]["skipped"])
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertEqual((self.fixture.workspace / "SOUL.md").read_text(), "version one\n")
+
+    def test_refresh_uses_pre_login_region_and_saves_models_when_new_zip_url_is_missing(self):
+        provider = self.original["models"]["providers"]["dola"]
+        provider["baseUrl"] = "https://api.dolaio.cn/aigateway/mystore/v1"
+        self.path.write_text(json.dumps(self.original))
+        cache = self.manager.template_root / "demo.zip"
+        cache.parent.mkdir()
+        with zipfile.ZipFile(cache, "w") as archive:
+            archive.writestr("template.yaml", "version: 0.1.2\n")
+            archive.writestr("install.sh", "echo installed >> install.log\n")
+        self.manager.refresh_agent(RefreshAgentRequest("demo", agent_zip=str(cache), template_only=True))
+        cached_zip = cache.read_bytes()
+        template_state = self.fixture.state()
+        self.login()
+        self.assertNotIn("dola", json.loads(self.path.read_text())["models"]["providers"])
+        release = {"typeCode": 1, "content": {"identify": "demo", "version": "0.1.3"}}
+        models = {"models": [{"id": "gpt-6.2-sol", "input": ["text"]}]}
+        for config_changes in (True, False):
+            with self.subTest(config_changes=config_changes), \
+                 patch("agent_manage.refresh_management.urlopen", return_value=io.BytesIO(json.dumps(release).encode())) as lookup, \
+                 patch.object(self.manager, "_codex_bridge", return_value=models):
+                result = self.manager.refresh_agent(RefreshAgentRequest("demo"))
+                self.assertEqual(lookup.call_args.args[0].full_url,
+                                 "https://api.dolaio.cn/vpsmanagement/api/frontend/Template/demo")
+                self.assertTrue(result["ok"])
+                self.assertTrue(result["partial"])
+                self.assertEqual(bool(result["backup_path"]), config_changes)
+                self.assertFalse(result["models"]["skipped"])
+                self.assertEqual(result["template"]["status"], "failed")
+                self.assertEqual(result["template"]["error"]["code"], "TEMPLATE_ZIP_URL_MISSING")
+                self.assertEqual(result["template"]["target_version"], "0.1.3")
+                self.assertEqual(result["install"], {"skipped": True, "reason": "template_update_failed"})
+        self.assertIn("openai/gpt-6.2-sol", self.manager.get_supported_models()["supported_model_refs"])
+        self.assertEqual(cache.read_bytes(), cached_zip)
+        self.assertEqual(self.fixture.state(), template_state)
+        self.assertEqual((self.fixture.workspace / "install.log").read_text(), "installed\n")
+
+    def test_template_lookup_uses_pre_login_region_without_generic_dola_provider(self):
+        providers = self.original["models"]["providers"]
+        del providers["dola"]
+        providers["openai"]["baseUrl"] = "https://api.dolaio.cn/aigateway/mystore/v1"
+        self.path.write_text(json.dumps(self.original))
+        self.login()
+        config = json.loads(self.path.read_text())
+        release = {"typeCode": 1, "content": {"identify": "demo", "version": "0.1.3"}}
+        with patch("agent_manage.refresh_management.urlopen", return_value=io.BytesIO(json.dumps(release).encode())) as lookup:
+            self.assertEqual(self.manager._latest_template_release("demo", config), release["content"])
+        self.assertEqual(lookup.call_args.args[0].host, "api.dolaio.cn")
+
+    def test_codex_model_refresh_uses_config_transaction_and_dry_run_never_refreshes_auth(self):
+        self.login()
+        before = self.path.read_bytes()
+        request = RefreshAgentRequest("demo", models_only=True)
+        self.fixture.runner.dry_run = True
+        with patch.object(self.manager, "_codex_bridge") as bridge:
+            self.assertEqual(self.manager.refresh_agent(request)["models"]["reason"], "codex_catalog_dry_run")
+        bridge.assert_not_called()
+        self.fixture.runner.dry_run = False
+        with patch.object(self.manager, "_codex_bridge", return_value={"models": [{"id": "gpt-6.2-sol"}]}):
+            self.fixture.runner.fail_validate = True
+            with self.assertRaisesRegex(RuntimeError, "invalid config"):
+                self.manager.refresh_agent(request)
+            self.assertEqual(self.path.read_bytes(), before)
+            self.fixture.runner.fail_validate = False
+            result = self.manager.refresh_agent(request)
+            self.assertIn("openai/gpt-6.2-sol", result["models"]["supported_model_refs"])
 
     def test_dry_run_does_not_write_or_call_openclaw(self):
         self.fixture.runner.dry_run = True

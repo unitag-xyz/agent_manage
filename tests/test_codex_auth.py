@@ -398,6 +398,26 @@ if(audio.text!=='mock transcript'||imageCalls!==1||audioCalls!==1)throw new Erro
                                     env={**os.environ, "OPENCLAW_STATE_DIR": str(self.path.parent),
                                          "OPENCLAW_CONFIG_PATH": str(self.path)}, timeout=20)
         self.assertEqual(media_check.returncode, 0, media_check.stderr.decode())
+        catalog_fixture = self.path.parent / "mock-codex-catalog.mjs"
+        catalog_fixture.write_text("""
+globalThis.fetch = async (url, options) => {
+  if (String(url) !== 'https://chatgpt.com/backend-api/codex/models?client_version=1.0.0')
+    throw new Error('Unexpected catalog endpoint');
+  if (new Headers(options.headers).get('authorization') !== 'Bearer test-existing-access')
+    throw new Error('Catalog did not use the global OAuth profile');
+  return Response.json({models: [
+    {slug: 'gpt-6.2-sol', display_name: 'GPT-6.2 Sol', visibility: 'list', input_modalities: ['text']},
+    {slug: 'hidden-model', visibility: 'hide'},
+    {slug: 'picker-disabled', visibility: 'list', show_in_picker: false},
+  ]});
+};
+""")
+        from agent_manage.models import RefreshAgentRequest
+        with patch.dict(os.environ, {"NODE_OPTIONS": f"--import={catalog_fixture.as_uri()}"}):
+            models = self.manager.refresh_agent(RefreshAgentRequest("demo", models_only=True))["models"]
+        self.assertFalse(models["skipped"], models)
+        self.assertEqual(models["supported_model_refs"], ["openai/gpt-6.2-sol", "openai/gpt-6.1-sol"])
+        self.assertNotIn("test-existing-access", json.dumps(models))
         # New agents inherit the main account without copying the refresh token.
         config = json.loads(self.path.read_text())
         config["agents"]["list"].append({"id": "new"})

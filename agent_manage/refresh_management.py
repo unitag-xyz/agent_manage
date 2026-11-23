@@ -15,7 +15,12 @@ import zipfile
 from contextlib import contextmanager, ExitStack
 from copy import deepcopy
 from datetime import datetime, timezone
+from http.client import HTTPException
 from pathlib import Path
+from urllib.parse import quote, urlsplit
+from urllib.request import Request, urlopen
+
+from .settings import DEFAULT_MODEL_ENV, MODEL_GATEWAY_CONFIGS
 
 from .agent_hooks import HookError, run_hook
 from .skill_permissions import prepare_shared_skill_path
@@ -59,6 +64,39 @@ def _safe_target(root: Path, relative: str) -> Path:
 
 
 class RefreshManagementMixin:
+    def _latest_template_release(self, name, config):
+        providers = config.get("models", {}).get("providers", {})
+        restore = self._codex_read_state().get("restore") or {}
+        saved_providers = restore.get("catalog", {}).get("providers") or {}
+        if not saved_providers and restore.get("provider"):
+            saved_providers = {**providers, "openai": restore["provider"]}
+        origins = {urlsplit(gateway.origin).hostname: gateway.origin for gateway in MODEL_GATEWAY_CONFIGS.values()}
+        origin = MODEL_GATEWAY_CONFIGS[DEFAULT_MODEL_ENV].origin
+        for provider in (saved_providers.get("dola"), *saved_providers.values(),
+                         providers.get("dola"), *providers.values()):
+            base_url = provider.get("baseUrl") if isinstance(provider, dict) else None
+            if not isinstance(base_url, str):
+                continue
+            try:
+                host = urlsplit(base_url).hostname
+            except ValueError:
+                continue
+            if host in origins:
+                origin = origins[host]
+                break
+        endpoint = f"{origin}/vpsmanagement/api/frontend/Template/{quote(name, safe='')}"
+        try:
+            with urlopen(Request(endpoint, headers={"Accept": "application/json"}), timeout=15) as response:
+                metadata = json.load(response)
+        except (OSError, HTTPException, ValueError):
+            return None
+        release = metadata.get("content") if isinstance(metadata, dict) else None
+        if (not isinstance(release, dict) or metadata.get("typeCode") != 1
+                or release.get("identify") != name or not isinstance(release.get("version"), str)
+                or not release["version"].strip()):
+            return None
+        return release
+
     def _cached_template_version(self, path: Path) -> str | None:
         if path.is_symlink() or not path.is_file():
             return None
@@ -82,7 +120,7 @@ class RefreshManagementMixin:
             raise ValueError("Choose only one refresh scope")
         if sum(bool(value) for value in (request.template_dir, request.agent_zip, request.template_zip_url)) > 1:
             raise ValueError("Choose only one template source")
-        if bool(request.template_zip_url) != bool((request.template_version or "").strip()):
+        if request.template_version is not None and not (request.template_zip_url and request.template_version.strip()):
             raise ValueError("Remote refresh requires both template_zip_url and template_version")
         if request.template_zip_sha256 and not request.template_zip_url:
             raise ValueError("template_zip_sha256 requires template_zip_url")
@@ -111,37 +149,67 @@ class RefreshManagementMixin:
             conflicts = []
             new_state = None
             template_result = {"skipped": True}
+            template_error = None
             stage = Path(temporary)
             if not request.models_only:
                 archive_override = None
-                if request.template_zip_url:
+                target_version = None
+                release_lookup_unavailable = False
+                if not (request.template_dir or request.agent_zip):
                     template_name = validate_safe_name(request.template_name or previous.get("template_name") or name, "template_name")
                     destination = self.template_root / f"{template_name}.zip"
-                    url = validate_template_url(request.template_zip_url)
-                    cache_hit = self._cached_template_version(destination) == request.template_version.strip()
-                    if cache_hit:
-                        archive_override = destination
-                    elif self.runner.dry_run:
-                        archive_override = download_template_archive(url, stage / "preview.zip",
-                                                                     expected_sha256=request.template_zip_sha256)
+                    url = request.template_zip_url
+                    digest = request.template_zip_sha256
+                    if request.template_version:
+                        target_version = request.template_version.strip()
                     else:
-                        archives.enter_context(replace_template_archive(url=url,
-                                                                       expected_sha256=request.template_zip_sha256,
-                                                                       destination=destination))
-                source, template_name = self._refresh_source(request, previous, stage, archive_override)
-                new_state, plan, conflicts, template_result = self._refresh_template_plan(
-                    name, workspace, source, template_name, previous, stage,
-                    request.replace_modified,
-                )
-                if request.template_zip_url:
-                    if template_result["version_after"] != request.template_version.strip():
-                        raise ValueError(f"Template version mismatch: expected {request.template_version}, got {template_result['version_after']}")
-                    template_result["archive_cache_hit"] = cache_hit
+                        release = self._latest_template_release(template_name, config)
+                        if release is not None:
+                            target_version = release["version"].strip()
+                            url = url or release.get("initFileUrl")
+                            digest = digest or release.get("initFileSha256")
+                        elif url:
+                            raise ValueError(f"No valid published version returned for template {template_name}")
+                        else:
+                            release_lookup_unavailable = True
+                    cached_version = self._cached_template_version(destination) if target_version else None
+                    if target_version and not destination.exists():
+                        cached_version = str(self._load_template_manifest(self.template_root / template_name).get("version") or "")
+                    cache_hit = cached_version == target_version
+                    if target_version and not cache_hit:
+                        if not url or (isinstance(url, str) and not url.strip()):
+                            message = (f"Template {template_name}: cached {cached_version or 'none'}, "
+                                       f"published {target_version}; platform did not provide a ZIP download URL")
+                            if models_result.get("source") != "codex" or models_result["skipped"]:
+                                raise ValueError(message)
+                            template_error = {"code": "TEMPLATE_ZIP_URL_MISSING", "message": message}
+                            template_result.update(status="failed", error=template_error,
+                                                   template_name=template_name, target_version=target_version,
+                                                   cached_version=cached_version or None)
+                        else:
+                            url = validate_template_url(url)
+                            if self.runner.dry_run:
+                                archive_override = download_template_archive(url, stage / "preview.zip", expected_sha256=digest)
+                            else:
+                                archives.enter_context(replace_template_archive(url=url, expected_sha256=digest,
+                                                                                destination=destination))
+                if template_error is None:
+                    source, template_name = self._refresh_source(request, previous, stage, archive_override)
+                    new_state, plan, conflicts, template_result = self._refresh_template_plan(
+                        name, workspace, source, template_name, previous, stage,
+                        request.replace_modified,
+                    )
+                    if target_version:
+                        if template_result["version_after"] != target_version:
+                            raise ValueError(f"Template version mismatch: expected {target_version}, got {template_result['version_after']}")
+                        template_result["archive_cache_hit"] = cache_hit
+                    elif release_lookup_unavailable:
+                        template_result["release_lookup"] = "unavailable"
             result = {"ok": True, "agent_name": name, "config_path": str(self.config_path),
                       "workspace": str(workspace), "models": models_result,
                       "template": template_result, "conflicts": conflicts,
                       "skipped_conflicts": conflicts if not request.replace_modified else [],
-                      "partial": bool(conflicts and not request.replace_modified),
+                      "partial": template_error is not None or bool(conflicts and not request.replace_modified),
                       "changed_files": [{"path": str(item["target"]), "action": item["action"]} for item in plan],
                       "memory_preserved": True, "skipped": self.runner.dry_run,
                       "gateway_restarted": False, "activation_verified": False,
@@ -322,6 +390,9 @@ class RefreshManagementMixin:
 
     def _refresh_install(self, request, workspace, result):
         if request.models_only:
+            return result
+        if result["template"].get("status") == "failed":
+            result["install"] = {"skipped": True, "reason": "template_update_failed"}
             return result
         try:
             result["install"] = run_hook(self.config_path, request.agent_name, workspace,
@@ -567,8 +638,9 @@ class RefreshManagementMixin:
             raise ValueError("Cannot verify that the installed Gateway service uses this config; refresh without --restart or fix the service mapping")
 
     def _refresh_model_candidate(self, config):
-        if self._codex_models_active():
-            return deepcopy(config), {"skipped": True, "reason": "codex_login_active", "scope": "environment"}
+        codex_state = self._codex_read_state()
+        if codex_state.get("restore"):
+            return self._refresh_codex_model_candidate(config, codex_state)
         candidate = deepcopy(config)
         providers = config.get("models", {}).get("providers", {})
         managed = {}

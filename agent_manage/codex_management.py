@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import re
 import stat
 import tempfile
 from copy import deepcopy
 from pathlib import Path
+from subprocess import TimeoutExpired
 
 from .file_io import atomic_write_bytes as _atomic_bytes, write_private_json as _private_json
 from .codex_auth import CodexAuthMixin
@@ -43,8 +45,7 @@ class CodexManagementMixin(CodexAuthMixin):
     def _codex_models_active(self):
         return bool(self._codex_read_state().get("restore"))
 
-    def _codex_switch_chat_fields(self, target, model):
-        saved = []
+    def _codex_chat_fields(self, target):
         for parts in (("model",), ("utilityModel",), ("heartbeat", "model"),
                       ("subagents", "model"), ("compaction", "model")):
             parent = target
@@ -54,6 +55,11 @@ class CodexManagementMixin(CodexAuthMixin):
                 continue
             if parts == ("utilityModel",) and "utilityModel" not in parent:
                 continue
+            yield parent, parts
+
+    def _codex_switch_chat_fields(self, target, model):
+        saved = []
+        for parent, parts in self._codex_chat_fields(target):
             saved.append({"path": list(parts), "present": parts[-1] in parent,
                           "value": deepcopy(parent.get(parts[-1]))})
             parent[parts[-1]] = {"primary": model, "fallbacks": []} if parts == ("model",) else model
@@ -70,11 +76,92 @@ class CodexManagementMixin(CodexAuthMixin):
                 parent.pop(field["path"][-1], None)
 
     def _codex_model_definitions(self):
-        return [{"id": model_id, "name": name, "api": self.CODEX_API,
-                 "baseUrl": self.CODEX_BASE_URL, "agentRuntime": {"id": "openclaw"},
-                 "input": ["text", "image"], "reasoning": True,
-                 "contextWindow": self.CODEX_CONTEXT_WINDOW}
+        return [self._codex_chat_model(model_id, name, ["text", "image"])
                 for model_id, name in self.CODEX_MODELS]
+
+    def _codex_chat_model(self, model_id, name, inputs):
+        return {"id": model_id, "name": name, "api": self.CODEX_API,
+                "baseUrl": self.CODEX_BASE_URL, "agentRuntime": {"id": "openclaw"},
+                "input": inputs, "reasoning": True, "contextWindow": self.CODEX_CONTEXT_WINDOW}
+
+    def _codex_configured_chat_models(self, config):
+        provider = config.get("models", {}).get("providers", {}).get("openai", {})
+        media_refs = self._configured_media_model_refs(config) | {self.CODEX_IMAGE_MODEL}
+        return [row for row in provider.get("models", [])
+                if row.get("api") == self.CODEX_API
+                and "openai/" + row["id"] not in media_refs]
+
+    def _refresh_codex_model_candidate(self, config, state):
+        current = self._configured_default_model_from_config(config)
+        status = {"scope": "environment", "source": "codex", "skipped": True,
+                  "current_model_before": current, "current_model_after": current}
+        if state.get("status") != "active":
+            return config, {**status, "reason": "codex_login_incomplete"}
+        if self.runner.dry_run:
+            return config, {**status, "reason": "codex_catalog_dry_run"}
+        previous = self._codex_configured_chat_models(config)
+        if not previous:
+            return config, {**status, "reason": "codex_catalog_not_configured"}
+        try:
+            rows = self._codex_bridge("list-models").get("models")
+        except (OSError, RuntimeError, TimeoutExpired, ValueError):
+            return config, {**status, "reason": "codex_catalog_unavailable"}
+        models = {}
+        media_refs = self._configured_media_model_refs(config) | {self.CODEX_IMAGE_MODEL}
+        for row in rows if isinstance(rows, list) else []:
+            if not isinstance(row, dict):
+                continue
+            model_id = row.get("id")
+            if not isinstance(model_id, str) or not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}", model_id):
+                continue
+            ref = "openai/" + model_id
+            if ref in media_refs or ref in models:
+                continue
+            inputs = row.get("input")
+            if isinstance(inputs, list) and inputs and "text" not in inputs:
+                continue
+            modalities = ["text"]
+            if not isinstance(inputs, list) or not inputs or "image" in inputs or "vision" in inputs:
+                modalities.append("image")
+            name = row.get("name")
+            name = " ".join(name.split())[:160] if isinstance(name, str) else ""
+            models[ref] = self._codex_chat_model(model_id, name or model_id, modalities)
+        if not models:
+            return config, {**status, "reason": "codex_catalog_empty"}
+
+        candidate = deepcopy(config)
+        defaults = candidate["agents"]["defaults"]
+        targets = [defaults, *candidate["agents"].get("list", [])]
+        selected = set()
+        for target in targets:
+            for parent, parts in self._codex_chat_fields(target):
+                value = parent.get(parts[-1])
+                if isinstance(value, dict):
+                    fallbacks = value.get("fallbacks")
+                    values = [value.get("primary"), *(fallbacks if isinstance(fallbacks, list) else [])]
+                else:
+                    values = [value]
+                selected.update(ref for ref in values if isinstance(ref, str))
+        old_refs = {"openai/" + row["id"] for row in previous}
+        retained = []
+        for row in previous:
+            ref = "openai/" + row["id"]
+            if ref in selected and ref not in models:
+                models[ref] = deepcopy(row)
+                retained.append(ref)
+        provider = candidate["models"]["providers"]["openai"]
+        other_models = [row for row in provider["models"] if "openai/" + row["id"] not in (old_refs | models.keys())]
+        provider["models"] = [*models.values(), *other_models]
+        for target in targets:
+            allowlist = target.get("models")
+            if isinstance(allowlist, dict):
+                if target is defaults or old_refs <= allowlist.keys():
+                    for ref in models:
+                        allowlist.setdefault(ref, {})
+                for ref in old_refs - models.keys():
+                    allowlist.pop(ref, None)
+        return candidate, {**status, "skipped": False, "model_count": len(models),
+                           "supported_model_refs": list(models), "retained_model_refs": retained}
 
     def _codex_validate(self, config):
         with tempfile.TemporaryDirectory(prefix="agent-manage-codex-config-") as directory:
@@ -108,7 +195,7 @@ class CodexManagementMixin(CodexAuthMixin):
             if state["status"] != "active":
                 raise FileExistsError("Codex model switching was interrupted; run codex-logout to restore")
             state["selected_model"] = self._load_config()["agents"]["defaults"]["model"]["primary"]
-            models = deepcopy(state["models"])
+            models = deepcopy(self._codex_configured_chat_models(config) or state["models"])
             for model in models:
                 model["contextWindow"] = self.CODEX_CONTEXT_WINDOW
             candidate = deepcopy(config)
@@ -302,6 +389,9 @@ class CodexManagementMixin(CodexAuthMixin):
         original = self.config_path.read_bytes()
         config = self._load_config()
         restore = state["restore"]
+        codex_refs = set(restore["added_refs"]) | {
+            "openai/" + row["id"] for row in self._codex_configured_chat_models(config)
+        }
         providers = config.setdefault("models", {}).setdefault("providers", {})
         if restore.get("catalog"):
             catalog = restore["catalog"]
@@ -346,7 +436,6 @@ class CodexManagementMixin(CodexAuthMixin):
                     agent.pop("models", None)
         # New agents inherit restored defaults rather than dangling Codex selectors.
         saved_ids = {saved["id"] for saved in restore["agents"]}
-        codex_refs = set(restore["added_refs"])
         for agent in config["agents"].get("list", []):
             if agent.get("id") in saved_ids:
                 continue
