@@ -35,12 +35,13 @@ class NativeGatewayTest(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()
             events, calls = [], []
-            model_started, release_model = asyncio.Event(), asyncio.Event()
+            model_started, release_model, model_replied = asyncio.Event(), asyncio.Event(), asyncio.Event()
             async def model(request):
                 body = await request.json()
                 calls.append(body)
                 model_started.set()
                 await release_model.wait()
+                model_replied.set()
                 payload = {"id": "fixture-completion", "object": "chat.completion", "created": 1794480000,
                     "model": "fixture", "choices": [{"index": 0, "message": {"role": "assistant", "content": "fixture reply"}, "finish_reason": "stop"}],
                     "usage": {"prompt_tokens": 10, "completion_tokens": 3, "total_tokens": 13}}
@@ -146,6 +147,26 @@ class NativeGatewayTest(unittest.IsolatedAsyncioTestCase):
                                         "Native model request did not receive both inline images")
                 aborted = await gateway.call("chat.abort", {"sessionKey": key, "runId": sent["runId"]})
                 self.assertIsInstance(aborted, dict)
+
+                # Hold a real native run across a transport disconnect, then recover without resending.
+                model_started.clear()
+                release_model.clear()
+                model_replied.clear()
+                disconnected_run = await gateway.call("chat.send", {"sessionKey": other_key,
+                    "message": "Continue without the WebSocket", "deliver": False,
+                    "idempotencyKey": "fixture-disconnected-native-run"})
+                await asyncio.wait_for(model_started.wait(), 15)
+                await gateway.disconnect()
+                self.assertIsNone(gateway.ws)
+                release_model.set()
+                await asyncio.wait_for(model_replied.wait(), 15)
+                outcome = await gateway.call("agent.wait", {"runId": disconnected_run["runId"], "timeoutMs": 15000})
+                self.assertEqual(outcome["status"], "ok", outcome)
+                history = await gateway.call("chat.history", {"sessionKey": other_key, "limit": 30})
+                self.assertIn("fixture reply", json.dumps(history))
+                matching = [message for message in history["messages"] if message["role"] == "user"
+                            and "Continue without the WebSocket" in json.dumps(message["content"])]
+                self.assertEqual(len(matching), 1, "Reconnect must not create a second user turn")
             finally:
                 release_model.set()
                 await gateway.close()

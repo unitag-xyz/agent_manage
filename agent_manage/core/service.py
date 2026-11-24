@@ -72,7 +72,8 @@ def safe_result(value):
 
 
 class Service:
-    def __init__(self, directory, *, audience="agent-manager", workers=4):
+    def __init__(self, directory, *, audience="agent-manager", workers=4, binding_guard=None):
+        self.binding_guard = binding_guard
         self.store = Store(directory)
         self.auth = LeaseAuthority(self.store, audience)
         self.read_workers = Workers(workers, "manager-read")
@@ -134,6 +135,8 @@ class Service:
         return self.adapters[runtime]
 
     def authorize(self, lease, method, params):
+        if self.binding_guard is not None:
+            self.binding_guard()
         spec = METHODS[method]
         runtime = params.get("runtimeId")
         lease = self.auth.authorize(lease, method, runtime)
