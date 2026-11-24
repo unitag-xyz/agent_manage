@@ -199,6 +199,68 @@ class HostBindingTest(unittest.IsolatedAsyncioTestCase):
                         history = await rpc(first, "messages.list", threadId=thread_id, segmentId=segment_id)
                         self.assertTrue(history["ok"], history)
                         self.assertIn("Attached private history fixture", json.dumps(history["result"]))
+                        self.assertIsNone(history["result"]["items"][0]["statistics"])
+                        expected = {"model": "fixture", "provider": "sample", "durationMs": 90,
+                                    "usage": {"input": 8, "output": 2, "cacheRead": 1, "totalTokens": 11}}
+                        self.assertEqual(expected, history["result"]["items"][1]["statistics"])
+                        full = await rpc(first, "messages.get", threadId=thread_id, segmentId=segment_id, messageId="m2")
+                        self.assertEqual(expected, full["result"]["message"]["statistics"])
+
+                        archive = "33333333-4444-4555-8666-777777777777"
+                        index_path = sessions / "sessions.json"
+                        index = json.loads(index_path.read_text())
+                        index["agent:attached:session"]["usageFamilySessionIds"] = [archive]
+                        index_path.write_text(json.dumps(index))
+                        archive_rows = [
+                            {"id": "m2", "message": {"role": "assistant", "provider": "sample", "model": "older",
+                                "responseId": "resp_older", "durationMs": 0, "usage": {"input": 0, "cost": {"total": 0}},
+                                "content": [{"type": "thinking", "thinking": "do not display"}]}},
+                            {"id": "large", "message": {"role": "assistant", "usage": {"output": 9},
+                                "content": [{"type": "text", "text": "x" * 340000}]}},
+                            {"id": "image", "message": {"role": "toolResult", "toolCallId": "call1",
+                                "toolName": "image_generate", "details": {"count": 0, "provider": "/private/file",
+                                "task": {"taskId": "task1", "runId": "native-run"}, "paths": ["/private/file"]}}},
+                            *({"id": f"later-{i}", "message": {"role": "user", "content": "later"}}
+                              for i in range(220)),
+                        ]
+                        (sessions / f"{archive}.jsonl").write_text("".join(
+                            json.dumps({"type": "message", **row}) + "\n" for row in archive_rows))
+                        segments = await rpc(first, "segments.list", threadId=thread_id)
+                        archived_segment = next(x["segmentId"] for x in segments["result"]["items"] if not x["isCurrent"])
+                        args = {"threadId": thread_id, "segmentId": archived_segment}
+                        tail_logs = await rpc(first, "sessions.usage.logs", **args, limit=200)
+                        self.assertNotIn("m2", [row["messageId"] for row in tail_logs["result"]["logs"]])
+                        page = await rpc(first, "messages.list", **args, edge="end", limit=100, omitThinking=True)
+                        seen = {}
+                        while True:
+                            self.assertTrue(page["ok"], page)
+                            seen.update((row["id"], row) for row in page["result"]["items"])
+                            cursor = page["result"]["olderCursor"]
+                            if not cursor:
+                                break
+                            page = await rpc(first, "messages.list", **args, cursor=cursor, limit=100)
+                        self.assertEqual(223, len(seen))
+                        self.assertEqual([], seen["m2"]["content"])
+                        self.assertEqual({"model": "older", "provider": "sample", "responseId": "resp_older",
+                                          "durationMs": 0, "usage": {"input": 0, "cost": {"total": 0}}},
+                                         seen["m2"]["statistics"])
+                        self.assertIsNone(seen["later-0"]["statistics"])
+                        self.assertEqual({"toolCallId": "call1", "mediaGeneration":
+                                         {"kind": "image", "outputCount": 0, "taskId": "task1"}},
+                                         seen["image"]["statistics"])
+                        self.assertEqual("reference", seen["large"]["completeness"])
+                        for identifier in ("large", "m2", "image"):
+                            ref = seen[identifier].get("fullMessageRef", {}).get("params", {}).get("ref")
+                            full = await rpc(first, "messages.get", **args, messageId=identifier,
+                                             **({"ref": ref} if ref else {}))
+                            self.assertTrue(full["ok"], full)
+                            self.assertEqual(seen[identifier]["statistics"], full["result"]["message"]["statistics"])
+                        forward = await rpc(first, "messages.list", **args, edge="start", limit=1, omitThinking=True)
+                        self.assertEqual(seen["m2"]["statistics"], forward["result"]["items"][0]["statistics"])
+                        self.assertTrue(forward["result"]["newerCursor"])
+                        wrong = await rpc(first, "messages.get", threadId=protected["threadId"],
+                                          segmentId=archived_segment, messageId="m2")
+                        self.assertEqual("FORBIDDEN", wrong["error"]["code"])
                         resource_id = next(block["resourceId"] for message in history["result"]["items"]
                                            for block in message["content"] if block["type"] == "resource")
                         media = await rpc(first, "resources.get", resourceId=resource_id, offset=1, length=3)
@@ -345,6 +407,10 @@ class HostBindingTest(unittest.IsolatedAsyncioTestCase):
                     second, default_id = await open_chat("attached", template_identify="catalog-secondary")
                     async with second:
                         self.assertEqual(attached["agentId"], default_id)
+                        resumed = await rpc(second, "messages.list", **args,
+                                            cursor=forward["result"]["newerCursor"], limit=1)
+                        self.assertTrue(resumed["ok"], resumed)
+                        self.assertEqual(seen["large"]["statistics"], resumed["result"]["items"][0]["statistics"])
                         groups = (await rpc(second, "chat.sidebar"))["result"]["items"]
                         self.assertNotIn("templateIdentify", groups[0])
                         self.assertEqual("catalog-secondary", groups[1]["templateIdentify"])

@@ -72,6 +72,24 @@ attachment ID. Cancelling an unsent draft is local only.
 
 ## Media and generation failures
 
+`messages.list.result.items[]` and `messages.get.result.message` always include
+`statistics` on the new history adapter. A null value means this message has
+no recorded statistics; an omitted key means an older deployment. The field
+is independent of text/thinking projection and full-message references and
+works on current and archived segments. Keep separate messages keyed by
+segment and message ID.
+
+```json
+{"provider":"provider","model":"model","responseId":"resp_1","durationMs":250,"usage":{"input":10,"output":3,"cacheRead":0,"cacheWrite":0,"cost":{"total":0}}}
+```
+
+IDs, labels, duration, cost and counters are optional when not recorded.
+Zero is a recorded value. Input already excludes cached tokens. Tool result
+statistics use `{toolCallId,mediaGeneration:{kind,outputCount,provider?,model?,durationSeconds?,taskId?}}`.
+These fields do not contain tool arguments, internal paths or resource URLs.
+Do not use `sessions.usage.logs` to backfill a present null. The old bounded
+logs fallback can still be used on deployments where the key is absent.
+
 `sessions.usage.logs` returns recorded transcript counters keyed by message ID.
 For structured native image/video/music or TTS tool results it can also include
 `toolCallId` and `mediaGeneration:{kind,outputCount,provider?,model?,durationSeconds?,taskId?}`.
