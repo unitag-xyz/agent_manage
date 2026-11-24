@@ -199,22 +199,41 @@ class SegmentReader:
         if self.agent is None and self.agent_id != "main":
             fail("FORBIDDEN", "Agent is not configured in this instance")
         store = self.config.get("session", {}).get("store")
-        self.store = absolute(self.expand_home(store.replace("{agentId}", self.agent_id.lower()))) if store else self.root / "agents" / self.agent_id.lower() / "sessions/sessions.json"
+        self.native_path_resolver = request.get("_nativePathResolver")
+        if self.native_path_resolver is not None and not callable(self.native_path_resolver):
+            fail("FORBIDDEN", "Native path resolution requires an internal trusted binding")
+        store_path = store.replace("{agentId}", self.agent_id.lower()) if store else None
+        self.store = (self.native_path_resolver(store_path) if self.native_path_resolver else absolute(self.expand_home(store_path))) if store else self.root / "agents" / self.agent_id.lower() / "sessions/sessions.json"
         self.roots = [self.store.parent, self.root / "sessions"]
         self.scope = digest(dumps([request["root"], self.key, self.session_id]).encode())
+        if self.native_path_resolver:
+            self.scope = digest(dumps([request["root"], self.key, self.session_id, request["scopeBinding"]]).encode())
         self.token_key = digest(dumps([request["root"], self.config.get("gateway", {}).get("auth") or {}, env.get("AGENT_MANAGER_HISTORY_CURSOR_KEY", "")]).encode()).encode()
-        workspace = (self.agent or {}).get("workspace") or agents.get("defaults", {}).get("workspace") or str(self.root / "workspace")
-        self.media_roots = [absolute(self.expand_home(workspace)), self.root / "media"]
+        workspace = (self.agent or {}).get("workspace") or agents.get("defaults", {}).get("workspace")
+        self.media_roots = [self.root / "workspace", self.root / "media"]
+        if workspace:
+            self.media_roots[0] = self.native_path_resolver(workspace) if self.native_path_resolver else absolute(self.expand_home(workspace))
         self.media_identities = {}
 
     def expand_home(self, value):
         return self.env.get("HOME", str(Path.home())) + value[1:] if value == "~" or value.startswith("~/") else value
 
+    def open_read(self, file):
+        if self.native_path_resolver:
+            from .path_io import open_without_links
+            return open_without_links(file)
+        return os.open(file, os.O_RDONLY | os.O_NOFOLLOW)
+
+    def checked_file(self, file, roots):
+        checked = safe_file(file, roots)
+        # Strict opens must walk the original path, not an already-resolved link target.
+        return absolute(file) if self.native_path_resolver else checked
+
     @timed("indexReadMs")
     def entry(self):
         try:
-            file = safe_file(self.store, [self.store.parent])
-            fd = os.open(file, os.O_RDONLY | os.O_NOFOLLOW)
+            file = self.checked_file(self.store, [self.store.parent])
+            fd = self.open_read(file)
             with os.fdopen(fd, "rb") as stream:
                 store = json.load(stream)
         except FileNotFoundError:
@@ -252,7 +271,9 @@ class SegmentReader:
             session_file = str(base / (self.session_id + ("-topic-" + quote(topic[1], safe="~()*!.'-") if topic else "") + ".jsonl"))
         explicit = None
         if isinstance(session_file, str) and session_file.strip():
-            candidate = absolute(base / session_file.strip())
+            candidate = (self.native_path_resolver(session_file.strip())
+                         if self.native_path_resolver and session_file.strip().startswith("/") and self.session_id == entry.get("sessionId")
+                         else absolute(base / session_file.strip()))
             # Invalid explicit paths fall back to the generated filename, as July
             # does. Existing in-root links remain visible to safe_file for rejection.
             if inside(candidate, base) or inside(candidate, base.resolve()):
@@ -285,7 +306,7 @@ class SegmentReader:
 
     def archive_header_matches(self, file):
         try:
-            fd = os.open(safe_file(file, self.roots), os.O_RDONLY | os.O_NOFOLLOW)
+            fd = self.open_read(self.checked_file(file, self.roots))
             with os.fdopen(fd, "rb") as stream:
                 for line in stream.read(64 * 1024).splitlines():
                     if line.strip():
@@ -314,8 +335,8 @@ class SegmentReader:
                 available += [value[2] for value in self.archives(candidate, all_names=True)]
         for candidate in dict.fromkeys(available):
             try:
-                checked = safe_file(candidate, self.roots)
-                fd = os.open(checked, os.O_RDONLY | os.O_NOFOLLOW)
+                checked = self.checked_file(candidate, self.roots)
+                fd = self.open_read(checked)
             except FileNotFoundError:
                 continue
             opened = os.fstat(fd)
@@ -442,12 +463,20 @@ class SegmentReader:
             target = Path(unquote(url.path))
         else:
             target = self.media_roots[0] / value
+        if self.native_path_resolver and (value.startswith("file://") or Path(value).is_absolute()):
+            from .core.errors import APIError
+            try:
+                target = self.native_path_resolver(str(target))
+            except APIError:
+                fail("FORBIDDEN", "Media path is outside the registered mounts")
         try:
-            file = safe_file(target, self.media_roots)
-            fd = os.open(file, os.O_RDONLY | os.O_NOFOLLOW)
+            file = self.checked_file(target, self.media_roots)
+            fd = self.open_read(file)
         except FileNotFoundError:
             fail("MEDIA_NOT_FOUND", "Media file is missing")
         try:
+            if self.native_path_resolver and os.fstat(fd).st_size > 64 * 1024 * 1024:
+                fail("FORBIDDEN", "Host media exceeds the read budget")
             def signature():
                 value = os.fstat(fd)
                 return value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns
@@ -500,14 +529,30 @@ class SegmentReader:
             raise ValueError("Invalid base64")
         return data
 
-    def media_ref(self, row, pointer, source, value, purpose="unknown"):
+    def media_ref(self, row, pointer, source, value, purpose="unknown", inline=None):
         media_hash = None
+        metadata = {}
         try:
-            media_hash = digest(self.inline_bytes(value)) if source == "base64" else self.local_media_read(value)["sha256"]
+            if source == "base64":
+                data = self.inline_bytes(value)
+                media_hash = digest(data)
+                metadata["sizeBytes"] = len(data)
+                name = (inline or {}).get("fileName")
+                mime = (inline or {}).get("mimeType")
+                if isinstance(mime, str) and mime in EXTENSIONS.values():
+                    metadata["mimeType"] = mime
+            else:
+                media = self.local_media_read(value)
+                media_hash = media["sha256"]
+                metadata.update(sizeBytes=media["totalBytes"], mimeType=media["contentType"])
+                name = Path(unquote(urlparse(value).path) if value.startswith("file://") else value).name
+            if (isinstance(name, str) and 0 < len(name) <= 128 and name.isprintable()
+                    and name not in (".", "..") and not any(char in name for char in "/\\:")):
+                metadata["fileName"] = name
         except (OSError, ValueError, ProtocolError):
             pass
         return {**({"mediaId": "sha256:" + media_hash} if media_hash else {}),
-                **({"purpose": purpose} if self.input.get("includeSnapshot") else {}), "method": "sessions.segments.media.get",
+                **({"purpose": purpose, **metadata} if self.input.get("includeSnapshot") else {}), "method": "sessions.segments.media.get",
                 "params": {"sessionKey": self.key, "sessionId": self.session_id,
                            "ref": self.ref_token("media", messageId=self.identifier(row), pointer=pointer, source=source,
                                                  **({"mediaHash": media_hash} if media_hash else {}))}}
@@ -536,7 +581,7 @@ class SegmentReader:
                 if value.get("type") in {"toolCall", "tool_call", "tool_use", "functionCall"}:
                     purpose = "tool_input"
                 if value.get("type") in {"image", "base64"} and isinstance(value.get("data"), str):
-                    reference = self.media_ref(row, [*pointer, "data"], "base64", value.pop("data"), purpose)
+                    reference = self.media_ref(row, [*pointer, "data"], "base64", value.pop("data"), purpose, value)
                     value["mediaRef"] = reference
                     add(reference)
                 children = list(value.items())
@@ -573,6 +618,61 @@ class SegmentReader:
             fail("MESSAGE_NOT_FOUND", "Message is not present in this segment snapshot")
         return self.by_id[identifier]
 
+    def usage_log(self, row):
+        raw = self.raw(row)
+        message = raw["message"]
+        result = {"messageId": self.identifier(row), "role": row["role"], "timestamp": row["timestamp"]}
+        for field in ("model", "provider", "runId", "toolCallId"):
+            value = message.get(field) or raw.get(field)
+            if isinstance(value, str) and 0 < len(value) <= 256 and value.isprintable():
+                result[field] = value
+        duration = message.get("durationMs", raw.get("durationMs"))
+        if type(duration) is int and 0 <= duration <= (1 << 53) - 1:
+            result["durationMs"] = duration
+        usage = message.get("usage")
+        if isinstance(usage, dict):
+            counters = {name: usage[name] for name in ("input", "output", "cacheRead", "cacheWrite", "totalTokens")
+                        if type(usage.get(name)) is int and 0 <= usage[name] <= (1 << 53) - 1}
+            total = usage.get("totalTokens", usage.get("total"))
+            if type(total) is int and 0 <= total <= (1 << 53) - 1:
+                counters["totalTokens"] = total
+                result["tokens"] = total
+            if counters:
+                result["usage"] = counters
+            cost = usage.get("cost")
+            amount = cost.get("total") if isinstance(cost, dict) else cost
+            if type(amount) in (int, float) and 0 <= amount <= (1 << 53) - 1:
+                result["cost"] = amount
+        tool = message.get("toolName")
+        details = message.get("details")
+        kinds = {"image_generate": "image", "video_generate": "video", "music_generate": "audio", "tts": "audio"}
+        count = details.get("count") if isinstance(details, dict) else None
+        if (tool == "tts" and isinstance(details, dict)
+                and isinstance(details.get("audioPath"), str) and details["audioPath"]):
+            count = 1
+        if (row["role"] in ("tool", "toolResult") and isinstance(tool, str) and tool in kinds
+                and isinstance(details, dict) and message.get("isError") is not True
+                and isinstance(result.get("toolCallId"), str)
+                and type(count) is int and 0 <= count <= 1000):
+            media = {"kind": kinds[tool], "outputCount": count}
+            for name in ("provider", "model"):
+                text = details.get(name)
+                if isinstance(text, str) and 0 < len(text) <= 120 and re.fullmatch(r"[a-zA-Z0-9_./:-]+", text):
+                    media[name] = text
+            duration = details.get("durationSeconds")
+            if type(duration) in (int, float) and 0 < duration <= 86400:
+                media["durationSeconds"] = duration
+            task = details.get("task")
+            if isinstance(task, dict):
+                task_id = task.get("taskId")
+                if isinstance(task_id, str) and re.fullmatch(r"[a-zA-Z0-9_-]{1,128}", task_id):
+                    media["taskId"] = task_id
+                native_run = task.get("runId")
+                if isinstance(native_run, str) and re.fullmatch(r"[a-zA-Z0-9_-]{1,128}", native_run):
+                    result.setdefault("runId", native_run)
+            result["mediaGeneration"] = media
+        return result
+
     @timed("chunkEncodeMs")
     def chunk(self, data, offset, reference, *, total_size=None, **extra):
         total = len(data) if total_size is None else total_size
@@ -604,6 +704,10 @@ class SegmentReader:
             records = self.scan(fd, opened, entry, snapshot)
             self.expires = reference["expires"] if reference else int(time.time() * 1000) + TTL_MS
             base = {"sessionKey": self.key, "sessionId": self.session_id}
+            if action == "usage":
+                limit = self.input["limit"]
+                rows = [row for row in self.rows if row["hasMessage"] and row["role"] in ("user", "assistant", "tool", "toolResult")]
+                return self.finish({"logs": [self.usage_log(row) for row in rows[-limit:]]})
             if action == "message":
                 identifier = self.input["messageId"]
                 if reference and (reference.get("messageId") != identifier or cursor and reference.get("action") != "message"):

@@ -37,10 +37,11 @@ def message_dto(raw, *, thread_id, segment_id, projection, register_resource):
         content = [{"blockId": identifier + ":result", "type": "tool_result", "toolCallId": raw.get("toolCallId"),
                     "name": raw.get("toolName"), "summary": raw.get("toolSummary") or content,
                     "status": "failed" if raw.get("isError") is True else "completed" if raw.get("isError") is False else "unknown"}]
-    resources = [register_resource(ref) for ref in raw.get("mediaRefs", [])]
-    for resource_id in resources:
+    for ref in raw.get("mediaRefs", []):
+        resource_id = register_resource(ref)
         if isinstance(resource_id, str):
-            content.append({"blockId": identifier + ":" + resource_id, "type": "resource", "resourceId": resource_id})
+            content.append({"blockId": identifier + ":" + resource_id, "type": "resource", "resourceId": resource_id,
+                            **{field: ref[field] for field in ("purpose", "fileName", "mimeType", "sizeBytes") if field in ref}})
         else:
             content.append({"blockId": identifier + ":media-pending:" + str(len(content)), "type": "notice",
                             "code": "MEDIA_PENDING_HISTORY", "text": "Media requires an authorized history reference"})

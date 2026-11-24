@@ -1,0 +1,17 @@
+{
+  "status": "unreleased-local-worktree",
+  "baseVersion": "1.0.002",
+  "baseCommit": "24adaaea256bee8e6d26e9e14c9381532e2a2926",
+  "branch": "codex/v1-shared-host-binding",
+  "files": [
+    {"path": "agent_manage/path_io.py", "sha256": "75fdd5bbecbf79c4ac3a2bf96b39d064c3d56eb640eeb774ad8a700de391d7f2"},
+    {"path": "agent_manage/adapters/openclaw/host_binding.py", "sha256": "6e06badba168c3cbc64d82867c89590dbabfb4bfa37e725f73ca9e34ff9db448"},
+    {"path": "agent_manage/adapters/openclaw/factory.py", "sha256": "35392f024cb24db0b49ea425e19181f8540422c29e2de2340fe43047a73e68d9"},
+    {"path": "agent_manage/adapters/openclaw/v2026_7/adapter.py", "sha256": "ebc165174952fec7ba51dd25063d9e1c49811c6fee329da56795a9c390b7ee59"},
+    {"path": "agent_manage/adapters/openclaw/v2026_7/gateway.py", "sha256": "15e9dfefb3dd71aec300ceeabfb59478d2618552e6e9520131bf5e9d61a1b2f4"},
+    {"path": "agent_manage/core/service.py", "sha256": "daebb6b2547cb84f38f411efd46900da6b86e844b165422a176f3f5d093620e8"},
+    {"path": "agent_manage/segment_reader.py", "sha256": "80645cc69bc9dc18ea279c8d27348a08ade685ca699dfd02a5baec3007f43f41"},
+    {"path": "agent_manage/server.py", "sha256": "45fd9951b47e5c0031a09673d931046a69ca657619f26ef2d2dc959dc1eecfe0"},
+    {"path": "tests/test_v1_host_binding.py", "sha256": "88ca7bb538b2d8415c5078ca2813dcffad656ca23c1afd7bb761e811ae1580cf"}
+  ]
+}

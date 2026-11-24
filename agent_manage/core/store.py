@@ -58,6 +58,8 @@ class Store:
                     hash TEXT PRIMARY KEY, id TEXT UNIQUE NOT NULL, expires INTEGER NOT NULL,
                     context TEXT NOT NULL, revoked INTEGER NOT NULL DEFAULT 0);
                 CREATE INDEX IF NOT EXISTS operations_runtime_created ON operations(runtime, created);
+                CREATE INDEX IF NOT EXISTS runs_by_thread ON objects(runtime, json_extract(data, '$.threadId'))
+                    WHERE kind='run';
             """)
             db.execute("BEGIN IMMEDIATE")
             if db.execute("PRAGMA user_version").fetchone()[0] < 2:
@@ -95,6 +97,41 @@ class Store:
         with self.connect() as db:
             return [{**dict(row), "data": json.loads(row["data"])} for row in
                     db.execute("SELECT * FROM objects WHERE kind=? AND runtime=? ORDER BY id", (kind, runtime))]
+
+    def thread_run_activity(self, runtime, thread_ids):
+        ids = list(dict.fromkeys(thread_ids))
+        activity = {}
+        if not ids:
+            return activity
+        with self.connect() as db:
+            for start in range(0, len(ids), 128):
+                batch = ids[start:start + 128]
+                placeholders = ",".join("?" for _ in batch)
+                rows = db.execute(f"""
+                    WITH ranked AS (
+                        SELECT id, data, json_extract(data, '$.threadId') AS thread,
+                            json_extract(data, '$.status') IN ('accepted','running','cancel_requested') AS active,
+                            row_number() OVER (
+                                PARTITION BY json_extract(data, '$.threadId'),
+                                    json_extract(data, '$.status') IN ('accepted','running','cancel_requested')
+                                ORDER BY coalesce(json_extract(data, '$.completedAt'), json_extract(data, '$.createdAt')) DESC, id
+                            ) AS position
+                        FROM objects
+                        WHERE kind='run' AND runtime=? AND json_extract(data, '$.threadId') IN ({placeholders})
+                    )
+                    SELECT * FROM ranked WHERE (active AND position<=8) OR (NOT active AND position=1)
+                    ORDER BY thread, active DESC, position
+                """, (runtime, *batch))
+                for row in rows:
+                    data = json.loads(row["data"])
+                    target = activity.setdefault(row["thread"], {"activeRuns": [], "lastRun": None})
+                    dto = {"runId": row["id"], **{key: data[key] for key in
+                           ("status", "observation", "resultSync", "createdAt", "completedAt", "resultBoundary", "error") if key in data}}
+                    if row["active"]:
+                        target["activeRuns"].append(dto)
+                    else:
+                        target["lastRun"] = dto
+        return activity
 
     def lookup(self, kind, runtime, native):
         with self.connect() as db:

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Add an explicit, static shared-Host OpenClaw text Chat registration with separate native/local paths, mounted-history translation, generation-scoped device keys, configuration snapshot verification and installed-Agent identities. Keep the original CLI/local runtime path unchanged.
+- Add private Unix-socket business-Agent resolution for trusted Host ticket scoping; Host-bound management writes and media remain unsupported. Real two-container acceptance is still required. See [shared Host registration](docs/v1-shared-host.md).
+
 ## 1.0.002 - 2026-11-22
 
 - v1 沿用 0.5 的平台鉴权与主机派发分工。Server API 通过私有 Unix socket 委托本地授权并调用 Manager，移除 Dola 回调兑换和服务凭据配置。旧 CLI 派发方式继续可用。

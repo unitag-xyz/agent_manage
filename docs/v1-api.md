@@ -78,6 +78,8 @@ list/lookup 先按发起者及 Agent 范围过滤，再取最近 200 条；不�
 | 注册环境 | `targets.list`, `environments.list`, `runtimes.list/get` | 管理员预注册的本机环境；不创建 Docker |
 | Agent | `agents.list/create/refresh/install` | create 用 options；refresh/install 用 agentId |
 | 模型 | `models.list/get/select` | select：modelId；保留底座原有模型选择语义 |
+| 用量 | `usage.status` | OpenClaw 只读配额查询，参数仅 `runtimeId`；实例级 Chat 票可用，单 Agent 票不可用 |
+
 | 渠道 | `channels.list/configure/remove` | channel=telegram/feishu/weixin；写参数放 options |
 | Skill | `skills.install` | options；对应原本的 Agent 或共享 Skill 安装 |
 | Codex 连接 | `connections.get/login/logout` | 当前是 OpenClaw Codex 全局登录及模型恢复 |
@@ -92,6 +94,26 @@ list/lookup 先按发起者及 Agent 范围过滤，再取最近 200 条；不�
 | 操作 | `operations.list/get/lookup` | operationId 或 clientRequestId；发起者及当前 Agent 范围 |
 | 事件 | `events.subscribe/unsubscribe` | 仅 WSS，runtimeId+threadId |
 | 恢复 | `runtimes.recover` | 对已知的中断刷新执行所有权检查和恢复 |
+
+### OpenClaw Chat2 compatibility
+
+All calls include `runtimeId`. The following methods are enabled by the instance Chat grant, not the single-Agent grant.
+
+| Method | Additional parameters and result |
+| --- | --- |
+| `commands.list` | `threadId`; returns the native text command catalog for the thread's Agent. |
+| `tasks.list` | `threadId`, optional `limit`, `cursor`, `status` (string or array, e.g. `["queued","running"]`). OpenClaw applies status before paging. Returns `tasks` and optional `nextCursor`. |
+| `tasks.get/cancel` | `threadId`, `taskId`; cancel also requires `clientRequestId` and returns an Operation. The native task must be associated with that thread. |
+| `usage.cost` | Optional `range` (`7d`, `30d` default, `90d`, `1y`); returns instance totals and daily usage. |
+| `sessions.usage`, `sessions.usage.timeseries`, `sessions.usage.logs` | `threadId`; summary accepts optional `range`. Logs accept `segmentId` (default current) and `limit`; return transcript `messageId`, recorded counters and an opaque `runId` only when it matches that thread and segment. No transcript content or estimated values. |
+| `chat.sidebar` | Each group includes `isSystem` (the native OpenClaw `main` Agent) and `totalCount` (null if the index could not be read). List items and `threads.list/get` expose `isMain` and `canDelete`. A verified attached group may include `platformAgentIdentify` and `canRefresh: true` for the existing authenticated TaskOrchestrator refresh API. If absent, do not use the template or opaque Chat ID as a refresh target. |
+| `threads.get` | Also returns `totalTokens`, `contextTokens`, and `totalTokensFresh` when present in the native session index. Missing values are unknown, not zero. |
+| Thread activity | Sidebar and thread list/detail include `runActivity` with up to eight Manager-observed `activeRuns`, `activeRunId` when exactly one exists, and `lastRun`. An empty list does not rule out runs started elsewhere. An unverified terminal boundary is not proof of transcript persistence. |
+| `threads.thinking.get/update` | `threadId`; get returns the override, available levels and default when advertised. Update requires `thinkingLevel` (null clears the override) and `clientRequestId`; wait for the Operation before rereading. An unknown or busy session is not patched. |
+| `threads.delete/reset` | `threadId` and `clientRequestId`; returns an Operation. Delete explicitly requests native transcript removal and rejects a main thread with `MAIN_THREAD_PROTECTED`. |
+| `sessions.subscribe/unsubscribe` | WebSocket only. `sessions.changed` is an invalidation signal without a native key or message. Refresh the sidebar on receipt; subscribe again after reconnect or native resync. |
+| `runs.create` attachments | Up to five inline `{type,mimeType,fileName,content}` objects. Host instance Chat allows 23 MiB of combined base64 (about 17.25 MiB of raw files) within a 24 MiB total request. OpenClaw limits each image to 6 MiB. No chunk upload; ordinary limits are unchanged. |
+| `resources.get` | Obtain `resourceId` from message history. History and resource metadata include purpose, filename, MIME and size when known. `offset` and `length` (up to 128 KiB) read a base64 chunk including total size and SHA-256. Check the hash remains constant across chunks. No public Host media URL is created. |
 
 `options` 使用 camelCase，映射到保留的请求模型。例如：
 

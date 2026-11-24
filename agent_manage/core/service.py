@@ -4,6 +4,7 @@ import contextvars
 import json
 import logging
 import re
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
@@ -15,6 +16,11 @@ from .store import Store, canonical
 from .runtime import CURRENT_WRITE_GUARD
 
 LOG = logging.getLogger("agent_manage.api")
+MAX_ATTACHMENT_REQUEST = 24 * 1024 * 1024
+MAX_INLINE_ATTACHMENT_BASE64 = 23 * 1024 * 1024
+MAX_INLINE_IMAGE_BYTES = 6 * 1024 * 1024
+MAX_INLINE_ATTACHMENT_COUNT = 5
+LARGE_ATTACHMENT_OPERATIONS = threading.BoundedSemaphore(2)
 
 
 class Workers:
@@ -90,11 +96,26 @@ class Service:
                 if row["data"].get("status") in ("accepted", "running", "cancel_requested"):
                     self.store.object("run", identifier, row["native"], {**row["data"], "observation": "unknown"})
 
-    def register(self, adapter: RuntimeAdapter):
+    def register(self, adapter: RuntimeAdapter, *, persist_registration=True):
         if adapter.runtime_id in self.adapters:
             raise ValueError("Duplicate runtime registration")
         context = adapter.context
+        binding = getattr(adapter, "host_binding", None)
+        if binding:
+            private = self.store.path.parent
+            if any(local.is_relative_to(private) or private.is_relative_to(local) for _, local in binding.mappings):
+                raise ValueError("Manager private state must not overlap tenant mounts")
         for existing in self.adapters.values():
+            binding, other = getattr(adapter, "host_binding", None), getattr(existing, "host_binding", None)
+            local_roots = [local for _, local in binding.mappings] if binding else [context.state_dir]
+            previous_roots = [local for _, local in other.mappings] if other else [existing.context.state_dir]
+            if binding or other:
+                if any(left.is_relative_to(right) or right.is_relative_to(left)
+                       for left in local_roots for right in previous_roots):
+                    raise ValueError("Host-bound runtimes must not overlap local mounts")
+            if binding and other:
+                if binding.token_digest == other.token_digest or adapter.gateway.url == existing.gateway.url:
+                    raise ValueError("Host-bound runtimes require distinct Gateway tokens and endpoints")
             left, right = existing.context.state_dir, context.state_dir
             if left.is_relative_to(right) or right.is_relative_to(left):
                 raise ValueError("Runtimes must not overlap state directories")
@@ -103,8 +124,9 @@ class Service:
         self.adapters[adapter.runtime_id] = adapter
         adapter.control_workers = self.write_workers
         adapter.media_workers = self.media_workers
-        self.store.object("runtime", adapter.runtime_id, adapter.runtime_id,
-            {"engine": adapter.engine, "environmentId": context.environment_id, "configPath": str(context.config_path)})
+        if persist_registration:
+            self.store.object("runtime", adapter.runtime_id, adapter.runtime_id,
+                {"engine": adapter.engine, "environmentId": context.environment_id, "configPath": str(context.config_path)})
 
     def adapter(self, runtime) -> RuntimeAdapter:
         if runtime not in self.adapters:
@@ -118,8 +140,23 @@ class Service:
         if spec.scope == "operation":
             operation = self.store.operation(params["operationId"], lease.context, runtime)
             return self.auth.authorize(lease, method, runtime, operation["agentId"], runtime_wide=operation["agentId"] is None)
-        agent = self.adapter(runtime).resolve_scope(method, params) if runtime else None
-        return self.auth.authorize(lease, method, runtime, agent, runtime_wide=spec.scope == "runtime")
+        adapter = self.adapter(runtime) if runtime else None
+        agent = adapter.resolve_scope(method, params) if adapter else None
+        lease = self.auth.authorize(lease, method, runtime, agent, runtime_wide=spec.scope == "runtime"
+                                    or method == "runs.create" and bool(params.get("attachments")))
+        binding = getattr(adapter, "host_binding", None)
+        if method == "runs.cancel" and binding and binding.instance_chat:
+            run = self.store.get(params["runId"], kind="run", runtime=runtime)
+            operation_id = run["data"].get("operationId")
+            if not operation_id:
+                raise APIError("FORBIDDEN", "The Run has no verifiable Chat operation owner")
+            try:
+                operation = self.store.operation(operation_id, lease.context, runtime)
+            except APIError as exc:
+                raise APIError("FORBIDDEN", "The Run belongs to a different Chat operator") from exc
+            if operation["method"] != "runs.create" or operation["threadId"] != run["data"].get("threadId"):
+                raise APIError("FORBIDDEN", "The Run has no matching Chat operation")
+        return lease
 
     @staticmethod
     def validate(request):
@@ -142,13 +179,72 @@ class Service:
             raise APIError("INVALID_ARGUMENT", "runtimeId is required")
         if spec.write and (not isinstance(params.get("clientRequestId"), str) or not 1 <= len(params["clientRequestId"]) <= 128):
             raise APIError("INVALID_ARGUMENT", "Writes require clientRequestId of 1-128 characters")
+        if method == "operations.lookup" and (not isinstance(params["clientRequestId"], str)
+                or not 1 <= len(params["clientRequestId"]) <= 128):
+            raise APIError("INVALID_ARGUMENT", "Operation lookup requires clientRequestId of 1-128 characters")
+        if "operationMethod" in params and (not isinstance(params["operationMethod"], str)
+                or params["operationMethod"] not in METHODS or not METHODS[params["operationMethod"]].write):
+            raise APIError("INVALID_ARGUMENT", "Expected a registered write method")
         for key in ("agentId", "threadId", "segmentId", "messageId", "runId", "resourceId", "operationId", "modelId", "title", "message"):
+            if key == "modelId" and method == "threads.models.update" and params["modelId"] is None:
+                continue
             if key in params and (not isinstance(params[key], str) or not params[key] or len(params[key]) > (256000 if key == "message" else 8192)):
                 raise APIError("INVALID_ARGUMENT", f"Invalid {key}")
+        if method == "threads.models.update" and isinstance(params["modelId"], str) and len(params["modelId"]) > 256:
+            raise APIError("INVALID_ARGUMENT", "Invalid modelId")
+        if method == "threads.thinking.update" and params["thinkingLevel"] is not None:
+            level = params["thinkingLevel"]
+            if not isinstance(level, str) or not 1 <= len(level) <= 32 or not level.isascii() or not level.isalnum():
+                raise APIError("INVALID_ARGUMENT", "Invalid thinkingLevel")
         if "expectedCurrentSegmentId" in params and params["expectedCurrentSegmentId"] is not None and (not isinstance(params["expectedCurrentSegmentId"], str) or not 1 <= len(params["expectedCurrentSegmentId"]) <= 128):
             raise APIError("INVALID_ARGUMENT", "expectedCurrentSegmentId must be a segment ID or null for a new empty thread")
         if "limit" in params and (type(params["limit"]) is not int or not 1 <= params["limit"] <= 200):
             raise APIError("INVALID_ARGUMENT", "limit must be 1-200")
+        if "taskId" in params and (not isinstance(params["taskId"], str) or not 1 <= len(params["taskId"]) <= 128):
+            raise APIError("INVALID_ARGUMENT", "Invalid taskId")
+        if "range" in params and params["range"] not in ("7d", "30d", "90d", "1y"):
+            raise APIError("INVALID_ARGUMENT", "Invalid usage range")
+        if method == "tasks.list" and "cursor" in params and (not isinstance(params["cursor"], str)
+                or not 1 <= len(params["cursor"]) <= 12 or not params["cursor"].isascii() or not params["cursor"].isdigit()):
+            raise APIError("INVALID_ARGUMENT", "Invalid task cursor")
+        if method == "tasks.list" and "status" in params:
+            value = params["status"]
+            statuses = value if isinstance(value, list) else [value]
+            allowed_statuses = ("queued", "running", "completed", "failed", "cancelled", "timed_out")
+            if not 1 <= len(statuses) <= len(allowed_statuses) or any(status not in allowed_statuses for status in statuses):
+                raise APIError("INVALID_ARGUMENT", "Invalid task status filter")
+        if method == "resources.get" and ("offset" in params or "length" in params):
+            if (type(params.get("offset")) is not int or not 0 <= params["offset"] <= (1 << 53) - 1
+                    or type(params.get("length")) is not int or not 1 <= params["length"] <= 128 * 1024):
+                raise APIError("INVALID_ARGUMENT", "Expected offset and length up to 128 KiB")
+        if method == "runs.create" and "attachments" in params:
+            import base64
+            attachments = params["attachments"]
+            if not isinstance(attachments, list) or len(attachments) > MAX_INLINE_ATTACHMENT_COUNT:
+                raise APIError("INVALID_ARGUMENT", "At most five inline attachments are supported")
+            total = 0
+            image_types = ("image/png", "image/jpeg", "image/webp", "image/gif")
+            for item in attachments:
+                if not isinstance(item, dict) or item.keys() != {"type", "mimeType", "fileName", "content"}:
+                    raise APIError("INVALID_ARGUMENT", "Invalid attachment fields")
+                kind, mime, name, content = (item[key] for key in ("type", "mimeType", "fileName", "content"))
+                if (not isinstance(name, str) or not 1 <= len(name) <= 128 or name in (".", "..")
+                        or any(char in name for char in "/\\:") or not name.isprintable()
+                        or not isinstance(content, str) or not content
+                        or not (kind == "image" and mime in image_types
+                                or kind == "file" and mime in ("application/pdf", "text/plain"))):
+                    raise APIError("INVALID_ARGUMENT", "Invalid inline attachment")
+                total += len(content)
+                if total > MAX_INLINE_ATTACHMENT_BASE64:
+                    raise APIError("REQUEST_TOO_LARGE", "Inline attachments exceed the Chat budget")
+                try:
+                    decoded_bytes = len(base64.b64decode(content, validate=True))
+                    if not decoded_bytes:
+                        raise ValueError("empty attachment")
+                except ValueError as exc:
+                    raise APIError("INVALID_ARGUMENT", "Attachment content must be base64") from exc
+                if kind == "image" and decoded_bytes > MAX_INLINE_IMAGE_BYTES:
+                    raise APIError("REQUEST_TOO_LARGE", "An image exceeds OpenClaw's 6 MiB limit")
         if "omitThinking" in params and type(params["omitThinking"]) is not bool:
             raise APIError("INVALID_ARGUMENT", "omitThinking must be a boolean")
         if "options" in params and not isinstance(params["options"], dict):
@@ -163,6 +259,7 @@ class Service:
         started = time.monotonic()
         request_id = request.get("requestId") if isinstance(request, dict) else None
         method = None
+        release_attachment_slot = False
         try:
             method, params = self.validate(request)
             lease = self.authorize(lease, method, params)
@@ -171,6 +268,10 @@ class Service:
             if METHODS[method].write:
                 if len(self.tasks) >= 16:
                     raise APIError("BUSY", "Command capacity reached", retryable=True)
+                if method == "runs.create" and sum(len(item["content"]) for item in params.get("attachments", ())) > 1024 * 1024:
+                    release_attachment_slot = LARGE_ATTACHMENT_OPERATIONS.acquire(blocking=False)
+                    if not release_attachment_slot:
+                        raise APIError("BUSY", "Large attachment capacity reached", retryable=True)
                 adapter = self.adapter(params["runtimeId"])
                 agent = adapter.resolve_scope(method, params) if METHODS[method].scope != "runtime" else None
                 thread = params.get("threadId")
@@ -182,6 +283,9 @@ class Service:
                     task = asyncio.create_task(self.execute(operation["operationId"], lease, method, params))
                     self.tasks.add(task)
                     task.add_done_callback(self.tasks.discard)
+                    if release_attachment_slot:
+                        task.add_done_callback(lambda _: LARGE_ATTACHMENT_OPERATIONS.release())
+                        release_attachment_slot = False
                 result = operation
             else:
                 result = await self.read(lease, method, params)
@@ -194,6 +298,8 @@ class Service:
         except Exception as exc:
             return self.error_response(lease, request_id, self.translate_error(exc))
         finally:
+            if release_attachment_slot:
+                LARGE_ATTACHMENT_OPERATIONS.release()
             LOG.info("rpc method=%s duration_ms=%.2f", method, (time.monotonic() - started) * 1000)
 
     def error_response(self, lease, identifier, error):
@@ -259,13 +365,20 @@ class Service:
                 value["authorized"] = "*" in lease.context["actions"] or action in lease.context["actions"]
                 if action in METHODS and METHODS[action].scope == "runtime" and "*" not in lease.context["agentIds"]:
                     value["authorized"] = False
+            binding = getattr(adapter, "host_binding", None)
+            if binding and binding.instance_chat and "*" in lease.context["agentIds"] and result["methods"]["runs.create"]["authorized"]:
+                result["attachments"] = {"mode": "inline", "maxCount": MAX_INLINE_ATTACHMENT_COUNT,
+                    "maxBase64Bytes": MAX_INLINE_ATTACHMENT_BASE64, "maxImageBytes": MAX_INLINE_IMAGE_BYTES,
+                    "maxRequestBytes": MAX_ATTACHMENT_REQUEST,
+                    "mimeTypes": ["image/png", "image/jpeg", "image/webp", "image/gif", "application/pdf", "text/plain"]}
             return result
         if method == "runtimes.get":
             return self.runtime_info(adapter)
         if method == "operations.get":
             return self.store.operation(params["operationId"], lease.context, params["runtimeId"])
         if method in ("operations.list", "operations.lookup"):
-            return {"items": self.store.operations(lease.context, params["runtimeId"], params.get("clientRequestId"), agent_ids=lease.context["agentIds"])}
+            return {"items": self.store.operations(lease.context, params["runtimeId"], params.get("clientRequestId"),
+                agent_ids=lease.context["agentIds"], thread_id=params.get("threadId"), method=params.get("operationMethod"))}
         if method == "runs.lookup":
             operations = self.store.operations(lease.context, params["runtimeId"], params["clientRequestId"],
                 agent_ids=lease.context["agentIds"], thread_id=params["threadId"], method="runs.create")
@@ -274,7 +387,7 @@ class Service:
             result["items"] = [run for run in result["items"] if run.get("operationId") in permitted]
             return {**result, "operations": operations, "acceptance": "unknown" if any(op["status"] == "unknown" for op in operations)
                     else "accepted" if operations else "not_accepted"}
-        if method.startswith("events."):
+        if method.startswith("events.") or method in ("sessions.subscribe", "sessions.unsubscribe"):
             raise APIError("TRANSPORT_REQUIRED", "Subscriptions require WebSocket transport")
         result = await adapter.invoke(method, params)
         if method == "agents.list" and "*" not in lease.context["agentIds"]:

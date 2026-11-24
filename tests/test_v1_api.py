@@ -196,9 +196,11 @@ class APITest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(params["minProtocol"], 4)
                 self.assertEqual(params["device"]["nonce"], "fixture-nonce")
                 self.assertEqual(params["auth"]["token"], "fixture-native-token")
-                result = {"protocol": 4, "server": {"version": "2026.7.1-2"}, "features": {"methods": ["config.get", "chat.send", "chat.abort", "sessions.create", "sessions.reset", "sessions.patch", "sessions.delete"]}}
+                result = {"protocol": 4, "server": {"version": "2026.7.1-2"}, "features": {"methods": ["config.get", "chat.send", "chat.abort", "sessions.create", "sessions.reset", "sessions.patch", "sessions.delete", "sessions.describe", "sessions.list", "models.list"]}}
             if method == "config.get":
                 result = {"path": str(self.config)}
+            if method == "sessions.create":
+                result = {"key": f"agent:{params['agentId']}:dashboard:created-by-fixture"}
             if method == "chat.send":
                 if self.native_delay:
                     await self.native_delay.wait()
@@ -209,6 +211,29 @@ class APITest(unittest.IsolatedAsyncioTestCase):
                 index = json.loads(self.index_path.read_text())
                 index[self.key]["sessionId"] = "33333333-3333-4333-8333-333333333333"
                 self.index_path.write_text(json.dumps(index))
+            if method == "models.list":
+                self.assertEqual({"view": "configured"}, params)
+                result = {"models": [{"id": model, "provider": "fixture", "name": model}
+                                     for model in ("default", "alternate")]}
+            if method == "sessions.list":
+                result = {"sessions": [{"key": params["search"], "hasActiveRun": getattr(self, "model_busy", False)}]}
+            if method in ("sessions.describe", "sessions.patch") and (method == "sessions.describe" or "model" in params or "thinkingLevel" in params):
+                index = json.loads(self.index_path.read_text())
+                entry = index[params["key"]]
+                if method == "sessions.patch":
+                    for field, parameter in (("modelOverride", "model"), ("thinkingLevel", "thinkingLevel")):
+                        if parameter not in params:
+                            continue
+                        if params[parameter] is None:
+                            entry.pop(field, None)
+                        else:
+                            entry[field] = params[parameter].split("/", 1)[-1]
+                    self.index_path.write_text(json.dumps(index))
+                effective = {"modelProvider": "fixture", "model": entry.get("modelOverride", "default")}
+                if getattr(self, "thinking_supported", False):
+                    effective.update(thinkingDefault="low", thinkingLevels=[{"id": "low"}, {"id": "high", "label": "High"}])
+                result = ({"key": params["key"], "entry": entry, "resolved": effective} if method == "sessions.patch"
+                          else {"session": effective})
             await socket.send_json({"type": "res", "id": frame["id"], "ok": True, "payload": result})
         return socket
 
@@ -257,6 +282,123 @@ class APITest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([agent["agentId"] for agent in response["result"]["items"]], [other])
         response = await self.rpc("dola.models.refresh", {"clientRequestId": "key"}, lease=lease)
         self.assertEqual(response["error"]["code"], "FORBIDDEN")
+
+    async def test_thread_model_update_is_scoped_confirmed_and_recoverable(self):
+        extra_key = "agent:main:dashboard:other-model-thread"
+        index = json.loads(self.index_path.read_text())
+        index[extra_key] = {"sessionId": "44444444-4444-4444-8444-444444444444"}
+        self.index_path.write_text(json.dumps(index))
+        extra = self.adapter.register_thread(self.agent, extra_key)
+        original_config = self.config.read_bytes()
+
+        async def update(model, request_key):
+            response = await self.rpc("threads.models.update", {
+                "threadId": self.thread, "modelId": model, "clientRequestId": request_key})
+            self.assertTrue(response["ok"], response)
+            return await self.wait_operation(response["result"]["operationId"])
+
+        initial = (await self.rpc("threads.models.list", {"threadId": self.thread}))["result"]
+        self.assertEqual("fixture/default", initial["modelId"])
+        self.assertTrue(initial["usesDefault"])
+        self.assertEqual({"fixture/default", "fixture/alternate"}, {item["modelId"] for item in initial["items"]})
+        bad = await update("fixture/disallowed", "bad-model")
+        self.assertEqual(("failed", "INVALID_ARGUMENT"), (bad["status"], bad["error"]["code"]))
+        self.model_busy = True
+        busy = await update("fixture/alternate", "busy-model")
+        self.assertEqual(("failed", "THREAD_BUSY"), (busy["status"], busy["error"]["code"]))
+        self.assertFalse(any(call["method"] == "sessions.patch" for call in self.native_calls))
+        self.model_busy = False
+        changed = await update("fixture/alternate", "ok-model")
+        self.assertEqual("completed", changed["status"])
+        self.assertEqual("fixture/alternate", changed["result"]["modelId"])
+        self.assertEqual("fixture/default", (await self.rpc("threads.models.list", {"threadId": extra}))["result"]["modelId"])
+        self.assertEqual(original_config, self.config.read_bytes())
+        lookup = {"threadId": self.thread, "operationMethod": "threads.models.update", "clientRequestId": "ok-model"}
+        discovered = (await self.rpc("operations.lookup", lookup))["result"]["items"]
+        self.assertEqual([changed["operationId"]], [row["operationId"] for row in discovered])
+        self.assertEqual([], (await self.rpc("operations.lookup", {**lookup, "threadId": extra}))["result"]["items"])
+        cross = await self.rpc("threads.models.list", {"runtimeId": "other", "threadId": self.thread})
+        self.assertEqual("FORBIDDEN", cross["error"]["code"])
+        other_agent = self.adapter.agents()[1]["agentId"]
+        lease = self.service.auth.redeem(self.ticket(agent_ids=[other_agent], actions=["threads.models.update"]))
+        denied = await self.rpc("threads.models.update", {"threadId": self.thread, "modelId": None,
+            "clientRequestId": "wrong-agent-model"}, lease=lease)
+        self.assertEqual("FORBIDDEN", denied["error"]["code"])
+        restored = await update(None, "restore-model")
+        self.assertEqual(("completed", "fixture/default", True),
+                         (restored["status"], restored["result"]["modelId"], restored["result"]["usesDefault"]))
+        calls = [call["params"] for call in self.native_calls if call["method"] == "sessions.patch"]
+        self.assertEqual([{"key": self.key, "model": "fixture/alternate"}, {"key": self.key, "model": None}], calls)
+
+    async def test_create_operation_can_be_recovered_without_a_thread_id(self):
+        params = {"agentId": self.agent, "clientRequestId": "recover-create"}
+        accepted = await self.rpc("threads.create", params)
+        operation = await self.wait_operation(accepted["result"]["operationId"])
+        self.assertEqual("completed", operation["status"])
+        self.assertIsNone(operation["threadId"])
+        query = {"clientRequestId": params["clientRequestId"], "operationMethod": "threads.create"}
+        recovered = (await self.rpc("operations.lookup", query))["result"]["items"]
+        self.assertEqual([operation["operationId"]], [row["operationId"] for row in recovered])
+        self.assertTrue(recovered[0]["result"]["threadId"].startswith("thread_"))
+        stranger = self.service.auth.redeem(self.ticket(subject="other-principal"))
+        self.assertEqual([], (await self.rpc("operations.lookup", query, lease=stranger))["result"]["items"])
+        self.assertEqual(operation["operationId"], (await self.rpc("threads.create", params))["result"]["operationId"])
+        self.assertEqual(1, sum(call["method"] == "sessions.create" for call in self.native_calls))
+
+    async def test_thread_thinking_uses_native_model_options_and_never_changes_other_threads(self):
+        self.thinking_supported = True
+        other_key = "agent:main:dashboard:other-thinking"
+        index = json.loads(self.index_path.read_text())
+        index[other_key] = {}
+        self.index_path.write_text(json.dumps(index))
+        other = self.adapter.register_thread(self.agent, other_key)
+
+        async def update(value, request):
+            response = await self.rpc("threads.thinking.update", {"threadId": self.thread,
+                "thinkingLevel": value, "clientRequestId": request})
+            self.assertTrue(response["ok"], response)
+            return await self.wait_operation(response["result"]["operationId"])
+
+        profile = (await self.rpc("threads.thinking.get", {"threadId": self.thread}))["result"]
+        self.assertEqual(("low", None, True), (profile["thinkingDefault"], profile["thinkingLevel"], profile["supported"]))
+        self.assertEqual("INVALID_ARGUMENT", (await update("unsupported", "bad-thinking"))["error"]["code"])
+        self.model_busy = True
+        self.assertEqual("THREAD_BUSY", (await update("high", "busy-thinking"))["error"]["code"])
+        self.model_busy = False
+        self.assertEqual("completed", (await update("high", "apply-thinking"))["status"])
+        self.assertEqual("high", (await self.rpc("threads.thinking.get", {"threadId": self.thread}))["result"]["thinkingLevel"])
+        self.assertIsNone((await self.rpc("threads.thinking.get", {"threadId": other}))["result"]["thinkingLevel"])
+        self.assertEqual("completed", (await update(None, "restore-thinking"))["status"])
+        self.thinking_supported = False
+        self.assertEqual("UNSUPPORTED", (await update("low", "unknown-thinking-profile"))["error"]["code"])
+        self.assertEqual("FORBIDDEN", (await self.rpc("threads.thinking.get", {"threadId": self.thread, "runtimeId": "other"}))["error"]["code"])
+        self.assertEqual([{"key": self.key, "thinkingLevel": "high"}, {"key": self.key, "thinkingLevel": None}],
+                         [call["params"] for call in self.native_calls if call["method"] == "sessions.patch"])
+
+    async def test_chat_socket_can_rename_only_threads_of_its_agent(self):
+        from agent_manage.platform_exchange import _ACTIONS
+
+        async def rename(agent_id, title, request_id):
+            async with self.client.ws_connect("/v1/ws") as ws:
+                await ws.send_json({"type": "auth", "ticket": self.ticket(
+                    agent_ids=[agent_id], actions=sorted(_ACTIONS))})
+                self.assertEqual("hello", (await ws.receive_json())["type"])
+                await ws.send_json({"type": "request", "requestId": request_id, "method": "threads.update",
+                    "params": {"runtimeId": "one", "threadId": self.thread, "title": title,
+                               "clientRequestId": request_id}})
+                return await ws.receive_json()
+
+        other = self.adapter.agents()[1]["agentId"]
+        denied = await rename(other, "Out of scope", "rename-denied")
+        self.assertEqual("FORBIDDEN", denied["error"]["code"])
+        self.assertFalse(any(call["method"] == "sessions.patch" for call in self.native_calls))
+
+        accepted = await rename(self.agent, "New title", "rename-allowed")
+        self.assertTrue(accepted["ok"], accepted)
+        operation = await self.wait_operation(accepted["result"]["operationId"])
+        self.assertEqual("completed", operation["status"], operation)
+        calls = [call["params"] for call in self.native_calls if call["method"] == "sessions.patch"]
+        self.assertEqual([{"key": self.key, "label": "New title"}], calls)
 
     async def test_idempotent_send_native_stream_and_cancel(self):
         ws = await self.client.ws_connect("/v1/ws")

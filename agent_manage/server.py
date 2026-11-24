@@ -13,8 +13,9 @@ from pathlib import Path
 
 from aiohttp import web, WSMsgType
 
+from . import __version__
 from .core.errors import APIError
-from .core.service import Service
+from .core.service import MAX_ATTACHMENT_REQUEST, Service
 from .core.store import canonical
 from .adapters.registry import create_runtime_adapter
 
@@ -38,7 +39,7 @@ def build_service(config):
     return service
 
 
-def create_app(service):
+def create_app(service, platform_pool=None, platform_release=None):
     http_slots, media_slots, websocket_slots = asyncio.Semaphore(8), asyncio.Semaphore(4), asyncio.Semaphore(64)
 
     @asynccontextmanager
@@ -80,6 +81,23 @@ def create_app(service):
         ticket = service.auth.issue_delegated_ticket(await request.json())
         return web.json_response({"ok": True, "ticket": ticket})
 
+    async def resolve_agent(request):
+        async with admitted(http_slots):
+            body = await request.json()
+            if not isinstance(body, dict) or set(body) != {"runtimeId", "agentIdentify"} or any(
+                    not isinstance(body[key], str) or not body[key] for key in body):
+                raise APIError("INVALID_ARGUMENT", "runtimeId and agentIdentify are required")
+            adapter = service.adapter(body["runtimeId"])
+            resolver = getattr(adapter, "resolve_agent", None)
+            if resolver is None:
+                raise APIError("UNSUPPORTED", "Runtime does not expose trusted Agent bindings")
+            identifier = await service.read_workers(resolver, body["agentIdentify"])
+            row = service.store.get(identifier, kind="agent", runtime=adapter.runtime_id)
+            return web.json_response({"ok": True, "result": {"runtimeId": adapter.runtime_id,
+                "agentIdentify": body["agentIdentify"], "agentId": identifier,
+                "bindingId": adapter.host_binding.binding_id,
+                "installationId": row["data"]["installationId"]}})
+
     async def redeem(request):
         body = await request.json()
         lease = service.auth.redeem(body["ticket"])
@@ -103,10 +121,31 @@ def create_app(service):
         async with admitted(websocket_slots):
             return await websocket_session(request)
 
-    async def websocket_session(request):
+    async def platform_websocket(request):
+        async with admitted(websocket_slots):
+            return await websocket_session(request, platform=True)
+
+    async def platform_readiness(request):
+        async with admitted(http_slots):
+            offer = await request.json()
+            if (not isinstance(offer, dict) or set(offer) != {"runtimeId", "bindingId"}
+                    or not platform_pool.admits(offer["runtimeId"], offer["bindingId"])):
+                return web.Response(status=404)
+            return web.Response(status=204)
+
+    async def platform_release_status(request):
+        async with admitted(http_slots):
+            offer = await request.json()
+            if (not isinstance(offer, dict) or set(offer) != {"runtimeId", "bindingId"}
+                    or not platform_pool.admits(offer["runtimeId"], offer["bindingId"])):
+                return web.Response(status=404)
+            return web.json_response(platform_release, headers={"Cache-Control": "no-store"})
+
+    async def websocket_session(request, service=service, *, platform=False):
         if request.query:
             raise APIError("INVALID_ARGUMENT", "WebSocket credentials belong in the first frame, not the URL")
-        ws = web.WebSocketResponse(heartbeat=20, max_msg_size=MAX_REQUEST, compress=False)
+        ws = web.WebSocketResponse(heartbeat=20, max_msg_size=MAX_ATTACHMENT_REQUEST + 1 if platform else MAX_REQUEST,
+                                   compress=False)
         await ws.prepare(request)
         lease = None
         subscriptions = set()
@@ -115,6 +154,14 @@ def create_app(service):
         generation = 0
         in_flight = set()
         send_lock = asyncio.Lock()
+        sidebar_template = None
+        sidebar_installations = ()
+
+        async def receive_handshake():
+            message = await asyncio.wait_for(ws.receive(), 10)
+            if message.type != WSMsgType.TEXT or len(message.data.encode()) > MAX_REQUEST:
+                raise APIError("INVALID_ARGUMENT", "Chat handshake exceeds the normal frame budget")
+            return json.loads(message.data)
 
         async def send(value, expected_generation=None, authorization=None):
             data = canonical(value)
@@ -136,7 +183,10 @@ def create_app(service):
         def listen(event):
             nonlocal queued_bytes
             scope = (event["runtimeId"], event["threadId"])
-            if not (scope in subscriptions or event["threadId"] is None and any(item[0] == event["runtimeId"] for item in subscriptions)):
+            if event["type"] == "sessions.changed":
+                if (event["runtimeId"], None) not in subscriptions:
+                    return
+            elif not (scope in subscriptions or event["threadId"] is None and any(item[0] == event["runtimeId"] for item in subscriptions)):
                 return
             size = len(canonical(event).encode())
             if queue.full() or queued_bytes + size > 1024 * 1024:
@@ -159,7 +209,11 @@ def create_app(service):
                 if item_generation != generation:
                     continue
                 current = service.auth.authenticate(lease.token)
-                if event.get("threadId"):
+                if event["type"] == "sessions.changed":
+                    if (event["runtimeId"], None) not in subscriptions:
+                        continue
+                    service.authorize(current, "sessions.subscribe", {"runtimeId": event["runtimeId"]})
+                elif event.get("threadId"):
                     service.authorize(current, "events.subscribe", {"runtimeId": event["runtimeId"], "threadId": event["threadId"]})
                 await send({**event, "authContext": current.public()}, item_generation, current)
 
@@ -168,7 +222,7 @@ def create_app(service):
                 method, params = service.validate(frame)
                 service.authorize(captured_lease, method, params)
                 scope = (params.get("runtimeId"), params.get("threadId"))
-                if method == "events.subscribe":
+                if method in ("events.subscribe", "sessions.subscribe"):
                     if len(subscriptions) >= 32:
                         raise APIError("BUSY", "Subscription limit reached")
                     result = await service.adapter(scope[0]).invoke(method, params)
@@ -176,11 +230,27 @@ def create_app(service):
                     if captured_generation == generation:
                         subscriptions.add(scope)
                     response = {"requestId": frame["requestId"], "ok": True, "result": result, "authContext": captured_lease.public()}
-                elif method == "events.unsubscribe":
+                elif method in ("events.unsubscribe", "sessions.unsubscribe"):
                     subscriptions.discard(scope)
                     response = {"requestId": frame["requestId"], "ok": True, "result": {"unsubscribed": True}, "authContext": captured_lease.public()}
                 else:
                     response = await service.dispatch(captured_lease, frame)
+                    if method == "chat.sidebar" and sidebar_template and response.get("ok"):
+                        agent_id, template_identify = sidebar_template
+                        for row in response["result"]["items"]:
+                            if row["agentId"] == agent_id:
+                                row["templateIdentify"] = template_identify
+                                break
+                    if method == "chat.sidebar" and sidebar_installations and response.get("ok"):
+                        adapter = service.adapter(params["runtimeId"])
+                        agents = await adapter.workers(adapter.agents)
+                        targets = {native: platform for native, platform, _ in sidebar_installations}
+                        resolved = {agent["agentId"]: targets.get(agent["extensions"]["openclaw"]["agentId"])
+                                    for agent in agents}
+                        for row in response["result"]["items"]:
+                            if platform_identify := resolved.get(row["agentId"]):
+                                row["platformAgentIdentify"] = platform_identify
+                                row["canRefresh"] = True
                 # No old-lease response may cross an auth.refresh boundary.
                 if captured_generation == generation:
                     await send({"type": "response", **response}, captured_generation, captured_lease if response.get("ok") else None)
@@ -190,22 +260,45 @@ def create_app(service):
 
         pump_task = None
         try:
-            frame = await asyncio.wait_for(ws.receive_json(), 10)
+            hello_fields = {}
+            if platform:
+                from .platform_exchange import request_platform_grant
+                offer = await receive_handshake()
+                if (not isinstance(offer, dict) or set(offer) != {"type", "runtimeId", "bindingId"}
+                        or offer["type"] != "platform.bind" or not platform_pool.admits(offer["runtimeId"], offer["bindingId"])):
+                    raise APIError("FORBIDDEN", "The Host offer does not match this Manager sandbox")
+            frame = await receive_handshake()
             if not isinstance(frame, dict) or frame.get("type") != "auth":
                 raise APIError("UNAUTHENTICATED", "The first WebSocket frame must be auth")
-            lease = service.auth.redeem(frame.get("ticket"))
+            if platform:
+                grant = await request_platform_grant(ws, offer["runtimeId"], offer["bindingId"], frame)
+                service, lease, agent_id = await platform_pool.open(grant)
+                hello_fields["platformAgentId"] = agent_id
+                if grant.template_identify:
+                    sidebar_template = (agent_id, grant.template_identify)
+                sidebar_installations = grant.attached_installations
+            else:
+                lease = service.auth.redeem(frame.get("ticket"))
             await send({"type": "hello", "apiVersion": "1.0", "epoch": service.epoch,
-                        "eventReplay": False, "authContext": lease.public(), "leaseToken": lease.token})
+                        "eventReplay": False, "authContext": lease.public(), "leaseToken": lease.token, **hello_fields})
             service.listeners.add(listen)
             pump_task = asyncio.create_task(pump())
             pump_task.add_done_callback(lambda task: asyncio.create_task(ws.close(code=4001)) if not task.cancelled() and task.exception() else None)
             async for message in ws:
                 if message.type != WSMsgType.TEXT:
                     break
+                large = platform and (len(message.data) > MAX_REQUEST or len(message.data.encode()) > MAX_REQUEST)
                 frame = json.loads(message.data)
                 if not isinstance(frame, dict):
                     raise APIError("INVALID_ARGUMENT", "Frame must be an object")
+                if large:
+                    params = frame.get("params")
+                    if (not grant.instance_chat or frame.get("type") != "request" or frame.get("method") != "runs.create"
+                            or not isinstance(params, dict) or not params.get("attachments")):
+                        raise APIError("REQUEST_TOO_LARGE", "Only instance Chat attachment sends may exceed the normal frame budget")
                 if frame.get("type") == "auth.refresh":
+                    if platform:
+                        raise APIError("UNAUTHENTICATED", "Reconnect with a new platform ticket")
                     new_lease = service.auth.redeem(frame.get("ticket"))
                     if any(new_lease.context.get(key) != lease.context.get(key) for key in ("issuer", "subject", "tenantId", "audience")):
                         raise APIError("FORBIDDEN", "Refresh cannot change the connection principal")
@@ -303,12 +396,20 @@ def create_app(service):
         await service.start()
 
     async def cleanup(app):
+        if platform_pool is not None:
+            await platform_pool.close()
         await service.close()
 
     app.router.add_post("/v1/auth/tickets", issue_ticket)
+    app.router.add_post("/v1/agents/resolve", resolve_agent)
     app.router.add_post("/v1/auth/redeem", redeem)
     app.router.add_post("/v1/rpc", rpc)
     app.router.add_get("/v1/ws", websocket)
+    if platform_pool is not None:
+        app.router.add_get("/v1/platform/ws", platform_websocket)
+        app.router.add_post("/v1/platform/readiness", platform_readiness)
+        if platform_release is not None:
+            app.router.add_post("/v1/platform/release", platform_release_status)
     app.router.add_get("/v1/resources/{identifier}", resource)
     app.on_startup.append(startup)
     app.on_cleanup.append(cleanup)
@@ -322,7 +423,18 @@ def main():
     config = json.loads(Path(args.config).read_text())
     service = build_service(config)
     socket_path = service.store.path.with_name("manager.sock")
-    web.run_app(create_app(service), path=str(socket_path), access_log=None)
+    platform_pool = None
+    platform_release = None
+    if "platformSandbox" in config:
+        from .platform_runtime import PlatformRuntimePool
+        platform_pool = PlatformRuntimePool(service.store.path.parent, service.auth.audience, config["platformSandbox"])
+        if "platformListenSocket" in config:
+            if config["platformListenSocket"] != "/manager-export/manager.sock" or not platform_pool.gateway_socket:
+                raise ValueError("An exported platform socket requires the private native relay")
+            socket_path = Path(config["platformListenSocket"])
+            # Resolve once, so a later update of "current" cannot relabel this process.
+            platform_release = {"version": __version__, "sourceRoot": str(Path(__file__).resolve().parents[1])}
+    web.run_app(create_app(service, platform_pool, platform_release), path=str(socket_path), access_log=None)
 
 
 if __name__ == "__main__":
