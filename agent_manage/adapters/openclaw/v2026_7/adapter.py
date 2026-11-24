@@ -388,6 +388,7 @@ class OpenClawAdapter(RuntimeAdapter):
             raise APIError("FORBIDDEN", "Segment belongs to another thread")
         payload = {"root": str(self.context.state_dir), "config": self.config(), "sessionKey": self.native_key(thread),
                    "sessionId": segment["data"]["sessionId"], "action": action, "includeSnapshot": True,
+                   "includeMessageStatistics": action in ("history", "message"),
                    "maxTranscriptBytes": 256 * 1024 * 1024, "maxRecordBytes": 16 * 1024 * 1024, "maxRecords": 20000}
         if self.host_binding:
             payload["_nativePathResolver"] = self.host_binding.local_path
@@ -408,6 +409,7 @@ class OpenClawAdapter(RuntimeAdapter):
             identity = [params["threadId"], params["segmentId"], message["id"], reference.get("mediaId") or reference, data["role"]]
             return self.store.object("resource", self.runtime_id, canonical(identity), data)
         dto = message_dto(message, thread_id=params["threadId"], segment_id=params["segmentId"], projection=projection, register_resource=register)
+        dto["statistics"] = message.get("statistics")
         if message.get("fullMessageRef"):
             dto["fullMessageRef"] = {"method": "messages.get", "params": {"runtimeId": self.runtime_id,
                 "threadId": params["threadId"], "segmentId": params["segmentId"], "messageId": message["id"],

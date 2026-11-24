@@ -560,6 +560,8 @@ class SegmentReader:
     @timed("messageBuildMs")
     def materialize(self, row, *, view="full", omit_thinking=False):
         raw = self.raw(row)
+        with_statistics = self.input.get("includeMessageStatistics")
+        statistics = self.message_statistics(row, raw) if with_statistics else None
         message = raw["message"] if isinstance(raw.get("message"), dict) else ({"role": "system", "content": raw.get("content"), "customType": raw.get("customType")} if raw.get("type") == "custom_message" else {"role": "system", "content": [{"type": "text", "text": "Compaction"}], "compaction": raw})
         message.update(id=self.identifier(row), timestamp=millis(message.get("timestamp")) if millis(message.get("timestamp")) is not None else row["timestamp"])
         message["__openclaw"] = {**message.get("__openclaw", {}), "id": self.identifier(row), **({"kind": raw.get("type")} if raw.get("type") != "message" else {})}
@@ -611,7 +613,10 @@ class SegmentReader:
         # Build references against original field positions before removing tool
         # details. Otherwise an image following a text result would point at the
         # wrong raw block after compaction.
-        return compact_tools(message) if view == "compact" else message
+        message = compact_tools(message) if view == "compact" else message
+        if with_statistics:
+            message["statistics"] = statistics
+        return message
 
     def locate(self, identifier):
         if identifier not in self.by_id:
@@ -619,7 +624,9 @@ class SegmentReader:
         return self.by_id[identifier]
 
     def usage_log(self, row):
-        raw = self.raw(row)
+        return self.usage_record(row, self.raw(row))
+
+    def usage_record(self, row, raw):
         message = raw["message"]
         result = {"messageId": self.identifier(row), "role": row["role"], "timestamp": row["timestamp"]}
         for field in ("model", "provider", "runId", "toolCallId"):
@@ -673,6 +680,35 @@ class SegmentReader:
             result["mediaGeneration"] = media
         return result
 
+    def message_statistics(self, row, raw):
+        if row["role"] not in ("assistant", "tool", "toolResult"):
+            return None
+        record = self.usage_record(row, raw)
+
+        def label(value):
+            return (isinstance(value, str) and re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_./:-]{0,255}", value)
+                    and "://" not in value and ".." not in value.split("/"))
+
+        if row["role"] != "assistant":
+            if "mediaGeneration" not in record or not label(record.get("toolCallId")):
+                return None
+            media = {key: value for key, value in record["mediaGeneration"].items()
+                     if key not in ("provider", "model") or label(value)}
+            return {"toolCallId": record["toolCallId"], "mediaGeneration": media}
+        usage = dict(record.get("usage", {}))
+        if "cost" in record:
+            usage["cost"] = {"total": record["cost"]}
+        if not usage or record.get("provider") == "openclaw":
+            return None
+        statistics = {key: record[key] for key in ("provider", "model") if label(record.get(key))}
+        if "durationMs" in record:
+            statistics["durationMs"] = record["durationMs"]
+        message = raw.get("message")
+        response_id = message.get("responseId") if isinstance(message, dict) else None
+        if isinstance(response_id, str) and re.fullmatch(r"[a-zA-Z0-9_-]{1,256}", response_id):
+            statistics["responseId"] = response_id
+        return {**statistics, "usage": usage}
+
     @timed("chunkEncodeMs")
     def chunk(self, data, offset, reference, *, total_size=None, **extra):
         total = len(data) if total_size is None else total_size
@@ -688,9 +724,12 @@ class SegmentReader:
         elif "view" in extra:
             values["view"] = extra["view"]
             values["omitThinking"] = extra.get("omitThinking", False)
-            values["format"] = 2
+            values["format"] = self.message_chunk_format()
         return {**extra, "encoding": "base64", "data": base64.b64encode(part).decode(), "offset": offset,
                 "totalBytes": total, "nextCursor": self.ref_token("chunk", **values) if end < total else None}
+
+    def message_chunk_format(self):
+        return 3 if self.input.get("includeMessageStatistics") else 2
 
     def run(self):
         entry = self.entry()
@@ -712,7 +751,7 @@ class SegmentReader:
                 identifier = self.input["messageId"]
                 if reference and (reference.get("messageId") != identifier or cursor and reference.get("action") != "message"):
                     fail("CURSOR_EXPIRED", "Message reference mismatch")
-                if cursor and reference.get("format") != 2:
+                if cursor and reference.get("format") != self.message_chunk_format():
                     fail("CURSOR_EXPIRED", "Message output format changed; restart the message read")
                 row = self.locate(identifier)
                 view = reference.get("view", "full") if reference else "full"
@@ -781,7 +820,8 @@ class SegmentReader:
             while (len(messages) < self.input["limit"] or (until_user and not reached_user)) and (stop < len(self.rows) if forward else start > 0):
                 row = self.rows[stop if forward else start - 1]
                 message = self.materialize(row, view=view, omit_thinking=omit_thinking)
-                if (omit_thinking or view == "compact") and not has_display_content(message):
+                has_statistics = self.input.get("includeMessageStatistics") and message.get("statistics")
+                if (omit_thinking or view == "compact") and not has_statistics and not has_display_content(message):
                     # Advance the physical boundary even when filtering removes a row.
                     # The page limit counts returned messages, not scanned records.
                     if forward:
@@ -791,7 +831,9 @@ class SegmentReader:
                     continue
                 count = len(dumps(message, pretty=True).encode())
                 if count > PAGE_BYTES / 2:
+                    statistics = {"statistics": message["statistics"]} if self.input.get("includeMessageStatistics") else {}
                     message = {"id": self.identifier(row), "role": row["role"] or "system", "timestamp": row["timestamp"], "content": [],
+                               **statistics,
                                "__openclaw": {"id": self.identifier(row), "truncated": True, "reason": "full_message_reference"}, "fullMessageRef": self.message_ref(row, view, omit_thinking)}
                     count = len(dumps(message, pretty=True).encode())
                 if messages and size + count > HISTORY_PAGE_BYTES:
