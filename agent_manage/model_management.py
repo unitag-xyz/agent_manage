@@ -77,9 +77,8 @@ class ModelManagementMixin:
     def get_supported_models(self) -> Dict[str, object]:
         config = self._load_config()
         if self._codex_models_active():
-            state = self._codex_read_state()
             models = [{"id": row["id"], "provider": "openai", "model_ref": "openai/" + row["id"],
-                       "definition": row} for row in state["models"]]
+                       "definition": row} for row in self._codex_configured_chat_models(config)]
             return {"ok": True, "provider": "openai", "providers": ["openai"],
                     "current_model": self._configured_default_model_from_config(config),
                     "supported_model_refs": [row["model_ref"] for row in models], "models": models,

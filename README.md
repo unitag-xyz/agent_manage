@@ -202,11 +202,12 @@ python3 scripts/agentctl.py --dry-run add-skill --common --skill-dir /path/to/we
 
 ## refresh-agent
 
-平台“更新到新版”从授权发布记录取得目标版本与 ZIP 地址，向 `agent.refresh-agent` 的
-`parameters` 传 `agent`、`template-version` 和 `template-zip-url`。缓存 ZIP 的模板版本与目标相同时直接复用，否则下载并核对包内版本。
-可选 `template-zip-sha256` 仅用于验证本次下载。结果里的 `template.archive_cache_hit` 表示是否复用缓存。
-预览只下载到临时目录；实际刷新同步成功后保留新版 ZIP，再运行 workspace 的安装脚本。
-仅传 Agent 名时沿用主机已有模板。
+平台可以在 `agent.refresh-agent` 中一并下发 `template-version`、`template-zip-url` 和可选的 `template-zip-sha256`。主机直接使用这些发布参数比对缓存。
+只传 `--agent` 时，主机按模板标识查询平台详情的 `content.version`。详情不可用时沿用本地模板，并返回 `template.release_lookup: unavailable`。
+同版复用缓存；版本不同或缓存缺失时，从详情的 `initFileUrl` 或平台派发的 `--template-zip-url` 下载。
+Codex 登录后，模板版本仍按登录前的 Dola 环境查询。若查到新版但缺少 ZIP 下载地址，停止模板更新和安装。Codex 模型目录同步成功时，结果返回 `partial: true` 和 `template.error.code: TEMPLATE_ZIP_URL_MISSING`，模型目录正常保存。仅刷模板时，命令直接返回错误。显式指定本地目录或 ZIP 可离线刷新。
+传 ZIP 地址时版本仍可自动查询。`--template-version` 可与 URL 配合指定目标版本。
+可选 SHA-256 用于验证下载，`template.archive_cache_hit` 表示是否复用缓存。
 
 刷新已存在的 agent，默认同时刷新模型目录和模板文件。模型目录和公共 Skill
 作用于当前整个 OpenClaw 环境；私有模板文件作用于指定 agent 的实际 workspace。
@@ -343,8 +344,11 @@ Server API 需要允许并转发上述三个命令；本仓库不包含网页或
   不重新授权、不替换最初的模型备份。`result.media` 返回绘图切换与音频保留原因。
   `image_generate action=list` 还会展示 OpenClaw 插件的内置能力目录，这与配置中的模型列表独立；
   清理模型配置不会卸载插件或禁止工具显式覆盖模型。绘图应省略 `model` 使用默认值，或指定 `openai/gpt-image-2`。
-- `models` 返回 Codex 聊天模型；`update-model` 和 `refresh-agent` 的模型部分
-  返回 `skipped: true, reason: codex_login_active`，模板刷新继续。
+- `refresh-agent` 默认及 `--models-only` 在 Codex 已登录时，通过原生 OAuth 获取 Codex 聊天模型目录。
+  刷新保留当前模型选择，仍在配置中引用但未出现在新目录的模型会列在 `models.retained_model_refs`。
+  目录不可用或为空时保留现有配置并报告 `models.skipped`，模板刷新继续。
+  `models` 读取当前配置目录；`--template-only` 和 `--dry-run` 不查询 Codex 目录。
+  `update-model` 仍跳过 Dola 目录更新并返回 `reason: codex_login_active`。
   `configure-instance` 等重新配置 provider 的操作需要先登出。
 - `codex-logout` 清除当前环境的全部 OpenAI/Codex OAuth（包括 agent 独立账号），
   保留媒体 API key，恢复原模型及认证顺序。取消任务后，后台迟到的授权结果不能重新写入。

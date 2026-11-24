@@ -118,10 +118,14 @@ class RefreshManagementTest(unittest.TestCase):
 
         old, new = package("0.1.2"), package("0.1.3")
         cache.write_bytes(old)
-        self.manager.refresh_agent(RefreshAgentRequest("demo", template_only=True))
+        self.manager.refresh_agent(RefreshAgentRequest("demo", template_only=True, agent_zip=str(cache)))
         url = "https://cdn.example.test/demo.zip"
-        req = RefreshAgentRequest("demo", template_only=True, template_zip_url=url,
-                                  template_version="0.1.3")
+        req = RefreshAgentRequest("demo", template_only=True)
+        release = {"version": "0.1.3", "initFileUrl": url}
+        with patch.object(self.manager, "_latest_template_release", return_value={"version": "0.1.3"}):
+            with self.assertRaisesRegex(ValueError, "published 0.1.3"):
+                self.manager.refresh_agent(req)
+        patch.object(self.manager, "_latest_template_release", return_value=release).start()
         with patch("agent_manage.template_download.build_opener") as opener:
             def respond(*args, **kwargs):
                 response = MagicMock()
@@ -151,6 +155,19 @@ class RefreshManagementTest(unittest.TestCase):
         self.assertEqual(result["template"]["version_after"], "0.1.3")
         self.assertEqual(cache.read_bytes(), new)
         self.assertEqual((self.workspace / "deployed-version").read_text().strip(), "0.1.3")
+
+    def test_default_refresh_uses_local_template_when_release_lookup_is_unavailable(self):
+        self.manager.template_root.mkdir()
+        shutil.copytree(self.source, self.manager.template_root / "demo")
+        with patch("agent_manage.refresh_management.urlopen", side_effect=TimeoutError("unavailable")):
+            result = self.manager.refresh_agent(RefreshAgentRequest("demo"))
+            self.assertEqual(result["template"]["version_after"], "1.0.0")
+            self.assertEqual(result["template"]["release_lookup"], "unavailable")
+            self.assertIn("dola/new", result["models"]["supported_model_refs"])
+            self.assertEqual((self.workspace / "SOUL.md").read_text(), "version one\n")
+            with self.assertRaisesRegex(ValueError, "No valid published version"):
+                self.manager.refresh_agent(RefreshAgentRequest(
+                    "demo", template_only=True, template_zip_url="https://cdn.example.test/demo.zip"))
 
     def test_refresh_installs_synced_website_and_reruns_unchanged_script(self):
         self.write_source("website.txt", "first")
