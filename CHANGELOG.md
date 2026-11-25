@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Preserve the recorded Codex billing source in Chat2 assistant history statistics without inferring it from model names or the current login.
+
 - Add an explicit, static shared-Host OpenClaw text Chat registration with separate native/local paths, mounted-history translation, generation-scoped device keys, configuration snapshot verification and installed-Agent identities. Keep the original CLI/local runtime path unchanged.
 - Add private Unix-socket business-Agent resolution for trusted Host ticket scoping; Host-bound management writes and media remain unsupported. Real two-container acceptance is still required. See [shared Host registration](docs/v1-shared-host.md).
 

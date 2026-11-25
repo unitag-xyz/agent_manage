@@ -704,6 +704,10 @@ class SegmentReader:
         if "durationMs" in record:
             statistics["durationMs"] = record["durationMs"]
         message = raw.get("message")
+        if isinstance(message, dict) and message.get("provider") in ("openai", "openai-codex") and message.get("api") in (
+            "openai-chatgpt-responses", "openai-codex-responses"
+        ):
+            statistics["billingSource"] = "codex"
         response_id = message.get("responseId") if isinstance(message, dict) else None
         if isinstance(response_id, str) and re.fullmatch(r"[a-zA-Z0-9_-]{1,256}", response_id):
             statistics["responseId"] = response_id

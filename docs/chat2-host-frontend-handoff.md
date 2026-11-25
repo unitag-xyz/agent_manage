@@ -84,6 +84,12 @@ segment and message ID.
 ```
 
 IDs, labels, duration, cost and counters are optional when not recorded.
+Assistant statistics may include `billingSource: "codex"` when the original
+OpenClaw assistant message records the ChatGPT/Codex Responses transport
+(`openai-chatgpt-responses` or `openai-codex-responses`) with an OpenAI provider.
+Keep these calls in call and token totals, but omit them from API cost estimates
+and shared API costs. Missing source metadata stays unknown; neither model names
+nor the current login are used to classify historical calls.
 Zero is a recorded value. Input already excludes cached tokens. Tool result
 statistics use `{toolCallId,mediaGeneration:{kind,outputCount,provider?,model?,durationSeconds?,taskId?}}`.
 These fields do not contain tool arguments, internal paths or resource URLs.

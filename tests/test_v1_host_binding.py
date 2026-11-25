@@ -179,7 +179,7 @@ class HostBindingTest(unittest.IsolatedAsyncioTestCase):
                                             {"type": "image", "mimeType": "image/png", "data": "aGVsbG8="}]}}) + "\n"
                             + json.dumps({"type": "message", "id": "m2", "parentId": "m1", "durationMs": 90,
                                           "message": {"role": "assistant", "content": [{"type": "text", "text": "usage fixture"}],
-                                                      "model": "fixture", "provider": "sample",
+                                                      "model": "fixture", "provider": "openai", "api": "openai-chatgpt-responses",
                                                       "usage": {"input": 8, "output": 2, "cacheRead": 1, "totalTokens": 11}}}) + "\n")
                         attached_rows = (await rpc(first, "threads.list", agentId=attached["agentId"]))["result"]["items"]
                         thread_id = attached_rows[0]["threadId"]
@@ -200,7 +200,7 @@ class HostBindingTest(unittest.IsolatedAsyncioTestCase):
                         self.assertTrue(history["ok"], history)
                         self.assertIn("Attached private history fixture", json.dumps(history["result"]))
                         self.assertIsNone(history["result"]["items"][0]["statistics"])
-                        expected = {"model": "fixture", "provider": "sample", "durationMs": 90,
+                        expected = {"model": "fixture", "provider": "openai", "durationMs": 90, "billingSource": "codex",
                                     "usage": {"input": 8, "output": 2, "cacheRead": 1, "totalTokens": 11}}
                         self.assertEqual(expected, history["result"]["items"][1]["statistics"])
                         full = await rpc(first, "messages.get", threadId=thread_id, segmentId=segment_id, messageId="m2")
@@ -212,7 +212,7 @@ class HostBindingTest(unittest.IsolatedAsyncioTestCase):
                         index["agent:attached:session"]["usageFamilySessionIds"] = [archive]
                         index_path.write_text(json.dumps(index))
                         archive_rows = [
-                            {"id": "m2", "message": {"role": "assistant", "provider": "sample", "model": "older",
+                            {"id": "m2", "message": {"role": "assistant", "provider": "openai-codex", "api": "openai-codex-responses", "model": "older",
                                 "responseId": "resp_older", "durationMs": 0, "usage": {"input": 0, "cost": {"total": 0}},
                                 "content": [{"type": "thinking", "thinking": "do not display"}]}},
                             {"id": "large", "message": {"role": "assistant", "usage": {"output": 9},
@@ -220,6 +220,12 @@ class HostBindingTest(unittest.IsolatedAsyncioTestCase):
                             {"id": "image", "message": {"role": "toolResult", "toolCallId": "call1",
                                 "toolName": "image_generate", "details": {"count": 0, "provider": "/private/file",
                                 "task": {"taskId": "task1", "runId": "native-run"}, "paths": ["/private/file"]}}},
+                            {"id": "api-key", "message": {"role": "assistant", "provider": "openai", "api": "openai-responses",
+                                "model": "gpt-codex-named", "usage": {"input": 4}}},
+                            {"id": "unknown", "api": "openai-codex-responses", "message": {
+                                "role": "assistant", "provider": "openai", "model": "older", "usage": {"input": 2}}},
+                            {"id": "other-provider", "message": {"role": "assistant", "provider": "sample",
+                                "api": "openai-codex-responses", "usage": {"input": 3}}},
                             *({"id": f"later-{i}", "message": {"role": "user", "content": "later"}}
                               for i in range(220)),
                         ]
@@ -239,9 +245,10 @@ class HostBindingTest(unittest.IsolatedAsyncioTestCase):
                             if not cursor:
                                 break
                             page = await rpc(first, "messages.list", **args, cursor=cursor, limit=100)
-                        self.assertEqual(223, len(seen))
+                        self.assertEqual(226, len(seen))
                         self.assertEqual([], seen["m2"]["content"])
-                        self.assertEqual({"model": "older", "provider": "sample", "responseId": "resp_older",
+                        self.assertEqual({"model": "older", "provider": "openai-codex", "responseId": "resp_older",
+                                          "billingSource": "codex",
                                           "durationMs": 0, "usage": {"input": 0, "cost": {"total": 0}}},
                                          seen["m2"]["statistics"])
                         self.assertIsNone(seen["later-0"]["statistics"])
@@ -249,7 +256,9 @@ class HostBindingTest(unittest.IsolatedAsyncioTestCase):
                                          {"kind": "image", "outputCount": 0, "taskId": "task1"}},
                                          seen["image"]["statistics"])
                         self.assertEqual("reference", seen["large"]["completeness"])
-                        for identifier in ("large", "m2", "image"):
+                        for identifier in ("api-key", "unknown", "other-provider"):
+                            self.assertNotIn("billingSource", seen[identifier]["statistics"])
+                        for identifier in ("large", "m2", "image", "api-key", "unknown", "other-provider"):
                             ref = seen[identifier].get("fullMessageRef", {}).get("params", {}).get("ref")
                             full = await rpc(first, "messages.get", **args, messageId=identifier,
                                              **({"ref": ref} if ref else {}))
@@ -328,11 +337,12 @@ class HostBindingTest(unittest.IsolatedAsyncioTestCase):
                                 self.assertNotIn("do not return", json.dumps(data))
                                 if method == "sessions.usage.logs":
                                     actual = next(row for row in data["result"]["logs"] if row["messageId"] == "m2")
-                                    self.assertEqual(("fixture", "sample", 90, 11),
+                                    self.assertEqual(("fixture", "openai", 90, 11),
                                                      tuple(actual[k] for k in ("model", "provider", "durationMs", "tokens")))
                                     self.assertEqual(1, actual["usage"]["cacheRead"])
                                     self.assertNotIn("runId", actual)
                                     self.assertNotIn("content", actual)
+                                    self.assertNotIn("billingSource", actual)
                             replies["tasks.get"] = {"task": foreign}
                             self.assertEqual("NOT_FOUND", (await rpc(first, "tasks.get", threadId=thread_id, taskId="task-a"))["error"]["code"])
                             await wait_operation(first, await rpc(first, "tasks.cancel", threadId=thread_id,
