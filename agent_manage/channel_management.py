@@ -414,21 +414,6 @@ class ChannelManagementMixin:
             "config_write": write_result,
         }
 
-    def _extract_plugin_list(self, payload: Dict[str, object]) -> List[Dict[str, object]]:
-        if isinstance(payload, list):
-            return [item for item in payload if isinstance(item, dict)]
-        if not isinstance(payload, dict):
-            return []
-        for key in ("plugins", "list", "items", "payload"):
-            value = payload.get(key)
-            if isinstance(value, list):
-                return [item for item in value if isinstance(item, dict)]
-            if isinstance(value, dict):
-                nested = value.get("plugins") or value.get("list") or value.get("items")
-                if isinstance(nested, list):
-                    return [item for item in nested if isinstance(item, dict)]
-        return []
-
     def _generate_tg_bot_name(self) -> str:
         return f"tgbot-{uuid.uuid4().hex[:8]}"
 

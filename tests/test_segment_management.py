@@ -18,6 +18,49 @@ from agent_manage.segment_reader import SegmentReader, read_segment, select_rows
 
 
 class SegmentCliTest(unittest.TestCase):
+    def test_timed_output_only_encodes_large_payload_once(self):
+        from agent_manage.segment_timing import CURRENT, ReadTiming
+        marker = "界" * 20000
+        token = CURRENT.set(ReadTiming())
+        self.addCleanup(CURRENT.reset, token)
+        output = io.StringIO()
+        encodings = []
+        dumps = json.dumps
+        def measure(value, **kwargs):
+            encoded = dumps(value, **kwargs)
+            if marker in encoded:
+                encodings.append(len(encoded))
+            return encoded
+        with patch("agent_manage.response.json.dumps", side_effect=measure), redirect_stdout(output), redirect_stderr(io.StringIO()):
+            print_json(build_success_response({"payload": marker, "timings": {}}))
+        result = json.loads(output.getvalue())["result"]
+        self.assertEqual(marker, result["payload"])
+        self.assertIn("responseSerializationMs", result["timings"]["phasesMs"])
+        self.assertEqual(1, len(encodings))
+
+    def test_timed_budget_checks_final_utf8_bytes_for_success_and_error(self):
+        from agent_manage.segment_timing import CURRENT, ReadTiming
+        for body in (build_success_response({"text": '界 "timings": null', "nested": {"timings": None}}),
+                     build_error_response(ValueError('失败 "timings": null'))):
+            def emit(limit):
+                timer = ReadTiming()
+                stdout, stderr = io.StringIO(), io.StringIO()
+                key = CURRENT.set(timer)
+                try:
+                    with (patch.object(timer, "snapshot", return_value={"fixture": "真实"}),
+                          patch("agent_manage.response.MAX_PROTOCOL_RESPONSE_BYTES", limit),
+                          redirect_stdout(stdout), redirect_stderr(stderr)):
+                        print_json(body)
+                finally:
+                    CURRENT.reset(key)
+                encoded = stdout.getvalue()
+                self.assertIn(f"emitted_utf8_bytes={len(encoded.encode())} ", stderr.getvalue())
+                return json.loads(encoded), len(encoded.encode())
+            expected, size = emit(10000)
+            self.assertEqual(emit(size)[0], expected)
+            refused, _ = emit(size - 1)
+            self.assertEqual(refused["error"], {"code": "RESPONSE_OUTPUT_TOO_LARGE", "details": {"totalUtf8Bytes": size}})
+
     def test_session_key_alias_is_explicit_for_all_segment_commands(self):
         cases = [
             ("sessions-segments-history", "segment_history", ["--edge", "end", "--limit", "1"],
@@ -150,6 +193,112 @@ class DirectSegmentReaderTest(unittest.TestCase):
             "message": {"role": "toolResult", "toolName": "read", "isError": False,
                         "content": [{"type": "text", "text": "source code " * 10000}]}}) + "\n")
 
+    def test_cli_chunk_location_is_optional_scoped_and_snapshot_checked(self):
+        request = {**self.request, "action": "message", "messageId": "big"}
+        env = {"AGENT_MANAGER_HISTORY_CURSOR_KEY": "private-fixture-secret"}
+        def line(i, text):
+            return json.dumps({"type":"message", "id":i, "message":{"role":"assistant","content":text}}) + "\n"
+        original = line("small", "before") + line("big", "hello" * 100000)
+        self.file.write_text(original)
+        part = read_segment(request, env)
+        reader = SegmentReader(request, env)
+        signed = reader.decode(part["nextCursor"], "chunk")
+        self.assertIn("record", signed)
+        for auth in ({}, {"token": {"source": "env", "id": "TOKEN"}}, {"token": "${OPENCLAW_GATEWAY_TOKEN}"}):
+            plain = {**request, "config": {"gateway": {"auth": auth}}}
+            piece = read_segment(plain, {})
+            self.assertNotIn("record", SegmentReader(plain, {}).decode(piece["nextCursor"], "chunk"))
+        legacy = {k:v for k,v in signed.items() if k not in ("record", "messageHash")}
+        # The optional hint must not push an otherwise valid CLI argument over its limit.
+        padding = (8192 - len(reader.token(legacy))) * 3 // 4 - 12
+        long_id = "big" + "a" * padding
+        self.file.write_text(original.replace('"id": "big"', '"id": "' + long_id + '"'))
+        long_part = read_segment({**request, "messageId": long_id}, env)
+        self.assertLessEqual(len(long_part["nextCursor"]), 8192)
+        long_claims = reader.decode(long_part["nextCursor"], "chunk")
+        self.assertNotIn("record", long_claims)
+        self.assertEqual(long_part["sha256"], long_claims["messageHash"])
+        long_resume = {**request, "messageId": long_id, "cursor": long_part["nextCursor"]}
+        self.assertEqual(long_part["sha256"], read_segment(long_resume, env)["sha256"])
+        with self.assertRaises(ProtocolError) as raised:
+            read_segment({**long_resume, "messageId": "small"}, env)
+        self.assertEqual("CURSOR_EXPIRED", raised.exception.code)
+        self.file.write_text(original)
+        expected = read_segment({**request, "cursor":reader.token(legacy)}, env)
+        resume = {**request, "cursor": part["nextCursor"]}
+        with patch.object(SegmentReader, "scan", side_effect=AssertionError("unnecessary full scan")):
+            with self.file.open("a") as f:
+                f.write(line("appended", "later"))
+            actual = read_segment(resume, env)
+            for field in ("offset", "sha256", "data", "totalBytes", "nextCursor"):
+                self.assertEqual(expected[field], actual[field])
+            for invalid in ({**resume, "messageId": "small"},
+                            {**resume, "cursor": ("A" if resume["cursor"][0] != "A" else "B") + resume["cursor"][1:]},
+                            {**resume, "cursor": reader.token({**signed, "record": [0, 100000000, "0" * 64]})}):
+                with self.assertRaises(ProtocolError) as raised:
+                    read_segment(invalid, env)
+                self.assertEqual("CURSOR_EXPIRED", raised.exception.code)
+            for replacement in (original.replace("before", "BEFORE"), original.replace("hello", "olleh"), ""):
+                self.file.write_text(replacement)
+                with self.assertRaises(ProtocolError) as raised:
+                    read_segment(resume, env)
+                self.assertEqual("CURSOR_EXPIRED", raised.exception.code)
+        self.file.write_text(original)
+        self.index.write_text("{}")
+        with self.assertRaises(ProtocolError) as raised:
+            read_segment(resume, env)
+        self.assertEqual("FORBIDDEN", raised.exception.code)
+
+    def test_cli_resume_pins_projected_message_with_and_without_gateway_token(self):
+        workspace = self.root / "workspace"
+        workspace.mkdir()
+        image = workspace / "chart.png"
+        transcript = json.dumps({"type": "message", "id": "big", "message": {
+            "role": "assistant", "content": "x" * 500000 + " MEDIA:" + str(image)}}) + "\n"
+        self.file.write_text(transcript)
+        for auth in ({"mode": "token", "token": "local-fixture-gateway-token"}, {}):
+            with self.subTest(fast=bool(auth)):
+                request = {**self.request, "action": "message", "messageId": "big",
+                           "config": {"gateway": {"auth": auth}}}
+                image.write_bytes(b"before")
+                first = read_segment(request, {})
+                cursor = first["nextCursor"]
+                reader = SegmentReader(request, {})
+                claims = reader.decode(cursor, "chunk")
+                self.assertEqual("record" in claims, bool(auth))
+                resume = {**request, "cursor": cursor}
+                if auth:
+                    with patch.object(SegmentReader, "scan", side_effect=AssertionError("unexpected full scan")):
+                        second = read_segment(resume, {})
+                else:
+                    second = read_segment(resume, {})
+                self.assertEqual(first["sha256"], second["sha256"])
+                image.with_suffix(".new").write_bytes(b"after!")
+                image.with_suffix(".new").replace(image)
+                with self.assertRaises(ProtocolError) as raised:
+                    read_segment({**request, "cursor": second["nextCursor"]}, {})
+                self.assertEqual("CURSOR_EXPIRED", raised.exception.code)
+                self.assertNotEqual(first["sha256"], read_segment(request, {})["sha256"])
+
+    def test_cli_chunk_hints_preserve_branch_selection_and_file_identity(self):
+        env = {"AGENT_MANAGER_HISTORY_CURSOR_KEY": "private-fixture-secret"}
+        request = {**self.request, "action": "message", "messageId": "selected"}
+        def message(i, parent):
+            return {"type": "message", "id": i, "parentId": parent,
+                    "message": {"role": "assistant", "content": i * 100000}}
+        self.file.write_text("".join(json.dumps(row) + "\n" for row in (
+            message("a", None), message("abandoned", "a"), message("selected", "a"))))
+        with self.assertRaises(ProtocolError) as raised:
+            read_segment({**request, "messageId": "abandoned"}, env)
+        self.assertEqual("MESSAGE_NOT_FOUND", raised.exception.code)
+        cursor = read_segment(request, env)["nextCursor"]
+        clone = self.file.with_suffix(".replacement")
+        clone.write_bytes(self.file.read_bytes())
+        clone.replace(self.file)
+        with self.assertRaises(ProtocolError) as raised:
+            read_segment({**request, "cursor": cursor}, env)
+        self.assertEqual("CURSOR_EXPIRED", raised.exception.code)
+
     def test_omit_thinking_inherits_pages_message_references_and_chunks(self):
         rows = [{"type": "message", "id": str(i), "parentId": str(i - 1) if i else None,
                  "message": {"role": "assistant", "content": [
@@ -173,6 +322,47 @@ class DirectSegmentReaderTest(unittest.TestCase):
         changed_ref = changed["messages"][0]["fullMessageRef"]["params"]["ref"]
         self.assertFalse(reader.decode(changed_ref, "message")["omitThinking"])
         self.assertIn("private thought", self.file.read_text())
+
+    def test_page_cursor_survives_idle_but_child_refs_and_chunks_expire(self):
+        rows = [{"type": "message", "id": str(i), "parentId": str(i - 1) if i else None,
+                 "message": ({"role": "user", "content": [{"type": "image", "mimeType": "image/png", "data": "YWJj"}]}
+                             if i % 2 else {"role": "assistant", "content": "answer" * 70000})} for i in range(4)]
+        self.file.write_text("\n".join(map(json.dumps, rows)) + "\n")
+        def read(**params):
+            return read_segment({**self.request, "limit": 2, **params}, {})
+        def reads_for(page):
+            large, image = page["messages"]
+            return ({"action": "message", **large["fullMessageRef"]["params"]},
+                    {"action": "media", **image["mediaRefs"][0]["params"], "mediaOffset": 0, "mediaLength": 1})
+        with patch("agent_manage.segment_reader.time.time") as clock:
+            clock.return_value = 2000000000
+            page = read()
+            original = reads_for(page)
+            clock.return_value += 3500
+            chunks = [read(**params)["nextCursor"] for params in original]
+            self.assertTrue(all(chunks))
+            clock.return_value += 200
+            for params, chunk in zip(original, chunks):
+                for request in (params, {**params, "cursor": chunk}):
+                    with self.assertRaises(ProtocolError) as error:
+                        read(**request)
+                    self.assertEqual(error.exception.code, "CURSOR_EXPIRED")
+            clock.return_value += 86400
+            older = read(cursor=page["olderCursor"])
+            self.assertEqual(older["messages"][0]["id"], "0")
+            fresh = reads_for(older)
+            for params in fresh:
+                self.assertTrue(read(**params)["nextCursor"])
+            clock.return_value += 86400
+            self.assertEqual(read(cursor=older["newerCursor"])["messages"][0]["id"], "2")
+            for params in fresh:
+                with self.assertRaises(ProtocolError) as error:
+                    read(**params)
+                self.assertEqual(error.exception.code, "CURSOR_EXPIRED")
+            self.file.write_text("")
+            with self.assertRaises(ProtocolError) as error:
+                read(cursor=page["olderCursor"])
+            self.assertEqual(error.exception.code, "CURSOR_EXPIRED")
 
     def test_page_filter_can_change_and_new_cursor_inherits(self):
         rows = [{"type": "message", "id": str(i), "parentId": str(i-1) if i else None,

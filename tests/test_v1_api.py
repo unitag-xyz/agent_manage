@@ -3,6 +3,7 @@ import base64
 import json
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -269,6 +270,20 @@ class APITest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await response.read(), self.media[123:457])
         self.assertEqual(response.headers["Content-Range"], f"bytes 123-456/{len(self.media)}")
         self.assertEqual(before, (self.index_path.read_bytes(), self.index_path.stat().st_mtime_ns))
+
+    async def test_history_paging_after_a_day_still_requires_an_authorized_lease(self):
+        params = {"threadId": self.thread, "segmentId": self.segment, "limit": 1}
+        with patch("agent_manage.segment_reader.time", wraps=time) as reader_clock:
+            reader_clock.time.return_value = 2000000000
+            first = (await self.rpc("messages.list", {**params, "edge": "start"}))["result"]
+            resume = {**params, "cursor": first["newerCursor"]}
+            self.assertTrue(resume["cursor"])
+            reader_clock.time.return_value += 86400
+            other = self.service.auth.redeem(self.ticket(runtime_ids=["different"]))
+            self.assertEqual((await self.rpc("messages.list", resume, lease=other))["error"]["code"], "FORBIDDEN")
+            page = await self.rpc("messages.list", resume)
+            self.assertTrue(page["ok"], page)
+            self.assertNotEqual(page["result"]["items"][0]["id"], first["items"][0]["id"])
 
     async def test_reject_cross_runtime_scope_and_disallowed_agent(self):
         lease = self.service.auth.redeem(self.ticket(runtime_ids=["different"]))

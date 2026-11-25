@@ -1,6 +1,5 @@
 """OpenClaw 2026.7.x adapter. Management delegates to existing execution services."""
 import asyncio
-import base64
 import hashlib
 import heapq
 import json
@@ -59,6 +58,9 @@ class OpenClawAdapter(RuntimeAdapter):
         self.chat_streams = OrderedDict()
         self.native_writes = asyncio.Lock()
         self.run_observers = {}
+        self.restore_lock = asyncio.Lock()
+        self.reconcile_tasks = set()
+        self.reconcile_slots = asyncio.Semaphore(4)
         self.observer_releases = set()
         device_name = self.runtime_id + ("-" + host_binding.device_scope if host_binding else "") + ".key"
         gateway_options = {"host_binding": host_binding} if host_binding else {}
@@ -128,13 +130,14 @@ class OpenClawAdapter(RuntimeAdapter):
                 "maxHistoryLimit": 200, "historyByteBudget": 1024 * 1024,
                 "lifecycleOwner": self.context.lifecycle}
 
-    def agents(self, config=None):
+    def agents(self, config=None, *, persist=True):
         if config is None:
             config = self.config()
         entries = config.get("agents", {}).get("list", [])
         if not entries:
             entries = [{"id": "main"}]
         result = []
+        mappings = []
         instance_chat = self.host_binding and self.host_binding.instance_chat
         if instance_chat and len(entries) > 64:
             raise APIError("BUSY", "Instance exceeds the Chat Agent budget")
@@ -153,12 +156,15 @@ class OpenClawAdapter(RuntimeAdapter):
                 continue
             native = (canonical(["instance-chat", native_id]) if instance_chat else
                       self.host_binding.agent_native_identity(binding) if binding else entry["id"])
-            identifier = self.store.object("agent", self.runtime_id, native,
-                {"name": entry.get("name", entry["id"]), "nativeAgentId": entry["id"],
-                 **({"agentIdentify": binding["agentIdentify"], "installationId": binding["installationId"]} if binding else {})})
+            identifier = self.store.object_id("agent", self.runtime_id, native)
+            if persist:
+                mappings.append(("agent", native, {"name": entry.get("name", entry["id"]), "nativeAgentId": entry["id"],
+                    **({"agentIdentify": binding["agentIdentify"], "installationId": binding["installationId"]} if binding else {})}))
             result.append({"agentId": identifier, "runtimeId": self.runtime_id, "name": entry.get("name") or entry["id"],
                            "extensions": {"openclaw": {"agentId": entry["id"]}},
                            "isDefault": bool(entry.get("default")) or len(entries) == 1})
+        if mappings:
+            self.store.put_objects(self.runtime_id, mappings)
         return result
 
     def resolve_native_agent(self, native_id):
@@ -191,12 +197,14 @@ class OpenClawAdapter(RuntimeAdapter):
         return self.store.object("thread", self.runtime_id, self.thread_identity(agent_id, key),
                                  {"agentId": agent_id, "nativeSessionKey": key})
 
-    def index(self, agent_id):
+    def index(self, agent_id, config=None):
         agent = self.store.get(agent_id, kind="agent", runtime=self.runtime_id)
         # Verify the agent still belongs to this runtime, not just an old registry row.
-        if agent_id not in {item["agentId"] for item in self.agents()}:
+        if config is None:
+            config = self.config()
+        if agent_id not in {item["agentId"] for item in self.agents(config, persist=False)}:
             raise APIError("NOT_FOUND", "Agent is no longer configured")
-        return agent, self.read_session_index(agent, self.config())
+        return agent, self.read_session_index(agent, config)
 
     def read_session_index(self, agent, config, max_bytes=64 * 1024 * 1024):
         root = self.context.state_dir
@@ -289,6 +297,7 @@ class OpenClawAdapter(RuntimeAdapter):
     def chat_sidebar(self, limit):
         config = self.config()
         groups = []
+        mappings = []
         agents = self.agents(config)
         agent_config = config.get("agents", {})
         entries = {entry["id"]: entry for entry in agent_config.get("list", [])
@@ -333,21 +342,33 @@ class OpenClawAdapter(RuntimeAdapter):
             group["totalCount"] = count
             group["hasMore"] = len(rows) > limit
             for key, entry in rows[:limit]:
-                group["items"].append({"threadId": self.register_thread(agent_id, key),
+                native = self.thread_identity(agent_id, key)
+                mappings.append(("thread", native, {"agentId": agent_id, "nativeSessionKey": key}))
+                group["items"].append({"threadId": self.store.object_id("thread", self.runtime_id, native),
                     **self.thread_summary(config, key, entry)})
+        self.store.put_objects(self.runtime_id, mappings)
         self.include_run_activity([row for group in groups for row in group["items"]])
         return {"items": groups}
 
     def threads(self, agent_id):
-        agent, index = self.index(agent_id)
         config = self.config()
+        agent, index = self.index(agent_id, config)
         result = []
+        mappings = []
         for key, entry in index.items():
             if not key.startswith("agent:" + self.native_agent(agent) + ":") or not isinstance(entry, dict):
                 continue
-            identifier = self.register_thread(agent_id, key)
+            native = self.thread_identity(agent_id, key)
+            identifier = self.store.object_id("thread", self.runtime_id, native)
+            mappings.append(("thread", native, {"agentId": agent_id, "nativeSessionKey": key}))
+            segment = None
+            if session := entry.get("sessionId"):
+                identity = canonical([identifier, session])
+                mappings.append(("segment", identity, {"threadId": identifier, "sessionId": session}))
+                segment = self.store.object_id("segment", self.runtime_id, identity)
             result.append({"threadId": identifier, "agentId": agent_id, **self.thread_summary(config, key, entry),
-                           "currentSegmentId": self.segment_id(identifier, entry.get("sessionId"))})
+                           "currentSegmentId": segment})
+        self.store.put_objects(self.runtime_id, mappings)
         self.include_run_activity(result)
         return result
 
@@ -368,7 +389,7 @@ class OpenClawAdapter(RuntimeAdapter):
     def resolve_scope(self, method, params):
         if "agentId" in params:
             self.store.get(params["agentId"], kind="agent", runtime=self.runtime_id)
-            if self.host_binding and params["agentId"] not in {item["agentId"] for item in self.agents()}:
+            if self.host_binding and params["agentId"] not in {item["agentId"] for item in self.agents(persist=False)}:
                 raise APIError("NOT_FOUND", "Installed Agent binding is no longer active")
             return params["agentId"]
         if "threadId" in params:
@@ -393,28 +414,50 @@ class OpenClawAdapter(RuntimeAdapter):
         if self.host_binding:
             payload["_nativePathResolver"] = self.host_binding.local_path
             payload["scopeBinding"] = thread["data"]["agentId"]
+            payload["_indexBinding"] = self.host_binding.device_scope
         payload.update({key: params[key] for key in ("cursor", "ref", "messageId", "edge", "limit", "view", "omitThinking", "mediaOffset", "mediaLength") if key in params})
         payload.setdefault("edge", "end")
         payload.setdefault("limit", 50)
         if "cursor" not in payload and "ref" not in payload:
             payload.setdefault("view", "compact")
         with self.context.activate():
-            result = read_segment(payload, LocalRunner()._command_env())
+            result = read_segment(payload, LocalRunner()._command_env(), manager_read=True)
         return result
 
-    def project(self, message, params, projection):
+    def project(self, message, params, projection, revision, mappings):
         def register(reference):
             data = {"threadId": params["threadId"], "segmentId": params["segmentId"], "reference": reference,
                     "role": reference.get("purpose", "unknown")}
-            identity = [params["threadId"], params["segmentId"], message["id"], reference.get("mediaId") or reference, data["role"]]
-            return self.store.object("resource", self.runtime_id, canonical(identity), data)
-        dto = message_dto(message, thread_id=params["threadId"], segment_id=params["segmentId"], projection=projection, register_resource=register)
+            source = reference.get("mediaId") or reference.get("locatorId") or reference
+            native = canonical([params["threadId"], params["segmentId"], message["id"], source, data["role"]])
+            mappings.append(("resource", native, data))
+            return self.store.object_id("resource", self.runtime_id, native)
+        dto = message_dto(message, thread_id=params["threadId"], segment_id=params["segmentId"], projection=projection,
+                          register_resource=register, revision=revision)
         dto["statistics"] = message.get("statistics")
         if message.get("fullMessageRef"):
             dto["fullMessageRef"] = {"method": "messages.get", "params": {"runtimeId": self.runtime_id,
                 "threadId": params["threadId"], "segmentId": params["segmentId"], "messageId": message["id"],
                 "ref": message["fullMessageRef"]["params"]["ref"]}}
         return dto
+
+    def project_history(self, params, action):
+        result = self.history(params, action)
+        projection = {"view": result["view"], "omitThinking": result["omitThinking"]}
+        projection["projectionId"] = hashlib.sha256(canonical(projection).encode()).hexdigest()[:16]
+        messages = [result["message"]] if action == "message" else result["messages"]
+        mappings = []
+        items = [self.project(msg, params, projection, result["revisions"][msg["id"]], mappings) for msg in messages]
+        if mappings:
+            self.store.put_objects(self.runtime_id, mappings)
+        if action == "message":
+            return {"message": items[0]}
+        return {"threadId": params["threadId"], "segmentId": params["segmentId"], "items": items,
+            "segment": result["segment"], "olderCursor": result["olderCursor"], "newerCursor": result["newerCursor"],
+            "snapshotId": result.get("snapshotId"), "projectionId": projection["projectionId"],
+            "boundary": {"reachedUser": result["reachedUser"], "turnComplete": None},
+            "bytesReturned": len(canonical(items).encode()), "limitReachedReason": "boundary_or_budget",
+            "timings": result.get("timings")}
 
     @staticmethod
     def project_usage_status(payload):
@@ -605,19 +648,8 @@ class OpenClawAdapter(RuntimeAdapter):
             ids = list(dict.fromkeys([*entry.get("usageFamilySessionIds", []), current]))
             ids = [value for value in ids if value and value != current] + ([current] if current else [])
             return {"threadId": thread["id"], "items": [{"segmentId": self.segment_id(thread["id"], value), "isCurrent": value == current} for value in ids]}
-        if method == "messages.list":
-            result = await self.workers(self.history, params)
-            projection = {"view": result["view"], "omitThinking": result["omitThinking"]}
-            projection["projectionId"] = hashlib.sha256(canonical(projection).encode()).hexdigest()[:16]
-            items = [self.project(message, params, projection) for message in result["messages"]]
-            return {"threadId": params["threadId"], "segmentId": params["segmentId"], "items": items,
-                "segment": result["segment"], "olderCursor": result["olderCursor"], "newerCursor": result["newerCursor"],
-                "snapshotId": result.get("snapshotId"), "projectionId": projection["projectionId"],
-                "boundary": {"reachedUser": result["reachedUser"], "turnComplete": None},
-                "bytesReturned": len(canonical(items).encode()), "limitReachedReason": "boundary_or_budget",
-                "timings": result.get("timings")}
-        if method == "messages.get":
-            return await self.full_message(params)
+        if method in ("messages.list", "messages.get"):
+            return await self.workers(self.project_history, params, "history" if method == "messages.list" else "message")
         if method == "resources.get":
             row = self.store.get(params["resourceId"], kind="resource", runtime=self.runtime_id)
             await self.workers(self.thread, row["data"]["threadId"])
@@ -633,8 +665,8 @@ class OpenClawAdapter(RuntimeAdapter):
             if method == "runs.get":
                 row = self.store.get(params["runId"], kind="run", runtime=self.runtime_id)
                 return await self.refresh_run_outcome(row)
-            return {"items": [row["data"] for row in self.store.objects("run", self.runtime_id)
-                    if row["data"].get("clientRequestId") == params["clientRequestId"] and row["data"]["threadId"] == params["threadId"]]}
+            return {"items": [data for _, data in self.store.thread_runs(self.runtime_id, params["threadId"],
+                                                                         request_key=params["clientRequestId"])]}
         if method == "runtimes.recover":
             from ....core.recovery import recover_refreshes
             from ....core.transactions import runtime_write_lock
@@ -644,26 +676,6 @@ class OpenClawAdapter(RuntimeAdapter):
             return await self.workers(recover)
         pool = getattr(self, "control_workers", self.workers) if METHODS[method].write else self.workers
         return await pool(self.manage, method, params)
-
-    async def full_message(self, params):
-        result = await self.workers(self.history, params, "message")
-        projection = {"view": result.get("view", "compact"), "omitThinking": result.get("omitThinking", False)}
-        projection["projectionId"] = hashlib.sha256(canonical(projection).encode()).hexdigest()[:16]
-        if "message" in result:
-            return {"message": self.project(result["message"], params, projection)}
-        # Legacy chunks encode native JSON. Assemble within a separate bounded read
-        # budget, then project once; clients never parse native message structures.
-        parts, total = [], 0
-        while True:
-            block = base64.b64decode(result["data"])
-            total += len(block)
-            if total > 8 * 1024 * 1024:
-                raise APIError("MESSAGE_TOO_LARGE", "Full message exceeds the 8 MiB supplemental-read budget")
-            parts.append(block)
-            if not result["nextCursor"]:
-                break
-            result = await self.workers(self.history, {**params, "cursor": result["nextCursor"]}, "message")
-        return {"message": self.project(json.loads(b"".join(parts)), params, projection)}
 
     def manage(self, method, params):
         manager = self.manager()
@@ -849,27 +861,38 @@ class OpenClawAdapter(RuntimeAdapter):
             key = response.get("key")
             if not isinstance(key, str) or not key.startswith("agent:" + self.native_agent(agent) + ":"):
                 raise APIError("DISPATCH_UNKNOWN", "Native session creation did not return a scoped key")
-            if params.get("title"):
-                await self.gateway.call("sessions.patch", {"key": key, "label": params["title"]})
             identifier = self.register_thread(params["agentId"], key)
-            return {"threadId": identifier, "agentId": params["agentId"]}
+            result = {"threadId": identifier, "agentId": params["agentId"]}
+            if params.get("title"):
+                result["titleStatus"] = "unknown"
+                if params.get("_operationId"):
+                    self.store.checkpoint_thread(params["_operationId"], identifier, result)
+                try:
+                    if CURRENT_WRITE_GUARD.get():
+                        CURRENT_WRITE_GUARD.get()()
+                    await self.gateway.call("sessions.patch", {"key": key, "label": params["title"]})
+                    result["titleStatus"] = "applied"
+                except APIError as exc:
+                    if exc.code != "DISPATCH_UNKNOWN":
+                        result["titleStatus"] = "not_applied"
+            return result
         if method == "runs.cancel":
             run = self.store.get(params["runId"], kind="run", runtime=self.runtime_id)
+            if run["data"].get("executionDetached"):
+                raise APIError("NOT_READY", "Run belongs to a retired container binding")
             thread, _ = await self.workers(self.thread, run["data"]["threadId"])
             if run["data"]["status"] in ("completed", "failed", "cancelled"):
                 return run["data"]
             await self.gateway.call("chat.abort", {"sessionKey": self.native_key(thread), "runId": run["data"].get("nativeRunId", run["native"])})
-            latest = self.store.get(run["id"])["data"]
-            data = latest if latest["status"] in ("completed", "failed", "cancelled") else {**latest, "status": "cancel_requested"}
-            self.store.object("run", self.runtime_id, run["native"], data)
-            return data
+            return self.store.transition_run(self.runtime_id, run["native"], status="cancel_requested")
         thread, entry = await self.workers(self.thread, params["threadId"])
         if method == "threads.models.update":
             return await self.update_thread_model(thread, entry, params["modelId"], CURRENT_WRITE_GUARD.get())
         if method == "threads.thinking.update":
             return await self.update_thread_thinking(thread, entry, params["thinkingLevel"], CURRENT_WRITE_GUARD.get())
         if method == "events.subscribe":
-            await self.gateway.connect()
+            if self.host_binding:
+                await self.restore_run_observers(thread)
             return {"threadId": thread["id"], "replay": False, "resyncRequired": True}
         if method == "runs.create":
             current_segment = self.segment_id(thread["id"], entry.get("sessionId"))
@@ -880,44 +903,53 @@ class OpenClawAdapter(RuntimeAdapter):
                 CURRENT_WRITE_GUARD.get()()
             native_id = uuid.uuid4().hex
             native_key = self.native_key(thread)
+            config_hash = hashlib.sha256(self.host_binding.config_bytes() if self.host_binding else self.context.config_path.read_bytes()).hexdigest()
             observer = None
             if self.host_binding:
-                if len(self.run_observers) >= 128:
-                    raise APIError("BUSY", "Native run observation limit reached", retryable=True)
-                agent = self.store.get(thread["data"]["agentId"], kind="agent", runtime=self.runtime_id)
-                observer = await self.gateway.retain_session(native_key, self.native_agent(agent))
-                self.run_observers[native_id] = observer
+                async with self.restore_lock:
+                    if len(self.run_observers) >= 128:
+                        raise APIError("BUSY", "Native run observation limit reached", retryable=True)
+                    agent = self.store.get(thread["data"]["agentId"], kind="agent", runtime=self.runtime_id)
+                    observer = await self.gateway.retain_session(native_key, self.native_agent(agent))
+                    self.run_observers[native_id] = observer
                 try:
                     if CURRENT_WRITE_GUARD.get():
                         CURRENT_WRITE_GUARD.get()()
                 except BaseException:
                     self.release_run_observer(native_id)
                     raise
-            identifier = self.store.object("run", self.runtime_id, native_id)
+            identifier = self.store.object_id("run", self.runtime_id, native_id)
             data = {"runId": identifier, "threadId": thread["id"], "clientRequestId": params["clientRequestId"],
                     "segmentId": current_segment, "operationId": params.get("_operationId"),
                     "status": "accepted", "observation": "known", "resultSync": "pending", "usageStatus": "unknown",
-                    "configSnapshotId": hashlib.sha256(self.host_binding.config_bytes() if self.host_binding else self.context.config_path.read_bytes()).hexdigest(), "createdAt": now_ms()}
-            self.store.object("run", self.runtime_id, native_id, data)
+                    "configSnapshotId": config_hash, "createdAt": now_ms()}
+            try:
+                self.store.object("run", self.runtime_id, native_id, data)
+            except BaseException:
+                self.release_run_observer(native_id)
+                raise
             try:
                 response = await self.gateway.call("chat.send", {"sessionKey": native_key, "message": params["message"],
                     "deliver": False, "idempotencyKey": native_id, **({"attachments": params["attachments"]} if "attachments" in params else {})},
                     **({"expected_socket": observer[0]} if observer is not None else {}))
             except APIError as exc:
-                if exc.code != "DISPATCH_UNKNOWN":
+                if exc.code == "DISPATCH_UNKNOWN":
+                    current = self.store.transition_run(self.runtime_id, native_id, observation="unknown")
+                    if current["status"] in ("completed", "failed", "cancelled"):
+                        return current
+                else:
                     self.release_run_observer(native_id)
-                self.store.object("run", self.runtime_id, native_id, {**data, "observation": "unknown"})
+                    current = self.store.transition_run(self.runtime_id, native_id, status="failed", observation="known",
+                                                        resultSync="unknown", completedAt=now_ms())
+                    if current.get("resultBoundary") is not None:
+                        return current
                 raise
+            changes = {"status": "running"}
             if response.get("runId", native_id) != native_id:
                 # Preserve our stable ID; native correlation remains explicit.
-                data["nativeRunId"] = response["runId"]
+                changes["nativeRunId"] = response["runId"]
                 self.store.object("run_binding", self.runtime_id, response["runId"], {"runId": identifier})
-            current = self.store.get(identifier, kind="run", runtime=self.runtime_id)["data"]
-            if current["status"] == "accepted":
-                data.update(status="running")
-                self.store.object("run", self.runtime_id, native_id, data)
-                return data
-            return current
+            return self.store.transition_run(self.runtime_id, native_id, **changes)
         native_params = {"key": self.native_key(thread)}
         if method == "threads.update":
             native_params["label"] = params["title"]
@@ -930,6 +962,36 @@ class OpenClawAdapter(RuntimeAdapter):
         await self.gateway.call(NATIVE[method], native_params)
         return {"threadId": thread["id"], "applied": True}
 
+    async def restore_run_observers(self, thread):
+        async with self.restore_lock:
+            rows = self.store.thread_runs(self.runtime_id, thread["id"])
+            missing = [(native, data) for native, data in rows if native not in self.run_observers]
+            if len(self.run_observers) + len(missing) > 128:
+                raise APIError("BUSY", "Native run observation limit reached", retryable=True)
+            if not missing:
+                return
+            agent = self.store.get(thread["data"]["agentId"], kind="agent", runtime=self.runtime_id)
+            for native, data in missing:
+                observer = await self.gateway.retain_session(self.native_key(thread), self.native_agent(agent))
+                try:
+                    current = self.store.get(data["runId"], kind="run", runtime=self.runtime_id)
+                except BaseException:
+                    await self.gateway.release_session(observer)
+                    raise
+                if current["data"].get("status") not in ("accepted", "running", "cancel_requested") or current["data"].get("executionDetached"):
+                    await self.gateway.release_session(observer)
+                    continue
+                self.run_observers[native] = observer
+                # Completion may have happened while the socket was disconnected.
+                task = asyncio.create_task(self.reconcile_observer(current, observer))
+                self.reconcile_tasks.add(task)
+                task.add_done_callback(self.reconcile_tasks.discard)
+
+    async def reconcile_observer(self, row, observer):
+        async with self.reconcile_slots:
+            if self.run_observers.get(row["native"]) is observer:
+                await self.refresh_run_outcome(row, expected_socket=observer[0])
+
     def release_run_observer(self, native_id):
         if (observer := self.run_observers.pop(native_id, None)) is not None:
             # The native reader must stay free to receive the unsubscribe response.
@@ -937,37 +999,73 @@ class OpenClawAdapter(RuntimeAdapter):
             self.observer_releases.add(task)
             task.add_done_callback(self.observer_releases.discard)
 
-    async def refresh_run_outcome(self, row):
+    def finish_observed_run(self, row, status, ended_at, assistant_message_id=None):
+        boundary = {"segmentId": row["data"].get("segmentId"), "status": "unverified"}
+        if isinstance(assistant_message_id, str) and 0 < len(assistant_message_id) <= 256 and assistant_message_id.isprintable():
+            boundary["candidateAssistantMessageId"] = assistant_message_id
+        changes = {"status": status, "observation": "known", "resultSync": "unknown",
+                   "completedAt": ended_at, "resultBoundary": boundary}
+        if status == "failed":
+            changes["error"] = {"code": "RUN_FAILED", "message": "Generation failed", "retryable": False}
+        current = self.store.transition_run(self.runtime_id, row["native"], **changes)
+        self.release_run_observer(row["native"])
+        return current
+
+    async def refresh_run_outcome(self, row, *, expected_socket=None):
         data = row["data"]
         active = ("accepted", "running", "cancel_requested")
-        if not self.host_binding or self.gateway is None or data.get("status") not in active:
+        if not self.host_binding or self.gateway is None or data.get("executionDetached") or data.get("status") not in active:
             return data
         native = data.get("nativeRunId") or row["native"]
         # This is observation of an exact native run, never a second chat.send.
         try:
-            outcome = await self.gateway.call("agent.wait", {"runId": native, "timeoutMs": 1}, timeout=2)
+            outcome = await self.gateway.call("agent.wait", {"runId": native, "timeoutMs": 1}, timeout=2,
+                                              **({"expected_socket": expected_socket} if expected_socket is not None else {}))
         except APIError:
             return self.store.get(row["id"], kind="run", runtime=self.runtime_id)["data"]
         current = self.store.get(row["id"], kind="run", runtime=self.runtime_id)["data"]
         if (current.get("status") not in active or not isinstance(outcome, dict)
-                or outcome.get("status") != "ok" or outcome.get("runId") != native
+                or outcome.get("status") not in ("ok", "error") or outcome.get("runId") != native
                 or type(outcome.get("endedAt")) is not int):
             return current
-        current = {**current, "status": "completed", "observation": "known", "resultSync": "unknown",
-                   "completedAt": outcome["endedAt"],
-                   "resultBoundary": {"segmentId": current.get("segmentId"), "status": "unverified"}}
-        self.store.object("run", self.runtime_id, row["native"], current)
-        self.release_run_observer(row["native"])
+        current = self.finish_observed_run(row, "completed" if outcome["status"] == "ok" else "failed", outcome["endedAt"])
         await self.publish(self.runtime_id, current["threadId"], {"type": "run.updated", "run": current})
         return current
+
+    def event_route(self, payload):
+        native_run = payload.get("runId")
+        run = self.store.lookup("run", self.runtime_id, native_run) if isinstance(native_run, str) else None
+        if run is None and isinstance(native_run, str):
+            binding = self.store.lookup("run_binding", self.runtime_id, native_run)
+            run = self.store.get(binding["data"]["runId"]) if binding else None
+        key = payload.get("sessionKey")
+        if run and run["data"].get("executionDetached"):
+            return None
+        allowed = self.agents(persist=False) if self.host_binding else ()
+        thread = None
+        if run:
+            thread = self.store.get(run["data"]["threadId"], kind="thread", runtime=self.runtime_id)
+            if isinstance(key, str) and self.native_key(thread) != key:
+                return None
+        elif isinstance(key, str):
+            if self.host_binding:
+                for item in allowed:
+                    if key.startswith("agent:" + item["extensions"]["openclaw"]["agentId"] + ":"):
+                        thread = self.store.lookup("thread", self.runtime_id, self.thread_identity(item["agentId"], key))
+                        break
+            else:
+                thread = self.store.lookup("thread", self.runtime_id, key)
+        if not thread or self.host_binding and not any(item["agentId"] == thread["data"]["agentId"] for item in allowed):
+            return None
+        return run, thread
 
     async def native_event(self, frame):
         event, payload = frame.get("event"), frame.get("payload") or {}
         if event == "manager.disconnected":
             self.run_observers.clear()
-            for row in self.store.objects("run", self.runtime_id):
-                if row["data"].get("status") in ("accepted", "running", "cancel_requested"):
-                    self.store.object("run", self.runtime_id, row["native"], {**row["data"], "observation": "unknown"})
+            for task in self.reconcile_tasks:
+                task.cancel()
+            self.store.lose_run_observation(self.runtime_id)
             await self.publish(self.runtime_id, None, {"type": "resync_required", "reason": "native_disconnected"})
             return
         if event == "sessions.changed":
@@ -975,33 +1073,14 @@ class OpenClawAdapter(RuntimeAdapter):
             return
         if event not in ("chat", "agent"):
             return
-        native_run = payload.get("runId")
-        run = self.store.lookup("run", self.runtime_id, native_run) if isinstance(native_run, str) else None
-        if run is None and isinstance(native_run, str):
-            binding = self.store.lookup("run_binding", self.runtime_id, native_run)
-            run = self.store.get(binding["data"]["runId"]) if binding else None
-        key = payload.get("sessionKey")
-        thread = None
-        if isinstance(key, str):
-            if self.host_binding:
-                for item in self.agents():
-                    row = self.store.get(item["agentId"])
-                    if key.startswith("agent:" + self.native_agent(row) + ":"):
-                        thread = self.store.lookup("thread", self.runtime_id, self.thread_identity(row["id"], key))
-                        break
-            else:
-                thread = self.store.lookup("thread", self.runtime_id, key)
-        if thread is None and run:
-            thread = self.store.get(run["data"]["threadId"], kind="thread", runtime=self.runtime_id)
-        if not thread:
+        try:
+            route = await asyncio.to_thread(self.event_route, payload)
+        except APIError:
             return
-        if self.host_binding:
-            try:
-                self.resolve_scope("events.subscribe", {"threadId": thread["id"]})
-            except APIError:
-                return
-            if run and run["data"]["threadId"] != thread["id"]:
-                return
+        if route is None:
+            return
+        run, thread = route
+        native_run = payload.get("runId")
         if event == "agent":
             data = payload.get("data") or {}
             stream = payload.get("stream")
@@ -1046,19 +1125,15 @@ class OpenClawAdapter(RuntimeAdapter):
                 status = {"final": "completed", "aborted": "cancelled", "error": "failed", "delta": "running"}.get(state)
                 if state == "delta" and run["data"].get("status") in ("completed", "cancelled", "failed"):
                     return
-                if status:
+                current_run = run["data"]
+                if terminal:
                     message = payload.get("message")
                     event_id = message.get("id") if state == "final" and isinstance(message, dict) and message.get("role") == "assistant" else None
-                    boundary = {"segmentId": run["data"].get("segmentId"), "status": "unverified"}
-                    if isinstance(event_id, str) and 0 < len(event_id) <= 256 and event_id.isprintable():
-                        boundary["candidateAssistantMessageId"] = event_id
-                    self.store.object("run", self.runtime_id, run["native"], {**run["data"], "status": status,
-                        **({"completedAt": now_ms(), "resultBoundary": boundary} if terminal else {}),
-                        **({"error": {"code": "RUN_FAILED", "message": "Generation failed", "retryable": False}}
-                           if state == "error" else {}),
-                        "observation": "known", "resultSync": "unknown" if state in ("final", "aborted", "error") else "pending"})
-                    if terminal:
-                        self.release_run_observer(run["native"])
+                    current_run = self.finish_observed_run(run, status, now_ms(), event_id)
+                elif status:
+                    changes = {"status": status, "observation": "known", "resultSync": "pending"}
+                    if any(current_run.get(k) != v for k, v in changes.items()):
+                        current_run = self.store.transition_run(self.runtime_id, run["native"], **changes)
             # Native error frames can embed the unsanitized provider diagnostic in message.content.
             message = payload.get("message") if state != "error" else None
             if state == "delta" and not isinstance(message, dict) and isinstance(payload.get("deltaText"), str):
@@ -1085,7 +1160,7 @@ class OpenClawAdapter(RuntimeAdapter):
                 await self.publish(self.runtime_id, thread["id"], {"type": "message.snapshot", "message": dto,
                     "runId": run["id"] if run else None, "correlation": "native_id" if native_message_id else "unresolved"})
             if run:
-                await self.publish(self.runtime_id, thread["id"], {"type": "run.updated", "run": self.store.get(run["id"])["data"]})
+                await self.publish(self.runtime_id, thread["id"], {"type": "run.updated", "run": current_run})
 
     async def resource_chunk(self, identifier, cursor=None, *, offset=None, length=None, host_ws=False):
         if self.host_binding and not host_ws:
@@ -1101,6 +1176,10 @@ class OpenClawAdapter(RuntimeAdapter):
         return await getattr(self, "media_workers", self.workers)(self.history, params, "media")
 
     async def close(self):
+        tasks = list(self.reconcile_tasks)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
         if self.gateway:
             await self.gateway.close()
         if self.observer_releases:

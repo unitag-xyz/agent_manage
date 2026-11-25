@@ -2,10 +2,34 @@
 
 from __future__ import annotations
 
+import errno
+import hashlib
 import json
 import os
+import stat
 import tempfile
 from pathlib import Path
+
+
+def fingerprint(path: Path):
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise ValueError(f"Expected a regular file, not a link: {path}") from exc
+        raise
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise ValueError(f"Expected a regular file: {path}")
+        content = hashlib.sha256()
+        while block := os.read(fd, 128 * 1024):
+            content.update(block)
+        return {"sha256": content.hexdigest(), "mode": stat.S_IMODE(info.st_mode)}
+    finally:
+        os.close(fd)
 
 
 def stage_bytes(path: Path, content: bytes, mode: int = 0o600, *,

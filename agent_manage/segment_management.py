@@ -6,7 +6,7 @@ import re
 import shutil
 from pathlib import Path
 
-from .segment_reader import read_segment
+from .segment_reader import MAX_REFERENCE_CHARS, read_segment
 from .segment_timing import CURRENT, measured_read
 
 
@@ -44,7 +44,7 @@ class SegmentManagementMixin:
             raise ValueError("message-id is required")
         for key in ("cursor", "ref"):
             value = params.get(key)
-            if value is not None and (not isinstance(value, str) or not value or len(value) > 8192):
+            if value is not None and (not isinstance(value, str) or not value or len(value) > MAX_REFERENCE_CHARS):
                 raise ValueError(f"Invalid {key}")
         with CURRENT.get().span("environmentAndVersionMs"):
             env = self.runner._command_env()

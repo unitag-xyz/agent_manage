@@ -112,7 +112,8 @@ API 代理可将 `result` 放入既有 WSS `payload`。以下为 `result`：
 保留已保存的思考和普通正文；默认精简工具记录，规则见下节。按 July transcript 树规则选择当前有效分支，不拼入已放弃分支。
 无 ID 的旧记录以物理字节位置生成稳定 ID。不会重新生成未保存的思考或恢复已删除内容。
 
-游标仅在同一实例、线程和物理段内有效，有效期一小时。
+历史分页游标仅在同一实例、线程和物理段内有效，不按时间过期，升级前签发的分页游标也按此规则读取。
+每次读页时返回的长消息和附件引用仍只在一小时内有效；分块续读继承原截止时间，不会顺延。
 首次读取固定文件身份、已完成记录的字节边界和内容哈希；后续追加不进入这个快照。
 文件正常重命名为 reset 归档仍可继续读；原文件被改写、替换、清理或引用失效返回 `CURSOR_EXPIRED`。
 Gateway 认证配置变更也会使旧引用失效。页中保留内部消息，前端可自行隐藏；隐藏后即使没有显示行，也要继续处理返回的游标。
@@ -144,7 +145,7 @@ Gateway 认证配置变更也会使旧引用失效。页中保留内部消息，
 已有前端从 `arguments.command/path` 等字段取预览时也可直接显示，无需先适配 `summary`。
 原先的完整模式仍可显式使用 `--view full`；这不是默认浏览流程，也不要求前端调用它。普通超大正文仍遵循原有输出预算和补读规则。
 游标绑定首次页面的 `view`，后续可省略参数并继承；切换模式需重新打开该段，不能用原游标改模式。
-升级前签发且未过期的页游标没有 `view`，继续沿用原完整模式；重新打开该段即用精简模式。
+旧版未带 `view` 的页游标继续沿用原完整模式；重新打开该段即用精简模式。
 
 ## 大消息补读
 
@@ -191,6 +192,11 @@ agent-manage sessions-segments-message-get \
 ```
 
 继续调用同一补读命令，传 `--cursor <nextCursor>`；此时可以省略 `--ref`。
+CLI 首次补读仍按快照选取有效分支。对于大消息，如果签名使用了私密的游标密钥或字面量 Gateway Token
+（至少 16 个字符，不使用环境变量占位符），新分块游标还绑定原始记录的位置和 SHA-256。
+续读只解析该条记录，仍核验逻辑会话归属、物理文件身份及整个快照前缀的 SHA-256。
+不必单独配置游标密钥；使用 Gateway Token 时，能读取该 Token 的管理方也在游标签名的信任范围内。没有合适的签名材料或游标无记录定位信息时仍按原逻辑扫描。
+新消息分块游标同时绑定完整输出的 SHA-256。即使只替换了附件、会话文件未变，只要输出发生变化，续读就返回 `CURSOR_EXPIRED`，需从首块重读。相同展示格式的旧游标仍可用，但只能从首次换回新游标起校验输出的一致性。
 逐块 Base64 解码为字节，按 `offset` 拼接，直到 `nextCursor: null`。
 检查长度和 SHA-256，再整体 UTF-8 解码并 JSON.parse。不要逐块直接解码文本，UTF-8 字符可能跨块。
 本次展示格式变化前签发的消息分块游标返回 `CURSOR_EXPIRED`，需要从首块重新读取，避免新旧过滤格式混合拼接；历史页游标和附件字节分块不受此格式标记影响。
@@ -233,11 +239,11 @@ agent-manage sessions-segments-message-get \
 | `jsonEncodeMs` | 读取器内部的 JSON 编码，包括引用和消息大小计算 |
 | `chunkEncodeMs` | 分块编码及续读引用生成 |
 | `snapshotVerificationMs` | 返回前再次校验文件快照和会话归属，包含末次 `indexReadMs` |
-| `responseSerializationMs` | 计时字段最终定稿前的一次完整响应 JSON 序列化及 UTF-8 大小计算 |
+| `responseSerializationMs` | 带诊断占位符的业务响应序列化及 UTF-8 大小计算；不含最终的小型诊断对象和 stdout 写出 |
 
 阶段存在嵌套，**不能把所有阶段相加作为总耗时**。总耗时看 `hostElapsedMs`；未执行的阶段不出现，失败也保留已执行阶段。
 
-`counts` 按实际操作返回：`transcriptBytes`、`recordsScanned`、`messagesSelected`、`messagesReturned`、`snapshotVerifyBytes`、`mediaBytesRead`、`mediaCacheHits`、`chunkBytes`、`responseBytesBeforeTimingFinalization`。最后一项是计时信息最终定稿前的响应 UTF-8 字节数，不等于最终网络传输字节数；`messagesReturned` 是内联返回条数，分块消息的大小看 `chunkBytes`。
+`counts` 按实际操作返回：`transcriptBytes`、`recordsScanned`、`messagesSelected`、`messagesReturned`、`messageLocationHits`、`snapshotVerifyBytes`、`mediaBytesRead`、`mediaCacheHits`、`chunkBytes`、`responseBytesBeforeTimingFinalization`。最后一项是诊断位置暂为 `null` 时的 UTF-8 字节数；8 MiB 输出限制仍以填入最终诊断后的实际字节数为准。`messageLocationHits` 表示通过已签名的记录位置跳过全段 JSON 解析，不代表跳过快照校验。`messagesReturned` 是内联返回条数，分块消息的大小看 `chunkBytes`。
 
 以下仅为结构示例，数值不是线上实测：
 
@@ -285,7 +291,7 @@ agent-manage sessions-segments-media-get \
 
 附件每块最多 5 MiB 原始字节（5,242,880 字节），不超过该大小的附件一次返回；更大的附件通过 `nextCursor` 续读。Base64 后单块约 6.67 MiB，Server API 和代理需允许该响应大小及 JSON 包装开销。消息正文补读仍为每块 96 KiB。已有附件游标按字节偏移续读，无需改变前端拼接协议。
 
-AgentManager 完整 JSON 响应的 UTF-8 上限为 8 MiB，包含 Base64、游标及其他包装字段；超过上限返回 `RESPONSE_OUTPUT_TOO_LARGE`。调用方的 stdout 和 HTTP 响应限制也需容纳完整响应。
+AgentManager CLI 的 stdout 上限为 8 MiB，按完整 UTF-8 JSON（含 Base64、游标和包装字段）加末尾一个 LF 字节计算；恰好达到上限可以返回，多一个字节则返回 `RESPONSE_OUTPUT_TOO_LARGE`。stderr 的原始和实际输出字节数也包含 LF。调用方的 stdout 和 HTTP 响应限制需容纳完整响应。
 传 `--cursor <nextCursor>` 继续取后续字节；所有块完成后校验 `sha256`，前端可构造 Blob/Object URL。
 这样附件仍经过现有认证命令通道，不需要把主机文件目录公开为 HTTP 静态目录。
 引用必须来自本段已存储消息，文件仅允许位于该 Agent workspace 或当前实例 `media` 目录；拒绝符号链接和目录越界。

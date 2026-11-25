@@ -16,6 +16,7 @@ from .adapters.registry import create_runtime_adapter
 from .core.errors import APIError
 from .core.service import Service
 from .core.store import canonical
+from .file_io import encode_json, stage_bytes, sync_directory
 from .path_io import read_without_links
 
 
@@ -74,6 +75,7 @@ class PlatformRuntimePool:
         self.closed = False
         self.session_lock = asyncio.Lock()
         self.sessions = 0
+        self.predecessors = ()
 
     def admits(self, runtime, generation):
         return runtime == self.instance and generation == self.generation
@@ -106,12 +108,44 @@ class PlatformRuntimePool:
             raise APIError("RUNTIME_MISMATCH", "Agent workspace is outside the trusted state mount")
         return workspace
 
+    def ledger_directory(self, identity):
+        # Adopt the first observed generation in place, never guess which
+        # retired tenant database to import. Concurrent adopters must agree.
+        stable = hashlib.sha256(canonical([self.instance, *identity[2:]]).encode()).hexdigest()
+        anchor = self.root / "ledgers" / (stable + ".json")
+        try:
+            raw = read_without_links(anchor, 128)
+        except FileNotFoundError:
+            anchor.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            temporary = stage_bytes(anchor, encode_json(self.generation))
+            try:
+                try:
+                    os.link(temporary, anchor)
+                except FileExistsError:
+                    pass
+            finally:
+                temporary.unlink(missing_ok=True)
+            sync_directory(anchor.parent)
+            raw = read_without_links(anchor, 128)
+        try:
+            first = json.loads(raw)
+        except (ValueError, UnicodeError):
+            first = None
+        if not isinstance(first, str) or not re.fullmatch(r"[a-f0-9]{64}", first):
+            raise APIError("RECOVERY_REQUIRED", "Invalid private Chat ledger anchor")
+        return self.root / hashlib.sha256(canonical([self.instance, first, *identity[2:]]).encode()).hexdigest()
+
     async def runtime_service(self, grant=None):
         identity = [self.instance, self.generation]
         identity.extend(["instance-chat"] if grant is None or grant.instance_chat else
                         [grant.installation_id, grant.agent_identify, grant.native_agent_id])
         key = hashlib.sha256(canonical(identity).encode()).hexdigest()
         async with self.lock:
+            if self.predecessors:
+                await asyncio.gather(*(asyncio.shield(task) for task in self.predecessors))
+                self.predecessors = ()
+            if self.binding_guard:
+                self.binding_guard()
             if self.closed:
                 raise APIError("RUNTIME_MISMATCH", "The Host binding is no longer current")
             current = self.services.get(key)
@@ -119,7 +153,8 @@ class PlatformRuntimePool:
                 if len(self.services) >= 8:
                     raise APIError("BUSY", "Platform pilot capacity reached", retryable=True)
                 registration = self.registration(grant)
-                current = Service(self.root / key, audience=self.audience, workers=2, binding_guard=self.binding_guard)
+                current = Service(self.ledger_directory(identity), audience=self.audience, workers=2, binding_guard=self.binding_guard,
+                                  session_directory=self.root / key)
                 try:
                     adapter = create_runtime_adapter(registration, current.store, current.read_workers, current.publish)
                     if not getattr(adapter, "host_binding", None) or not adapter.gateway:
@@ -128,6 +163,7 @@ class PlatformRuntimePool:
                     adapter.gateway.paused = self.binding_guard is not None and self.sessions == 0
                     current.register(adapter, persist_registration=False)
                     await current.start()
+                    current.store.bind_ledger(self.instance, self.generation)
                 except BaseException:
                     await current.close()
                     raise
@@ -207,6 +243,7 @@ class SharedPlatformRuntimePool:
         self.root, self.audience = root, audience
         self.pools = {}
         self.retiring = set()
+        self.draining = {}
 
     def profile(self, runtime):
         if not isinstance(runtime, str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]{1,46}[a-z0-9]", runtime):
@@ -262,12 +299,20 @@ class SharedPlatformRuntimePool:
         self.pools[runtime] = (value, pool)
         if current is not None:
             self.retire(current[1])
+        pool.predecessors = tuple(self.draining.get(runtime, ()))
         return pool
 
     def retire(self, pool):
         task = asyncio.create_task(pool.close())
         self.retiring.add(task)
-        task.add_done_callback(self.retiring.discard)
+        pending = self.draining.setdefault(pool.instance, set())
+        pending.add(task)
+        def finished(done):
+            self.retiring.discard(done)
+            pending.discard(done)
+            if not pending:
+                self.draining.pop(pool.instance, None)
+        task.add_done_callback(finished)
 
     def reap(self):
         for runtime, (value, pool) in tuple(self.pools.items()):

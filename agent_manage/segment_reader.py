@@ -28,6 +28,7 @@ HISTORY_PAGE_BYTES = 1024 * 1024
 CHUNK_BYTES = 96 * 1024
 MEDIA_CHUNK_BYTES = 5 * 1024 * 1024
 TTL_MS = 60 * 60 * 1000
+MAX_REFERENCE_CHARS = 8192
 CANONICAL = {"message", "thinking_level_change", "model_change", "compaction",
              "branch_summary", "custom", "custom_message", "label", "session_info"}
 EXTENSIONS = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif",
@@ -40,6 +41,9 @@ MISSING = object()
 _MEDIA_HASHES = OrderedDict()
 _MEDIA_HASH_LOCK = threading.Lock()
 _MEDIA_HASH_LIMIT = 256
+_INDEXES = OrderedDict()
+_INDEX_LOCK = threading.Lock()
+_INDEX_LIMIT = 16 * 1024 * 1024
 
 
 def fail(code, message):
@@ -189,7 +193,9 @@ def generated_id(file):
 
 class SegmentReader:
     @timed("readerInitMs")
-    def __init__(self, request, env):
+    def __init__(self, request, env, *, manager_read=False):
+        self.manager_read = manager_read
+        self.pending_index = None
         self.input, self.env = request, env
         self.root, self.key, self.session_id = absolute(request["root"]), request["sessionKey"], request["sessionId"]
         self.config = request["config"]
@@ -208,12 +214,19 @@ class SegmentReader:
         self.scope = digest(dumps([request["root"], self.key, self.session_id]).encode())
         if self.native_path_resolver:
             self.scope = digest(dumps([request["root"], self.key, self.session_id, request["scopeBinding"]]).encode())
-        self.token_key = digest(dumps([request["root"], self.config.get("gateway", {}).get("auth") or {}, env.get("AGENT_MANAGER_HISTORY_CURSOR_KEY", "")]).encode()).encode()
+        auth = self.config.get("gateway", {}).get("auth") or {}
+        history_key = env.get("AGENT_MANAGER_HISTORY_CURSOR_KEY", "")
+        self.token_key = digest(dumps([request["root"], auth, history_key]).encode()).encode()
+        # A public path, an empty auth object or a SecretRef is not sufficient
+        # to attest that a record was on the selected branch.
+        token = auth.get("token") if isinstance(auth, dict) and auth.get("mode") in (None, "token") else None
+        self.use_record_hints = (not manager_read and request.get("action") == "message"
+            and not any(k in request for k in ("maxTranscriptBytes", "maxRecordBytes", "maxRecords"))
+            and any(isinstance(s, str) and len(s.strip()) >= 16 and "$" not in s for s in (history_key, token)))
         workspace = (self.agent or {}).get("workspace") or agents.get("defaults", {}).get("workspace")
         self.media_roots = [self.root / "workspace", self.root / "media"]
         if workspace:
             self.media_roots[0] = self.native_path_resolver(workspace) if self.native_path_resolver else absolute(self.expand_home(workspace))
-        self.media_identities = {}
 
     def expand_home(self, value):
         return self.env.get("HOME", str(Path.home())) + value[1:] if value == "~" or value.startswith("~/") else value
@@ -257,7 +270,10 @@ class SegmentReader:
             body, signature = value.split(".")
             expected = b64url(hmac.new(self.token_key, body.encode(), hashlib.sha256).digest())
             data = json.loads(unb64url(body))
-            if not hmac.compare_digest(signature, expected) or data.get("v") != 1 or data.get("scope") != self.scope or data.get("kind") != kind or type(data.get("expires")) is not int or data["expires"] < time.time() * 1000:
+            if (not hmac.compare_digest(signature, expected) or data.get("v") != 1
+                    or data.get("scope") != self.scope or data.get("kind") != kind
+                    or type(data.get("expires")) is not int
+                    or (kind != "page" and data["expires"] < time.time() * 1000)):
                 raise ValueError()
             return data
         except (ValueError, TypeError, KeyError, AttributeError):
@@ -353,6 +369,24 @@ class SegmentReader:
             fail("CURSOR_EXPIRED", "Transcript was truncated")
         if self.input.get("maxTranscriptBytes") and boundary > self.input["maxTranscriptBytes"]:
             fail("TRANSCRIPT_TOO_LARGE", "Transcript exceeds this service's read budget")
+        cache_key = (self.scope, self.token_key, self.input.get("_indexBinding"), opened.st_dev, opened.st_ino, opened.st_size,
+                     opened.st_ctime_ns, opened.st_mtime_ns, boundary,
+                     self.input.get("maxRecords"), self.input.get("maxRecordBytes"))
+        self.fd = fd
+        if self.manager_read:
+            with _INDEX_LOCK:
+                cached = _INDEXES.get(cache_key)
+                if cached is not None:
+                    _INDEXES.move_to_end(cache_key)
+            if cached is not None:
+                self.snapshot, self.summary, offsets = json.loads(cached)
+                if snapshot and snapshot != self.snapshot:
+                    fail("CURSOR_EXPIRED", "Transcript snapshot changed")
+                self.rows = [{"meta": {"id": i}, "start": a, "length": n, "timestamp": t,
+                              "role": role, "hasMessage": msg} for i, a, n, t, role, msg in offsets]
+                self.by_id = {self.identifier(row): row for row in self.rows}
+                count("snapshotIndexHits", 1)
+                return
         records, hasher, committed, at = [], hashlib.sha256(), 0, 0
         # Buffered readline avoids repeatedly copying large incomplete lines.
         with os.fdopen(os.dup(fd), "rb") as stream:
@@ -386,6 +420,8 @@ class SegmentReader:
                 records.append({"meta": {key: raw[key] for key in ("type", "id", "parentId", "targetId", "appendMode", "appendParentId") if key in raw},
                                 "start": at, "length": len(line), "timestamp": millis(raw.get("timestamp") if raw.get("timestamp") is not None else message.get("timestamp")),
                                 "role": message.get("role"), "preview": short_text(message), "hasMessage": isinstance(raw.get("message"), dict)})
+                if self.use_record_hints and self.identifier(records[-1]) == self.input["messageId"]:
+                    records[-1]["record"] = [at, len(line), digest(line)]
                 if self.input.get("maxRecords") and len(records) > self.input["maxRecords"]:
                     fail("TRANSCRIPT_TOO_LARGE", "Transcript record count exceeds this service's read budget")
                 hasher.update(line)
@@ -395,7 +431,6 @@ class SegmentReader:
         if snapshot and (committed != snapshot.get("bytes") or fingerprint != snapshot.get("hash")):
             fail("CURSOR_EXPIRED", "Transcript snapshot changed")
         self.snapshot = snapshot or {"dev": str(opened.st_dev), "ino": str(opened.st_ino), "bytes": committed, "hash": fingerprint}
-        self.fd = fd
         count("transcriptBytes", committed)
         count("recordsScanned", len(records))
         selected = select_rows(records)
@@ -407,11 +442,46 @@ class SegmentReader:
             if identifier in self.by_id:
                 fail("SEGMENT_READ_FAILED", "Transcript contains duplicate message IDs")
             self.by_id[identifier] = row
-        return records
+        times = [row["timestamp"] for row in records if row["timestamp"] is not None]
+        self.summary = {"startedAt": min(times) if times else None, "endedAt": max(times) if times else None,
+                        "preview": [next((r["preview"] for r in reversed(self.rows) if r["role"] == role), "")
+                                    for role in ("user", "assistant")]}
+        if self.manager_read and boundary == committed and all(
+                isinstance(self.identifier(r), str) and len(self.identifier(r)) <= 256
+                and (r["role"] is None or isinstance(r["role"], str) and len(r["role"]) <= 64)
+                for r in self.rows):
+            offsets = [(self.identifier(r), r["start"], r["length"], r["timestamp"], r["role"], r["hasMessage"])
+                       for r in self.rows]
+            packed = dumps([self.snapshot, self.summary, offsets]).encode()
+            if len(packed) <= _INDEX_LIMIT // 4:
+                self.pending_index = (cache_key, packed)
 
     @staticmethod
     def identifier(row):
         return row["meta"].get("id") or "entry-" + format(row["start"], "x")
+
+    def resume_message_record(self, fd, opened, snapshot, reference):
+        location = reference["record"]
+        boundary = snapshot.get("bytes")
+        if (not isinstance(location, list) or len(location) != 3 or type(boundary) is not int
+                or not 0 < boundary <= opened.st_size):
+            fail("CURSOR_EXPIRED", "Invalid message location or truncated snapshot")
+        start, length, sha = location
+        if (type(start) is not int or type(length) is not int or not 0 <= start < start + length <= boundary
+                or not isinstance(sha, str) or not re.fullmatch(r"[a-f0-9]{64}", sha)):
+            fail("CURSOR_EXPIRED", "Invalid message location")
+        data = os.pread(fd, length, start)
+        if len(data) != length or digest(data) != sha:
+            fail("CURSOR_EXPIRED", "Stored message changed")
+        raw = json.loads(data)
+        message = raw.get("message") or {}
+        row = {"meta": {"id": raw.get("id")}, "start": start, "length": length, "record": location,
+               "timestamp": millis(raw.get("timestamp") if raw.get("timestamp") is not None else message.get("timestamp"))}
+        if self.identifier(row) != self.input["messageId"]:
+            fail("CURSOR_EXPIRED", "Message location mismatch")
+        self.fd, self.snapshot = fd, snapshot
+        count("messageLocationHits")
+        return row, raw
 
     @timed("snapshotVerificationMs")
     def finish(self, payload):
@@ -427,10 +497,20 @@ class SegmentReader:
         count("snapshotVerifyBytes", at)
         count("messagesReturned", len(payload.get("messages", [])) + int("message" in payload))
         latest = self.entry()
+        if self.pending_index is not None:
+            key, value = self.pending_index
+            with _INDEX_LOCK:
+                _INDEXES[key] = value
+                _INDEXES.move_to_end(key)
+                while len(_INDEXES) > 32 or sum(map(len, _INDEXES.values())) > _INDEX_LIMIT:
+                    _INDEXES.popitem(last=False)
         if "segment" in payload:
             payload["segment"]["isCurrent"] = latest.get("sessionId") == self.session_id
         if self.input.get("includeSnapshot"):
             payload["snapshotId"] = digest(dumps([self.scope, self.snapshot]).encode())
+        if self.manager_read and self.input["action"] in ("history", "message"):
+            messages = [payload["message"]] if "message" in payload else payload.get("messages", ())
+            payload["revisions"] = {msg["id"]: self.by_id[msg["id"]]["revision"] for msg in messages}
         return payload
 
     def ref_token(self, kind, **values):
@@ -444,7 +524,7 @@ class SegmentReader:
     @timed("messageReadMs")
     def raw(self, row):
         data = os.pread(self.fd, row["length"], row["start"])
-        if len(data) != row["length"]:
+        if len(data) != row["length"] or ("record" in row and digest(data) != row["record"][2]):
             fail("CURSOR_EXPIRED", "Message snapshot changed")
         return json.loads(data)
 
@@ -529,7 +609,7 @@ class SegmentReader:
             raise ValueError("Invalid base64")
         return data
 
-    def media_ref(self, row, pointer, source, value, purpose="unknown", inline=None):
+    def media_ref(self, row, pointer, source, value, purpose="unknown", inline=None, *, pending=None):
         media_hash = None
         metadata = {}
         try:
@@ -551,21 +631,32 @@ class SegmentReader:
                 metadata["fileName"] = name
         except (OSError, ValueError, ProtocolError):
             pass
+        claims = {"messageId": self.identifier(row), "pointer": pointer, "source": source,
+                  **({"mediaHash": media_hash} if media_hash else {})}
+        params = {"sessionKey": self.key, "sessionId": self.session_id}
+        if pending is None:
+            params["ref"] = self.ref_token("media", **claims)
+        else:
+            # Hash the projection using a stable reference, then sign the actual read capability.
+            if not media_hash:
+                metadata["locatorId"] = digest(dumps([pointer, source, value]).encode())
+            params["ref"] = media_hash or metadata["locatorId"]
+            pending.append((params, claims))
         return {**({"mediaId": "sha256:" + media_hash} if media_hash else {}),
                 **({"purpose": purpose, **metadata} if self.input.get("includeSnapshot") else {}), "method": "sessions.segments.media.get",
-                "params": {"sessionKey": self.key, "sessionId": self.session_id,
-                           "ref": self.ref_token("media", messageId=self.identifier(row), pointer=pointer, source=source,
-                                                 **({"mediaHash": media_hash} if media_hash else {}))}}
+                "params": params}
 
     @timed("messageBuildMs")
-    def materialize(self, row, *, view="full", omit_thinking=False):
-        raw = self.raw(row)
+    def materialize(self, row, *, view="full", omit_thinking=False, raw=None):
+        if raw is None:
+            raw = self.raw(row)
         with_statistics = self.input.get("includeMessageStatistics")
         statistics = self.message_statistics(row, raw) if with_statistics else None
         message = raw["message"] if isinstance(raw.get("message"), dict) else ({"role": "system", "content": raw.get("content"), "customType": raw.get("customType")} if raw.get("type") == "custom_message" else {"role": "system", "content": [{"type": "text", "text": "Compaction"}], "compaction": raw})
         message.update(id=self.identifier(row), timestamp=millis(message.get("timestamp")) if millis(message.get("timestamp")) is not None else row["timestamp"])
         message["__openclaw"] = {**message.get("__openclaw", {}), "id": self.identifier(row), **({"kind": raw.get("type")} if raw.get("type") != "message" else {})}
         media, identities = [], set()
+        pending = [] if self.manager_read and self.input["action"] in ("history", "message") else None
 
         def add(reference):
             identity = (reference.get("mediaId"), reference.get("purpose"))
@@ -583,7 +674,7 @@ class SegmentReader:
                 if value.get("type") in {"toolCall", "tool_call", "tool_use", "functionCall"}:
                     purpose = "tool_input"
                 if value.get("type") in {"image", "base64"} and isinstance(value.get("data"), str):
-                    reference = self.media_ref(row, [*pointer, "data"], "base64", value.pop("data"), purpose, value)
+                    reference = self.media_ref(row, [*pointer, "data"], "base64", value.pop("data"), purpose, value, pending=pending)
                     value["mediaRef"] = reference
                     add(reference)
                 children = list(value.items())
@@ -593,11 +684,11 @@ class SegmentReader:
                 if key == "mediaRef":
                     continue
                 if isinstance(child, str) and (media_array or key in {"url", "path", "filePath", "MediaPath"}) and self.local_media(child):
-                    add(self.media_ref(row, [*pointer, key], "path", child, purpose))
+                    add(self.media_ref(row, [*pointer, key], "path", child, purpose, pending=pending))
                 elif isinstance(child, str) and key in {"text", "content"}:
                     for match in re.finditer(r'MEDIA:\s*([^\s"<>]+)', child):
                         if self.local_media(match[1]):
-                            add(self.media_ref(row, [*pointer, key], "text:" + match[1], match[1], purpose))
+                            add(self.media_ref(row, [*pointer, key], "text:" + match[1], match[1], purpose, pending=pending))
                 elif isinstance(child, (dict, list)):
                     visit(child, [*pointer, key], isinstance(child, list) and key in {"paths", "savedPaths", "mediaUrls", "MediaPaths"}, purpose)
         visit(message, [], purpose={"user": "user_input", "assistant": "assistant_output", "toolResult": "tool_output",
@@ -616,6 +707,10 @@ class SegmentReader:
         message = compact_tools(message) if view == "compact" else message
         if with_statistics:
             message["statistics"] = statistics
+        if pending is not None:
+            row["revision"] = digest(json.dumps(message, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode())
+            for params, claims in pending:
+                params["ref"] = self.ref_token("media", **claims)
         return message
 
     def locate(self, identifier):
@@ -714,7 +809,7 @@ class SegmentReader:
         return {**statistics, "usage": usage}
 
     @timed("chunkEncodeMs")
-    def chunk(self, data, offset, reference, *, total_size=None, **extra):
+    def chunk(self, data, offset, reference, *, total_size=None, record=None, **extra):
         total = len(data) if total_size is None else total_size
         if type(offset) is not int or not 0 <= offset <= total:
             fail("CURSOR_EXPIRED", "Invalid chunk boundary")
@@ -729,8 +824,17 @@ class SegmentReader:
             values["view"] = extra["view"]
             values["omitThinking"] = extra.get("omitThinking", False)
             values["format"] = self.message_chunk_format()
+            values["messageHash"] = extra["sha256"]
+            if record is not None:
+                values["record"] = record
+        next_cursor = self.ref_token("chunk", **values) if end < total else None
+        if next_cursor and "messageHash" in values and len(next_cursor) > MAX_REFERENCE_CHARS:
+            # The caller already supplies the ID. Keep the payload hash even for long IDs.
+            values.pop("record", None)
+            values["messageIdHash"] = digest(values.pop("messageId").encode())
+            next_cursor = self.ref_token("chunk", **values)
         return {**extra, "encoding": "base64", "data": base64.b64encode(part).decode(), "offset": offset,
-                "totalBytes": total, "nextCursor": self.ref_token("chunk", **values) if end < total else None}
+                "totalBytes": total, "nextCursor": next_cursor}
 
     def message_chunk_format(self):
         return 3 if self.input.get("includeMessageStatistics") else 2
@@ -742,10 +846,23 @@ class SegmentReader:
         snapshot = reference.get("snapshot") if reference else None
         if reference and not isinstance(snapshot, dict):
             fail("CURSOR_EXPIRED", "Invalid snapshot")
+        if action == "message" and reference:
+            identifier = self.input["messageId"]
+            matches = (reference["messageIdHash"] == digest(identifier.encode())
+                       if cursor and "messageIdHash" in reference else reference.get("messageId") == identifier)
+            if not matches or cursor and reference.get("action") != "message":
+                fail("CURSOR_EXPIRED", "Message reference mismatch")
+            if cursor and reference.get("format") != self.message_chunk_format():
+                fail("CURSOR_EXPIRED", "Message output format changed; restart the message read")
         fd, opened = self.open_transcript(entry, snapshot)
         try:
-            records = self.scan(fd, opened, entry, snapshot)
-            self.expires = reference["expires"] if reference else int(time.time() * 1000) + TTL_MS
+            located = None
+            if self.use_record_hints and cursor and "record" in reference:
+                located = self.resume_message_record(fd, opened, snapshot, reference)
+            else:
+                self.scan(fd, opened, entry, snapshot)
+            # Each history page issues fresh short-lived content refs; chunks keep their original deadline.
+            self.expires = reference["expires"] if reference and action != "history" else int(time.time() * 1000) + TTL_MS
             base = {"sessionKey": self.key, "sessionId": self.session_id}
             if action == "usage":
                 limit = self.input["limit"]
@@ -753,21 +870,25 @@ class SegmentReader:
                 return self.finish({"logs": [self.usage_log(row) for row in rows[-limit:]]})
             if action == "message":
                 identifier = self.input["messageId"]
-                if reference and (reference.get("messageId") != identifier or cursor and reference.get("action") != "message"):
-                    fail("CURSOR_EXPIRED", "Message reference mismatch")
-                if cursor and reference.get("format") != self.message_chunk_format():
-                    fail("CURSOR_EXPIRED", "Message output format changed; restart the message read")
-                row = self.locate(identifier)
+                row, raw = located if located else (self.locate(identifier), None)
                 view = reference.get("view", "full") if reference else "full"
                 omit_thinking = reference.get("omitThinking", False) if reference else False
-                message = self.materialize(row, view=view, omit_thinking=omit_thinking)
+                message = self.materialize(row, view=view, omit_thinking=omit_thinking, raw=raw)
                 base["messageId"] = identifier
                 base["view"] = view
                 base["omitThinking"] = omit_thinking
+                if self.manager_read and not cursor:
+                    if len(dumps(message).encode()) > 8 * 1024 * 1024:
+                        fail("MESSAGE_TOO_LARGE", "Message exceeds the Manager read budget")
+                    return self.finish({**base, "message": message})
                 if not cursor and len(dumps(message, pretty=True).encode()) < PAGE_BYTES:
                     return self.finish({**base, "message": message})
                 data = dumps(message).encode()
-                return self.finish(self.chunk(data, reference.get("offset", 0) if reference else 0, reference, **base, contentType="application/json", sha256=digest(data)))
+                message_hash = digest(data)
+                if cursor and "messageHash" in reference and reference["messageHash"] != message_hash:
+                    fail("CURSOR_EXPIRED", "Message content changed; restart the message read")
+                return self.finish(self.chunk(data, reference.get("offset", 0) if reference else 0, reference,
+                    record=row.get("record"), **base, contentType="application/json", sha256=message_hash))
             if action == "media":
                 if not reference or cursor and reference.get("action") != "media":
                     fail("CURSOR_EXPIRED", "Invalid media reference")
@@ -851,10 +972,8 @@ class SegmentReader:
                     start -= 1
                 if message.get("role") == "user":
                     reached_user = True
-            times = [row["timestamp"] for row in records if row["timestamp"] is not None]
-            preview = [next((row["preview"] for row in reversed(self.rows) if row["role"] == role), "") for role in ("user", "assistant")]
-            return self.finish({**base, "view": view, **({"omitThinking": omit_thinking} if self.input.get("includeSnapshot") else {}), "segment": {"startedAt": min(times) if times else None, "endedAt": max(times) if times else None,
-                "isCurrent": entry.get("sessionId") == self.session_id, "readable": True, "preview": preview}, "messages": messages, "reachedUser": reached_user,
+            return self.finish({**base, "view": view, **({"omitThinking": omit_thinking} if self.input.get("includeSnapshot") else {}), "segment": {**self.summary,
+                "isCurrent": entry.get("sessionId") == self.session_id, "readable": True}, "messages": messages, "reachedUser": reached_user,
                 "olderCursor": self.ref_token("page", position=start, direction="older", view=view, omitThinking=omit_thinking) if start > 0 else None,
                 "newerCursor": self.ref_token("page", position=stop, direction="newer", view=view, omitThinking=omit_thinking) if stop < len(self.rows) else None})
         finally:
@@ -960,9 +1079,9 @@ def compact_tools(message):
     return message
 
 
-def read_segment(request, env):
+def read_segment(request, env, *, manager_read=False):
     try:
-        return SegmentReader(request, env).run()
+        return SegmentReader(request, env, manager_read=manager_read).run()
     except ProtocolError:
         raise
     except (OSError, ValueError, TypeError, KeyError, AttributeError, OverflowError, RecursionError):

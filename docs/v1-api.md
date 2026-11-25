@@ -54,6 +54,16 @@ Native 管理错误保留脱敏 legacyCode、备份/回滚及重启信息，不�
 所有写方法必须带 `clientRequestId`，首次返回一个 accepted Operation。通过 `operations.get` 查询执行结果。
 同一 issuer/subject/tenant/Runtime/method/clientRequestId 只执行一次；更换 requestId 不会重做。
 参数改变但 clientRequestId 未变，返回 IDEMPOTENCY_CONFLICT。记录跨进程重启保留。
+
+共享 Host 在同一业务实例、授权主体和安装范围内保留操作回执，容器重建后仍用原
+`clientRequestId` 查询，不重新提交。若旧代次正在生成，不能向新底座发送取消或重放。
+同代次断线重新订阅时会恢复仍活跃 Run 的原生订阅；实时流不补发，客户端按
+`resyncRequired` 重读历史及 Run 状态。
+
+`threads.create` 指定标题时，创建成功和改名结果分开表达。结果含 `threadId`、
+`agentId` 和 `titleStatus`（`applied`、`not_applied` 或 `unknown`）。
+创建后若 Manager 中断，原操作可能是 `unknown`，但已保存的线程 ID 仍可查询。
+不要为了重试标题再创建会话；先读该线程，再决定是否改名。
 不要为了绕过 unknown 改一个 clientRequestId 自动重发；先查询原 Operation/Run 和现场状态。
 
 ```json
@@ -133,8 +143,11 @@ All calls include `runtimeId`. The following methods are enabled by the instance
 
 `messages.list` 默认 50 条，范围 1–200；先取够条数，向旧翻页缺少用户消息时按已有逻辑继续，最多 1 MiB 页面预算。
 `edge=start/end` 与 cursor 互斥；cursor 是原生段快照的不可篡改引用，只用于历史分页。
+历史页的 olderCursor/newerCursor 不按时间过期，但签名、范围、快照和当前请求授权仍须有效。页内新签发的长消息与媒体引用有效期仍为一小时。
 omitThinking 可以显式切换；不传时继承游标，projectionId 随投影变化。
 view 首次默认 compact；后续省略时继承 cursor/ref，显式改变 view 需重新打开该段。
+同一展示方式下，历史消息的 `revision` 标记内容版本，不取决于读取凭证的签发时间。
+刷新凭证不会改变版本；修改正文或替换可读取的附件会改变版本。大消息摘要与其补读结果使用同一版本，凭证过期仍须重取。
 
 ```json
 {"threadId":"thread_...","segmentId":"segment_...","items":[{

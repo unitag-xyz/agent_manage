@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## 1.0.004 - 2026-11-25
+
+- Keep OpenClaw history page cursors usable after idle periods in both the CLI and Manager API. Scope and snapshot checks remain; message, media and chunk references still expire after one hour.
+- Reconcile confirmed failed OpenClaw runs after reconnect and release explicitly refused subscription slots.
+- Keep history message revisions stable across renewed read references and batch page resource mappings outside the event loop.
+- Use the same file content and permission fingerprint for template refresh and interrupted-refresh recovery.
+- Avoid reparsing unrelated transcript records when continuing a signed CLI message chunk. Preserve old cursors, snapshot checks and chunk sizes; timed CLI responses no longer encode the whole payload twice.
+- Reject resumed message chunks when the projected content changes, including referenced attachments. Count the trailing LF in the CLI stdout byte budget and diagnostics.
+
+- Preserve confirmed run outcomes across lost acknowledgements, reattach native observers after reconnect without resending, and retain the created thread ID if an optional title update fails.
+- Keep shared-Host operation receipts across container rebuilds without reusing old execution authority. Publish a complete refresh journal before modifying live files.
+- Batch session mappings, index run lookups and reuse verified transcript indexes for history and media. The Manager reads large messages in one pass; CLI chunking and authorization are unchanged.
+
 ## 1.0.003 - 2026-11-25
 
 - Preserve recorded Codex billing source in Chat2 assistant history statistics, without inferring it from model names or the current login.

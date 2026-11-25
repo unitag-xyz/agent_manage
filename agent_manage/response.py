@@ -117,26 +117,42 @@ def redact_sensitive_values(value: object, secrets: list[str]) -> object:
     return value
 
 
+def _utf8_size(text):
+    return len(text) if text.isascii() else len(text.encode("utf-8"))
+
+
+def _timed_json_parts(value, timing):
+    # Put the diagnostic slot first, before *any* user-supplied keys or text.
+    # Only its small JSON value needs encoding after measuring the envelope.
+    nested = isinstance(value.get("result"), dict)
+    if nested:
+        result = {k: v for k, v in value["result"].items() if k != "timings"}
+        envelope = {"result": {"timings": None, **result}, **{k: v for k, v in value.items() if k != "result"}}
+    else:
+        envelope = {"timings": None, **{k: v for k, v in value.items() if k != "timings"}}
+    with timing.span("responseSerializationMs"):
+        encoded = json.dumps(envelope, indent=2, ensure_ascii=False)
+        size = _utf8_size(encoded)
+    timing.counts["responseBytesBeforeTimingFinalization"] = size
+    before, slot, after = encoded.partition('"timings": null')
+    assert slot
+    indent = "    " if nested else "  "
+    metadata = json.dumps(timing.snapshot(), indent=2, ensure_ascii=False).replace("\n", "\n" + indent)
+    return (before + '"timings": ', metadata, after), size - len("null") + _utf8_size(metadata)
+
+
 def print_json(value: object) -> None:
     timing = CURRENT.get()
-    if timing is not None:
-        # Measure one normal serialization before finalizing diagnostic metadata.
-        # The final metadata serialization and stdout delivery cannot measure
-        # themselves inside the same response.
-        with timing.span("responseSerializationMs"):
-            serialized = json.dumps(value, indent=2, ensure_ascii=False)
-            payload_bytes = len(serialized.encode("utf-8"))
-        timing.counts["responseBytesBeforeTimingFinalization"] = payload_bytes
-        value = dict(value)
-        if isinstance(value.get("result"), dict):
-            value["result"] = {**value["result"], "timings": timing.snapshot()}
-        else:
-            value["timings"] = timing.snapshot()
-    serialized = json.dumps(value, indent=2, ensure_ascii=False)
-    original_utf8_bytes = len(serialized.encode("utf-8"))
+    if timing is None:
+        encoded = json.dumps(value, indent=2, ensure_ascii=False)
+        parts, original_utf8_bytes = (encoded,), _utf8_size(encoded)
+    else:
+        parts, original_utf8_bytes = _timed_json_parts(value, timing)
+    original_utf8_bytes += 1  # The stdout protocol includes a trailing LF.
+    emitted_utf8_bytes = original_utf8_bytes
     budget_applied = original_utf8_bytes > MAX_PROTOCOL_RESPONSE_BYTES
     if budget_applied:
-        serialized = json.dumps(
+        encoded = json.dumps(
             {
                 "result": None,
                 "error": {
@@ -152,7 +168,7 @@ def print_json(value: object) -> None:
             indent=2,
             ensure_ascii=False,
         )
-    emitted_utf8_bytes = len(serialized.encode("utf-8"))
+        parts, emitted_utf8_bytes = (encoded,), _utf8_size(encoded) + 1
     print(
         "[agentctl response] "
         f"original_utf8_bytes={original_utf8_bytes} "
@@ -160,7 +176,14 @@ def print_json(value: object) -> None:
         f"budget_applied={str(budget_applied).lower()}",
         file=sys.stderr,
     )
-    print(serialized)
+    stream = getattr(sys.stdout, "buffer", None)
+    if stream is not None:
+        # Do not let the console encoding or newline translation change wire bytes.
+        stream.writelines(part.encode("utf-8") for part in parts)
+        stream.write(b"\n")
+    else:
+        sys.stdout.writelines(parts)
+        sys.stdout.write("\n")
 
 
 def _server_timestamp() -> str:

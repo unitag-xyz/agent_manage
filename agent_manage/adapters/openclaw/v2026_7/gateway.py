@@ -65,6 +65,10 @@ class Gateway:
                 raise APIError("NOT_READY", "Native Gateway transport is not active")
             if self.ws is not None and not self.ws.closed and self.hello is not None:
                 return
+            if self.reader is not None and not self.reader.done():
+                # Finish the old socket's pending calls/disconnect notification
+                # before it can race with subscriptions on a replacement socket.
+                await asyncio.shield(self.reader)
             if self.session is None:
                 transport = aiohttp.UnixConnector(path=self.unix_socket) if self.unix_socket else None
                 self.session = aiohttp.ClientSession(connector=transport, timeout=aiohttp.ClientTimeout(total=20))
@@ -148,11 +152,21 @@ class Gateway:
             target = (key, agent_id)
             count = self.session_observers.get(target, 0)
             if count == 0:
-                if target not in self.session_observers and len(self.session_observers) >= 128:
+                new_target = target not in self.session_observers
+                if new_target and len(self.session_observers) >= 128:
                     raise APIError("BUSY", "Native session observation limit reached", retryable=True)
                 self.session_observers[target] = 0
-                result = await self.call("sessions.messages.subscribe", {"key": key, "agentId": agent_id},
-                                         timeout=5, expected_socket=socket)
+                try:
+                    result = await self.call("sessions.messages.subscribe", {"key": key, "agentId": agent_id},
+                                             timeout=5, expected_socket=socket)
+                except APIError as exc:
+                    # A refused retry does not settle an earlier lost acknowledgement.
+                    if new_target and exc.code != "DISPATCH_UNKNOWN":
+                        self.session_observers.pop(target, None)
+                    raise
+                if (new_target and isinstance(result, dict) and result.get("subscribed") is False
+                        and result.get("key") == key):
+                    self.session_observers.pop(target, None)
                 if not isinstance(result, dict) or result.get("subscribed") is not True or result.get("key") != key:
                     raise APIError("NATIVE_PROTOCOL_ERROR", "Gateway did not acknowledge the requested session")
             self.session_observers[target] = count + 1

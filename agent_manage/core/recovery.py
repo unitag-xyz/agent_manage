@@ -4,15 +4,7 @@ import json
 from pathlib import Path
 
 from .errors import APIError
-from ..file_io import atomic_write_bytes, write_private_json, sync_directory
-
-
-def fingerprint(path):
-    if not path.exists():
-        return None
-    if path.is_symlink() or not path.is_file():
-        raise ValueError("Recovery refuses links and non-regular files")
-    return {"sha256": hashlib.sha256(path.read_bytes()).hexdigest(), "mode": path.stat().st_mode & 0o777}
+from ..file_io import atomic_write_bytes, fingerprint, write_private_json, sync_directory
 
 
 def recovery_entries(config_path):

@@ -144,7 +144,7 @@ class CliResponseTest(unittest.TestCase):
         stdout = io.StringIO()
         stderr = io.StringIO()
         oversized = build_success_response({"payload": secret + ("x" * MAX_PROTOCOL_RESPONSE_BYTES)})
-        original_utf8_bytes = len(json.dumps(oversized, indent=2, ensure_ascii=False).encode("utf-8"))
+        original_utf8_bytes = len((json.dumps(oversized, indent=2, ensure_ascii=False) + "\n").encode("utf-8"))
 
         with redirect_stdout(stdout), redirect_stderr(stderr):
             print_json(oversized)
@@ -162,13 +162,13 @@ class CliResponseTest(unittest.TestCase):
             diagnostics,
             "[agentctl response] "
             f"original_utf8_bytes={original_utf8_bytes} "
-            f"emitted_utf8_bytes={len(output.rstrip(chr(10)).encode('utf-8'))} "
+            f"emitted_utf8_bytes={len(output.encode('utf-8'))} "
             "budget_applied=true\n",
         )
 
     def test_small_final_json_reports_exact_emitted_byte_count(self):
         response = build_success_response({"message": "猫"})
-        expected_utf8_bytes = len(json.dumps(response, indent=2, ensure_ascii=False).encode("utf-8"))
+        expected_utf8_bytes = len((json.dumps(response, indent=2, ensure_ascii=False) + "\n").encode("utf-8"))
         stdout = io.StringIO()
         stderr = io.StringIO()
 
@@ -183,6 +183,24 @@ class CliResponseTest(unittest.TestCase):
             f"emitted_utf8_bytes={expected_utf8_bytes} "
             "budget_applied=false\n",
         )
+
+    def test_wire_budget_includes_final_lf(self):
+        for extra in (0, 1):
+            with self.subTest(extra=extra):
+                raw = io.BytesIO()
+                with io.TextIOWrapper(raw, encoding="utf-8", newline="\r\n") as stdout:
+                    with redirect_stdout(stdout), redirect_stderr(io.StringIO()):
+                        # JSON adds two ASCII quotes, stdout adds one LF.
+                        print_json("x" * (MAX_PROTOCOL_RESPONSE_BYTES - 3 + extra))
+                    stdout.flush()
+                    wire = raw.getvalue()
+                if not extra:
+                    self.assertEqual(len(wire), MAX_PROTOCOL_RESPONSE_BYTES)
+                    self.assertTrue(wire.endswith(b'"\n'))
+                else:
+                    error = json.loads(wire)["error"]
+                    self.assertEqual(error, {"code": "RESPONSE_OUTPUT_TOO_LARGE",
+                                             "details": {"totalUtf8Bytes": MAX_PROTOCOL_RESPONSE_BYTES + 1}})
 
     def test_agent_manage_version_uses_package_version(self):
         stdout = io.StringIO()

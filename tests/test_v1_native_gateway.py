@@ -167,6 +167,27 @@ class NativeGatewayTest(unittest.IsolatedAsyncioTestCase):
                 matching = [message for message in history["messages"] if message["role"] == "user"
                             and "Continue without the WebSocket" in json.dumps(message["content"])]
                 self.assertEqual(len(matching), 1, "Reconnect must not create a second user turn")
+
+                # Reconnect before completion too: history alone cannot prove
+                # that the replacement socket receives live native events.
+                model_started.clear()
+                release_model.clear()
+                old_observer = await gateway.retain_session(other_key, "main")
+                resumed = await gateway.call("chat.send", {"sessionKey": other_key,
+                    "message": "Resume live observation", "deliver": False, "idempotencyKey": "fixture-reattach"},
+                    expected_socket=old_observer[0])
+                await asyncio.wait_for(model_started.wait(), 15)
+                await gateway.disconnect()
+                observer = await gateway.retain_session(other_key, "main")
+                self.assertIsNot(observer[0], old_observer[0])
+                boundary = len(events)
+                release_model.set()
+                async def wait_for_final():
+                    while not any(e.get("event") == "chat" and e.get("payload", {}).get("runId") == resumed["runId"]
+                                  and e["payload"].get("state") == "final" for e in events[boundary:]):
+                        await asyncio.sleep(.05)
+                await asyncio.wait_for(wait_for_final(), 30)
+                await gateway.release_session(observer)
             finally:
                 release_model.set()
                 await gateway.close()

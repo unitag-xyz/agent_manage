@@ -96,11 +96,6 @@ class ProvisioningMixin:
                 return True
         return False
 
-    def _ensure_agent_exists(self, agent_name: str) -> None:
-        if self.runner.dry_run or self._agent_exists(agent_name):
-            return
-        raise FileNotFoundError(f"Agent not found: {agent_name}")
-
     def _ensure_agent_exists_in_config(self, agent_name: str) -> None:
         if self.runner.dry_run:
             return

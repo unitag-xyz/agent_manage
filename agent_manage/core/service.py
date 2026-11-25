@@ -72,10 +72,11 @@ def safe_result(value):
 
 
 class Service:
-    def __init__(self, directory, *, audience="agent-manager", workers=4, binding_guard=None):
+    def __init__(self, directory, *, audience="agent-manager", workers=4, binding_guard=None, session_directory=None):
         self.binding_guard = binding_guard
         self.store = Store(directory)
-        self.auth = LeaseAuthority(self.store, audience)
+        self.auth = LeaseAuthority(self.store if session_directory is None or session_directory == directory
+                                   else Store(session_directory), audience)
         self.read_workers = Workers(workers, "manager-read")
         self.write_workers = Workers(2, "manager-control", queue_limit=16)
         self.media_workers = Workers(2, "manager-media")
@@ -89,13 +90,14 @@ class Service:
 
     async def start(self):
         from .transactions import runtime_write_lock
-        self._owner = runtime_write_lock(self.store.path.parent, timeout=0)
-        self._owner.__enter__()
+        owner = runtime_write_lock(self.store.path.parent, timeout=0)
+        owner.__enter__()
+        self._owner = owner
         self.store.recover_operations()
+        if self.auth.store is not self.store:
+            self.auth.store.prune_credentials()
         for identifier in self.adapters:
-            for row in self.store.objects("run", identifier):
-                if row["data"].get("status") in ("accepted", "running", "cancel_requested"):
-                    self.store.object("run", identifier, row["native"], {**row["data"], "observation": "unknown"})
+            self.store.lose_run_observation(identifier)
 
     def register(self, adapter: RuntimeAdapter, *, persist_registration=True):
         if adapter.runtime_id in self.adapters:

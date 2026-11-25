@@ -60,6 +60,8 @@ class Store:
                 CREATE INDEX IF NOT EXISTS operations_runtime_created ON operations(runtime, created);
                 CREATE INDEX IF NOT EXISTS runs_by_thread ON objects(runtime, json_extract(data, '$.threadId'))
                     WHERE kind='run';
+                CREATE INDEX IF NOT EXISTS runs_by_request ON objects(runtime, json_extract(data, '$.threadId'),
+                    json_extract(data, '$.clientRequestId')) WHERE kind='run';
             """)
             db.execute("BEGIN IMMEDIATE")
             if db.execute("PRAGMA user_version").fetchone()[0] < 2:
@@ -78,13 +80,69 @@ class Store:
         finally:
             db.close()
 
-    def object(self, kind, runtime, native, data=None):
-        # IDs do not depend on titles or positions; updates preserve mapping.
-        identifier = kind + "_" + hashlib.sha256(canonical([kind, runtime, native]).encode()).hexdigest()[:32]
+    @staticmethod
+    def object_id(kind, runtime, native):
+        return kind + "_" + hashlib.sha256(canonical([kind, runtime, native]).encode()).hexdigest()[:32]
+
+    def put_objects(self, runtime, items):
+        rows = [(self.object_id(kind, runtime, native), kind, runtime, native, canonical(data))
+                for kind, native, data in items]
+        if not rows:
+            return []
         with self.connect() as db:
-            db.execute("INSERT INTO objects VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data",
-                       (identifier, kind, runtime, native, canonical(data or {})))
-        return identifier
+            db.executemany("INSERT INTO objects VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data "
+                           "WHERE objects.data <> excluded.data", rows)
+        return [row[0] for row in rows]
+
+    def object(self, kind, runtime, native, data=None):
+        return self.put_objects(runtime, [(kind, native, data or {})])[0]
+
+    def thread_runs(self, runtime, thread, *, request_key=None):
+        query = "SELECT native,data FROM objects WHERE kind='run' AND runtime=? AND json_extract(data,'$.threadId')=?"
+        args = [runtime, thread]
+        if request_key is not None:
+            query += " AND json_extract(data,'$.clientRequestId')=?"
+            args.append(request_key)
+        else:
+            query += (" AND json_extract(data,'$.status') IN ('accepted','running','cancel_requested')"
+                      " AND json_extract(data,'$.executionDetached') IS NOT 1 LIMIT 129")
+        with self.connect() as db:
+            return [(row[0], json.loads(row[1])) for row in db.execute(query, args)]
+
+    def lose_run_observation(self, runtime):
+        with self.connect() as db:
+            db.execute("""UPDATE objects SET data=json_set(data,'$.observation','unknown')
+                WHERE kind='run' AND runtime=? AND json_extract(data,'$.status') IN ('accepted','running','cancel_requested')
+                AND json_extract(data,'$.observation') IS NOT 'unknown'""", (runtime,))
+
+    def bind_ledger(self, runtime, generation):
+        identifier = self.object_id("host_generation", runtime, runtime)
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT data FROM objects WHERE id=?", (identifier,)).fetchone()
+            if row and json.loads(row[0]) != generation:
+                db.execute("""UPDATE objects SET data=json_set(data, '$.observation','unknown',
+                    '$.executionDetached',json('true')) WHERE kind='run' AND runtime=?
+                    AND json_extract(data,'$.status') IN ('accepted','running','cancel_requested')""", (runtime,))
+            db.execute("INSERT OR REPLACE INTO objects VALUES(?,?,?,?,?)",
+                       (identifier, "host_generation", runtime, runtime, canonical(generation)))
+
+    def transition_run(self, runtime, native, **changes):
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT id,data FROM objects WHERE kind='run' AND runtime=? AND native=?",
+                             (runtime, native)).fetchone()
+            if row is None:
+                raise APIError("NOT_FOUND", "Unknown run")
+            data = json.loads(row["data"])
+            if data.get("executionDetached") or data.get("status") in ("completed", "failed", "cancelled"):
+                return data
+            if data.get("status") == "cancel_requested" and changes.get("status") == "running":
+                changes.pop("status")
+            if any(data.get(key) != value for key, value in changes.items()):
+                data.update(changes)
+                db.execute("UPDATE objects SET data=? WHERE id=?", (canonical(data), row["id"]))
+            return data
 
     def get(self, identifier, *, kind=None, runtime=None):
         with self.connect() as db:
@@ -118,6 +176,7 @@ class Store:
                             ) AS position
                         FROM objects
                         WHERE kind='run' AND runtime=? AND json_extract(data, '$.threadId') IN ({placeholders})
+                          AND json_extract(data,'$.executionDetached') IS NOT 1
                     )
                     SELECT * FROM ranked WHERE (active AND position<=8) OR (NOT active AND position=1)
                     ORDER BY thread, active DESC, position
@@ -174,8 +233,12 @@ class Store:
 
     def operations(self, principal, runtime, key=None, *, agent_ids=None, thread_id=None, method=None):
         owner_prefix = canonical([principal["issuer"], principal["subject"], principal.get("tenantId")])[:-1] + ","
-        query = "SELECT * FROM operations WHERE runtime=? AND substr(scope,1,?)=?"
-        parameters = [runtime, len(owner_prefix), owner_prefix]
+        if method and key is not None:
+            query = "SELECT * FROM operations WHERE scope=? AND runtime=?"
+            parameters = [canonical([principal["issuer"], principal["subject"], principal.get("tenantId"), runtime, method]), runtime]
+        else:
+            query = "SELECT * FROM operations WHERE runtime=? AND substr(scope,1,?)=?"
+            parameters = [runtime, len(owner_prefix), owner_prefix]
         if key is not None:
             query += " AND request_key=?"
             parameters.append(key)
@@ -192,9 +255,14 @@ class Store:
             rows = db.execute(query + " ORDER BY created DESC, id DESC LIMIT 200", parameters).fetchall()
         return [self.operation_row(row) for row in rows]
 
+    def checkpoint_thread(self, identifier, thread, result):
+        with self.connect() as db:
+            db.execute("UPDATE operations SET thread=?, result=?, updated=? WHERE id=? AND status='running'",
+                       (thread, canonical(result), now_ms(), identifier))
+
     def finish(self, identifier, status, *, result=None, error=None):
         with self.connect() as db:
-            db.execute("UPDATE operations SET status=?, updated=?, result=?, error=? WHERE id=?",
+            db.execute("UPDATE operations SET status=?, updated=?, result=coalesce(?,result), error=? WHERE id=?",
                        (status, now_ms(), canonical(result) if result is not None else None,
                         canonical(error) if error is not None else None, identifier))
 
@@ -202,5 +270,9 @@ class Store:
         # Never repeat a write whose native outcome is uncertain.
         with self.connect() as db:
             db.execute("UPDATE operations SET status='unknown', updated=? WHERE status IN ('accepted','running')", (now_ms(),))
+        self.prune_credentials()
+
+    def prune_credentials(self):
+        with self.connect() as db:
             db.execute("DELETE FROM tickets WHERE expires<?", (now_ms(),))
             db.execute("DELETE FROM leases WHERE expires<?", (now_ms() - 3600000,))

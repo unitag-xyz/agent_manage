@@ -3,7 +3,7 @@ import hashlib
 from ....core.store import canonical
 
 
-def message_dto(raw, *, thread_id, segment_id, projection, register_resource):
+def message_dto(raw, *, thread_id, segment_id, projection, register_resource, revision=None):
     from ....segment_reader import millis
     native_id = raw.get("id") or raw.get("__openclaw", {}).get("id")
     identifier = str(native_id or hashlib.sha256(canonical(raw).encode()).hexdigest())
@@ -47,7 +47,7 @@ def message_dto(raw, *, thread_id, segment_id, projection, register_resource):
                             "code": "MEDIA_PENDING_HISTORY", "text": "Media requires an authorized history reference"})
     result = {"id": identifier, "threadId": thread_id, "segmentId": segment_id,
               "role": "tool" if raw.get("role") in ("toolResult", "function") else raw.get("role", "system"),
-              "timestamp": millis(raw.get("timestamp")), "revision": hashlib.sha256(canonical(raw).encode()).hexdigest(),
+              "timestamp": millis(raw.get("timestamp")), "revision": revision or hashlib.sha256(canonical(raw).encode()).hexdigest(),
               "content": content, "projection": projection, "generationState": "unknown",
               "completeness": "reference" if raw.get("fullMessageRef") else "complete"}
     if raw.get("fullMessageRef"):

@@ -25,18 +25,9 @@ from .settings import DEFAULT_MODEL_ENV, MODEL_GATEWAY_CONFIGS
 from .agent_hooks import HookError, run_hook
 from .skill_permissions import prepare_shared_skill_path
 from .models import RefreshAgentRequest
-from .file_io import atomic_write_bytes as _atomic_bytes, write_private_json as _private_json
+from .file_io import atomic_write_bytes as _atomic_bytes, fingerprint, write_private_json as _private_json
 from .template_download import download_template_archive, replace_template_archive, validate_template_url
 from .template_safety import validate_safe_name, validate_template_archive
-
-
-def _fingerprint(path: Path):
-    if not path.exists():
-        return None
-    if path.is_symlink() or not path.is_file():
-        raise ValueError(f"Refresh requires a regular file: {path}")
-    return {"sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
-            "mode": stat.S_IMODE(path.stat().st_mode)}
 
 
 def _protected(relative: Path) -> bool:
@@ -272,7 +263,6 @@ class RefreshManagementMixin:
             # Journal all intended bytes BEFORE the first live write. A killed process
             # can then be recovered without executing installation scripts again.
             from .file_io import encode_json
-            from .core.recovery import fingerprint
             recovery_entries = list(manifest["files"])
             recovery_entries.append({"path": str(self.config_path),
                 "before": fingerprint(self.config_path), "backup_file": "openclaw.json",
@@ -296,7 +286,7 @@ class RefreshManagementMixin:
                 for item in plan:
                     target = item["target"]
                     _safe_target(item["root"], item["relative"])
-                    if _fingerprint(target) != item["before"]:
+                    if fingerprint(target) != item["before"]:
                         raise RuntimeError(f"File changed during refresh; retry: {target}")
                     attempted.append(item)
                     if item["action"] == "delete":
@@ -348,7 +338,7 @@ class RefreshManagementMixin:
                 errors = []
                 for item in reversed(attempted):
                     try:
-                        current = _fingerprint(item["target"])
+                        current = fingerprint(item["target"])
                         if current == item["before"]:
                             continue
                         if current != item["after"] and current != item["before"]:
@@ -552,7 +542,7 @@ class RefreshManagementMixin:
                     if start >= 0 and end > start and self.RUNTIME_POLICY_START not in new_text:
                         frozen.write_text(new_text.rstrip() + "\n\n" + text[start:end + len(self.RUNTIME_POLICY_END)] + "\n")
             candidates[key] = frozen
-            files[key] = _fingerprint(frozen)
+            files[key] = fingerprint(frozen)
         old_files = previous.get("files", {})
         pending = previous.get("pending_conflicts", {})
         next_pending = {}
@@ -562,7 +552,7 @@ class RefreshManagementMixin:
             if scope not in roots or _protected(Path(relative)):
                 continue
             target = _safe_target(roots[scope], relative)
-            before, after, old = _fingerprint(target), files.get(key), old_files.get(key)
+            before, after, old = fingerprint(target), files.get(key), old_files.get(key)
             if scope == "common" and after is None:
                 continue
             if before == after:
@@ -602,7 +592,7 @@ class RefreshManagementMixin:
             raise RuntimeError("Config changed during refresh; retry")
         for item in plan:
             _safe_target(item["root"], item["relative"])
-            if _fingerprint(item["target"]) != item["before"]:
+            if fingerprint(item["target"]) != item["before"]:
                 raise RuntimeError(f"File changed during refresh; retry: {item['target']}")
 
     def _backup_refresh(self, backup, plan, config_bytes, config_mode, state_path, previous, new_state, name, job_id):
@@ -624,7 +614,6 @@ class RefreshManagementMixin:
                     "version_before": previous.get("version"),
                     "version_after": new_state.get("version") if new_state else previous.get("version"),
                     "files": entries, "status": "prepared", "memory_preserved": True}
-        _private_json(backup / "manifest.json", manifest)
         return manifest
 
     def _activate_refresh(self):
