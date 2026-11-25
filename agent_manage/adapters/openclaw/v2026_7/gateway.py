@@ -35,6 +35,7 @@ class Gateway:
         self.session_observers = {}
         self.hello = None
         self.closing = False
+        self.paused = False
         self.expected_version = expected_version
         self.host_binding = host_binding
         self.unix_socket = None
@@ -60,10 +61,10 @@ class Gateway:
 
     async def connect(self):
         async with self.lock:
+            if self.closing or self.paused:
+                raise APIError("NOT_READY", "Native Gateway transport is not active")
             if self.ws is not None and not self.ws.closed and self.hello is not None:
                 return
-            if self.closing:
-                raise APIError("NOT_READY", "Adapter is shutting down")
             if self.session is None:
                 transport = aiohttp.UnixConnector(path=self.unix_socket) if self.unix_socket else None
                 self.session = aiohttp.ClientSession(connector=transport, timeout=aiohttp.ClientTimeout(total=20))
@@ -124,6 +125,13 @@ class Gateway:
                     self.reader = asyncio.create_task(self.read_loop())
                 finally:
                     CURRENT_WRITE_GUARD.reset(guard)
+            except asyncio.CancelledError:
+                if self.ws:
+                    try:
+                        await asyncio.wait_for(self.ws.close(), 0.25)
+                    except asyncio.TimeoutError:
+                        pass
+                raise
             except APIError:
                 if self.ws:
                     await self.ws.close()
@@ -225,9 +233,18 @@ class Gateway:
 
     async def close(self):
         self.closing = True
-        if self.ws is not None:
-            await self.ws.close()
-        if self.reader is not None:
-            await asyncio.gather(self.reader, return_exceptions=True)
-        if self.session is not None:
-            await self.session.close()
+        await self.disconnect()
+
+    async def disconnect(self):
+        async with self.lock:
+            if self.ws is not None:
+                try:
+                    await asyncio.wait_for(self.ws.close(), 1)
+                except asyncio.TimeoutError:
+                    pass
+            if self.session is not None:
+                await self.session.close()
+            if self.reader is not None:
+                await asyncio.gather(self.reader, return_exceptions=True)
+            self.ws = self.reader = self.session = self.hello = None
+            self.session_observers.clear()

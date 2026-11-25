@@ -115,6 +115,47 @@ class PlatformExchangeTests(unittest.TestCase):
 
 @unittest.skipUnless(importlib.util.find_spec("aiohttp"), "requires the server dependencies")
 class PlatformReleaseTests(unittest.IsolatedAsyncioTestCase):
+    async def test_readiness_requires_current_binding_and_native_connection(self):
+        from unittest.mock import AsyncMock, Mock
+        from aiohttp import ClientSession, UnixConnector, web
+        from agent_manage.core.service import Service
+        from agent_manage.platform_runtime import PlatformRuntimePool
+        from agent_manage.server import create_app
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            config = root / "mount/config/openclaw.json"
+            config.parent.mkdir(parents=True)
+            config.write_text('{"gateway":{"controlUi":{"allowedOrigins":["https://old.agent.example"]}}}')
+            pool = PlatformRuntimePool(root, "test", {"instanceIdentify": "alpha", "bindingId": "a" * 64,
+                "mountRoot": str(root / "mount"), "gatewayOriginDomain": "agent.example"})
+            connect = AsyncMock(side_effect=[APIError("UPSTREAM_UNAVAILABLE", "Not ready"), None])
+            pool.runtime_service = AsyncMock(return_value=Mock(adapter=Mock(return_value=Mock(
+                gateway=Mock(connect=connect)))))
+            service = Service(root / "service", audience="test")
+            runner = web.AppRunner(create_app(service, pool))
+            await runner.setup()
+            try:
+                socket_path = str(root / "ready.sock")
+                await web.UnixSite(runner, socket_path).start()
+                async with ClientSession(connector=UnixConnector(path=socket_path)) as client:
+                    url = "http://manager/v1/platform/readiness"
+                    body = {"runtimeId": "alpha", "bindingId": "a" * 64}
+                    async with client.post(url, json={**body, "bindingId": "b" * 64}) as response:
+                        self.assertEqual(response.status, 404)
+                    async with client.post(url, json=body) as response:
+                        self.assertEqual(response.status, 503)
+                        self.assertEqual((await response.json())["code"], "ORIGIN_MISMATCH")
+                    pool.runtime_service.assert_not_awaited()
+                    config.write_text('{"gateway":{"controlUi":{"allowedOrigins":["https://alpha.agent.example"]}}}')
+                    async with client.post(url, json=body) as response:
+                        self.assertEqual(response.status, 503)
+                    async with client.post(url, json=body) as response:
+                        self.assertEqual(response.status, 204)
+                    self.assertEqual(connect.await_count, 2)
+            finally:
+                await runner.cleanup()
+
     async def test_release_probe_requires_current_binding_and_returns_loaded_release(self):
         from aiohttp import ClientSession, UnixConnector, web
         from agent_manage.server import create_app

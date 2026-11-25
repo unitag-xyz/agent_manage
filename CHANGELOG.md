@@ -2,7 +2,12 @@
 
 ## Unreleased
 
-- Preserve the recorded Codex billing source in Chat2 assistant history statistics without inferring it from model names or the current login.
+## 1.0.003 - 2026-11-25
+
+- Preserve recorded Codex billing source in Chat2 assistant history statistics, without inferring it from model names or the current login.
+- Include per-message usage for current and archived Chat2 history, including across pagination and full-message reads.
+- Support on-demand, generation-scoped runtime bindings on a shared Host manager. Preserve existing CLI entry points and the legacy Chat path.
+- Include the 0.5.11 Codex model-refresh changes from the previous main branch.
 
 - Add an explicit, static shared-Host OpenClaw text Chat registration with separate native/local paths, mounted-history translation, generation-scoped device keys, configuration snapshot verification and installed-Agent identities. Keep the original CLI/local runtime path unchanged.
 - Add private Unix-socket business-Agent resolution for trusted Host ticket scoping; Host-bound management writes and media remain unsupported. Real two-container acceptance is still required. See [shared Host registration](docs/v1-shared-host.md).

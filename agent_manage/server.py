@@ -40,6 +40,8 @@ def build_service(config):
 
 
 def create_app(service, platform_pool=None, platform_release=None):
+    from .platform_runtime import SharedPlatformRuntimePool
+    shared = isinstance(platform_pool, SharedPlatformRuntimePool)
     http_slots, media_slots, websocket_slots = asyncio.Semaphore(8), asyncio.Semaphore(4), asyncio.Semaphore(64)
 
     @asynccontextmanager
@@ -131,11 +133,20 @@ def create_app(service, platform_pool=None, platform_release=None):
             if (not isinstance(offer, dict) or set(offer) != {"runtimeId", "bindingId"}
                     or not platform_pool.admits(offer["runtimeId"], offer["bindingId"])):
                 return web.Response(status=404)
+            try:
+                probe = (platform_pool.probe_ready(offer["runtimeId"], offer["bindingId"]) if shared
+                         else platform_pool.probe_ready())
+                await asyncio.wait_for(probe, 3.5)
+            except (APIError, OSError, ValueError, asyncio.TimeoutError) as exc:
+                code = exc.code if isinstance(exc, APIError) else "NOT_READY"
+                return web.json_response({"code": code}, status=503, headers={"Cache-Control": "no-store"})
             return web.Response(status=204)
 
     async def platform_release_status(request):
         async with admitted(http_slots):
             offer = await request.json()
+            if shared and offer == {}:
+                return web.json_response(platform_release, headers={"Cache-Control": "no-store"})
             if (not isinstance(offer, dict) or set(offer) != {"runtimeId", "bindingId"}
                     or not platform_pool.admits(offer["runtimeId"], offer["bindingId"])):
                 return web.Response(status=404)
@@ -157,6 +168,10 @@ def create_app(service, platform_pool=None, platform_release=None):
         sidebar_template = None
         sidebar_installations = ()
 
+        def check_binding():
+            if platform and shared and not platform_pool.admits(offer["runtimeId"], offer["bindingId"]):
+                raise APIError("RUNTIME_MISMATCH", "The Host binding is no longer current")
+
         async def receive_handshake():
             message = await asyncio.wait_for(ws.receive(), 10)
             if message.type != WSMsgType.TEXT or len(message.data.encode()) > MAX_REQUEST:
@@ -171,6 +186,7 @@ def create_app(service, platform_pool=None, platform_release=None):
                 if expected_generation is not None and expected_generation != generation:
                     return
                 if authorization is not None:
+                    check_binding()
                     service.auth.authenticate(authorization.token)
                 await asyncio.wait_for(ws.send_str(data), 10)
 
@@ -204,6 +220,7 @@ def create_app(service, platform_pool=None, platform_release=None):
                     item_generation, event, size = await asyncio.wait_for(queue.get(), 1)
                     queued_bytes -= size
                 except asyncio.TimeoutError:
+                    check_binding()
                     service.auth.authenticate(lease.token)
                     continue
                 if item_generation != generation:
@@ -259,6 +276,7 @@ def create_app(service, platform_pool=None, platform_release=None):
                     await send({"type": "response", **service.error_response(captured_lease, frame.get("requestId"), service.translate_error(exc))}, captured_generation)
 
         pump_task = None
+        native_session = None
         try:
             hello_fields = {}
             if platform:
@@ -272,7 +290,12 @@ def create_app(service, platform_pool=None, platform_release=None):
                 raise APIError("UNAUTHENTICATED", "The first WebSocket frame must be auth")
             if platform:
                 grant = await request_platform_grant(ws, offer["runtimeId"], offer["bindingId"], frame)
-                service, lease, agent_id = await platform_pool.open(grant)
+                if shared:
+                    session = platform_pool.session(grant)
+                    service, lease, agent_id = await session.__aenter__()
+                    native_session = session
+                else:
+                    service, lease, agent_id = await platform_pool.open(grant)
                 hello_fields["platformAgentId"] = agent_id
                 if grant.template_identify:
                     sidebar_template = (agent_id, grant.template_identify)
@@ -287,6 +310,7 @@ def create_app(service, platform_pool=None, platform_release=None):
             async for message in ws:
                 if message.type != WSMsgType.TEXT:
                     break
+                check_binding()
                 large = platform and (len(message.data) > MAX_REQUEST or len(message.data.encode()) > MAX_REQUEST)
                 frame = json.loads(message.data)
                 if not isinstance(frame, dict):
@@ -333,7 +357,11 @@ def create_app(service, platform_pool=None, platform_release=None):
             for task in in_flight:
                 task.cancel()
             await asyncio.gather(*in_flight, return_exceptions=True)
-            await ws.close()
+            try:
+                if native_session is not None:
+                    await native_session.__aexit__(None, None, None)
+            finally:
+                await ws.close()
         return ws
 
     async def resource(request):
@@ -395,7 +423,21 @@ def create_app(service, platform_pool=None, platform_release=None):
     async def startup(app):
         await service.start()
 
+    async def reap_bindings():
+        while True:
+            await asyncio.sleep(2)
+            platform_pool.reap()
+
+    reaper = None
+
+    async def start_reaper(app):
+        nonlocal reaper
+        reaper = asyncio.create_task(reap_bindings())
+
     async def cleanup(app):
+        if reaper is not None:
+            reaper.cancel()
+            await asyncio.gather(reaper, return_exceptions=True)
         if platform_pool is not None:
             await platform_pool.close()
         await service.close()
@@ -412,6 +454,8 @@ def create_app(service, platform_pool=None, platform_release=None):
             app.router.add_post("/v1/platform/release", platform_release_status)
     app.router.add_get("/v1/resources/{identifier}", resource)
     app.on_startup.append(startup)
+    if shared:
+        app.on_startup.append(start_reaper)
     app.on_cleanup.append(cleanup)
     return app
 
@@ -425,6 +469,15 @@ def main():
     socket_path = service.store.path.with_name("manager.sock")
     platform_pool = None
     platform_release = None
+    if "platformSharedHost" in config:
+        if "platformSandbox" in config:
+            raise ValueError("Shared and single-container Manager modes are mutually exclusive")
+        from .platform_runtime import SharedPlatformRuntimePool
+        platform_pool = SharedPlatformRuntimePool(service.store.path.parent, service.auth.audience, config["platformSharedHost"])
+        if "platformListenSocket" in config:
+            from .platform_runtime import shared_listen_path
+            socket_path = shared_listen_path(config["platformListenSocket"], service.store.path.parent, platform_pool)
+        platform_release = {"version": __version__, "sourceRoot": str(Path(__file__).resolve().parents[1])}
     if "platformSandbox" in config:
         from .platform_runtime import PlatformRuntimePool
         platform_pool = PlatformRuntimePool(service.store.path.parent, service.auth.audience, config["platformSandbox"])
