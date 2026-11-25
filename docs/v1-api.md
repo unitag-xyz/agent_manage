@@ -11,7 +11,11 @@ Dola 沿用 0.5 的用户鉴权和实例派发。以下接口由主机侧 Server
 2. **HTTP** 调用 `POST /v1/auth/redeem`，以 `{"ticket":"..."}` 换取 `leaseToken` 和 `authContext`。随后用 `Authorization: Bearer <leaseToken>` 调用 `POST /v1/rpc` 和媒体接口。
 3. **WSS** 由 Server API 连接 `/v1/ws`，首帧发送 `{"type":"auth","ticket":"..."}`。`hello` 返回可用于内部 HTTP 的租约。Server API 代理实时请求和事件，租约和票据保存在服务端。
 
-票据一次性，有效期最长 60 秒。租约最长 300 秒。Server API 对同一授权范围可在有效期内复用租约。长连接续期前重新校验用户范围，再签领新票据并发送 `auth.refresh`。刷新要求 issuer、subject、tenant 和 audience 一致，连接重新订阅并同步历史。
+一次性平台票据最多有效 60 秒，且不能晚于实例到期时间；实例到期后不能取票、兑换或续票。实例仍有效时成功兑换的 Chat2 实例授权（`chat.instance`）从兑换起有效 60 分钟，可以跨过实例到期点；这不延迟停机，也不保证容器停机后仍能聊天。续票同样从成功兑换时起计时，不在旧截止时间上累加。
+
+普通私有租约仍最长 300 秒。普通私有连接在有效期内用新票发送 `auth.refresh`；刷新要求 issuer、subject、tenant 和 audience 一致，连接重新订阅并同步历史。
+
+平台 Chat2 的 `hello.seamlessRefresh: true` 表示支持同连接续票。浏览器取新平台票，发送 `{"type":"auth.refresh","ticket":"..."}`。Manager 主动兑换，核对用户、租户、实例、容器代际及权限范围；Host 收到 Manager 确认后才延长转发期限。旧授权有效时继续处理该代际的回复和事件；收到 `auth.refreshed`（同一 connectionId、更高的 authGeneration、resyncRequired=false）后切到新代际，保留订阅、待响应请求和运行中的 Run。失败或到期停止转发，迟到的确认不能复活连接。真正断线时取新票，查询原 Run、重新订阅并补读历史，不重发消息。未声明该能力时仍使用原续票/重连流程。
 
 ```json
 {"type":"hello","apiVersion":"1.0","epoch":"服务进程周期","eventReplay":false,
@@ -20,7 +24,7 @@ Dola 沿用 0.5 的用户鉴权和实例派发。以下接口由主机侧 Server
 ```
 
 `authContext` 随已鉴权响应及事件返回。客户端丢弃旧 leaseId/authzVersion 的迟到结果。
-收到 auth.refreshed 后主动结束旧授权代际的 pending 请求、丢弃其结果并重新订阅；服务端不逐条补发旧请求失败响应。丢失响应的写操作通过原 clientRequestId 对账，不自动重发。
+需要重新同步（resyncRequired=true，或字段缺失）时，收到 auth.refreshed 后主动结束旧授权代际的 pending 请求、丢弃其结果并重新订阅；服务端不逐条补发旧请求失败响应。丢失响应的写操作通过原 clientRequestId 对账，不自动重发。
 服务端会在请求前、返回前、媒体分块和每条订阅事件检查授权；无效租约不继续返回敏感结果。
 当前支持按 `runtimeIds`、`agentIds`、精确 action 名或 `*` 授权。
 安装/刷新可能修改共享 Skill、模型和执行任意模板脚本，要求整个 Runtime 的管理授权。

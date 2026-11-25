@@ -167,6 +167,7 @@ def create_app(service, platform_pool=None, platform_release=None):
         send_lock = asyncio.Lock()
         sidebar_template = None
         sidebar_installations = ()
+        forwarding = True
 
         def check_binding():
             if platform and shared and not platform_pool.admits(offer["runtimeId"], offer["bindingId"]):
@@ -183,6 +184,8 @@ def create_app(service, platform_pool=None, platform_release=None):
             if len(data.encode()) > MAX_RESPONSE:
                 raise APIError("RESPONSE_TOO_LARGE", "WebSocket response exceeds budget")
             async with send_lock:
+                if not forwarding and value.get("type") != "error":
+                    return
                 if expected_generation is not None and expected_generation != generation:
                     return
                 if authorization is not None:
@@ -297,6 +300,8 @@ def create_app(service, platform_pool=None, platform_release=None):
                 else:
                     service, lease, agent_id = await platform_pool.open(grant)
                 hello_fields["platformAgentId"] = agent_id
+                entry_native = grant.native_agent_id
+                hello_fields["seamlessRefresh"] = True
                 if grant.template_identify:
                     sidebar_template = (agent_id, grant.template_identify)
                 sidebar_installations = grant.attached_installations
@@ -322,7 +327,21 @@ def create_app(service, platform_pool=None, platform_release=None):
                         raise APIError("REQUEST_TOO_LARGE", "Only instance Chat attachment sends may exceed the normal frame budget")
                 if frame.get("type") == "auth.refresh":
                     if platform:
-                        raise APIError("UNAUTHENTICATED", "Reconnect with a new platform ticket")
+                        service.auth.authenticate(lease.token)
+                        renewed = await request_platform_grant(ws, offer["runtimeId"], offer["bindingId"], frame,
+                                                               refresh=True, send=send)
+                        check_binding()
+                        if not grant.same_scope(renewed):
+                            raise APIError("FORBIDDEN", "Refresh changed the authorized scope")
+                        lease = service.auth.renew_platform_expiry(lease, renewed.expires_at)
+                        # The instance-wide entry Agent may differ; never label it with another Agent's metadata.
+                        sidebar_template = ((agent_id, renewed.template_identify)
+                                            if renewed.native_agent_id == entry_native and renewed.template_identify else None)
+                        sidebar_installations = renewed.attached_installations
+                        grant = renewed
+                        await send({"type": "auth.refreshed", "authContext": lease.public(),
+                                    "resyncRequired": False}, authorization=lease)
+                        continue
                     new_lease = service.auth.redeem(frame.get("ticket"))
                     if any(new_lease.context.get(key) != lease.context.get(key) for key in ("issuer", "subject", "tenantId", "audience")):
                         raise APIError("FORBIDDEN", "Refresh cannot change the connection principal")
@@ -346,10 +365,14 @@ def create_app(service, platform_pool=None, platform_release=None):
                 else:
                     raise APIError("INVALID_ARGUMENT", "Unknown WebSocket frame type")
         except Exception as exc:
+            forwarding = False
             error = service.translate_error(exc)
             if not ws.closed:
                 await send({"type": "error", "error": error.payload()})
         finally:
+            forwarding = False
+            if platform and lease is not None and native_session is None:
+                service.auth.revoke(lease.context["leaseId"])
             service.listeners.discard(listen)
             if pump_task:
                 pump_task.cancel()

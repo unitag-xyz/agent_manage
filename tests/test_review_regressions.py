@@ -2,6 +2,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import os
 import tempfile
 import threading
 import unittest
@@ -212,6 +213,179 @@ class ChatTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(self.s.store, "objects", side_effect=AssertionError("full table materialization")):
             result = await self.a.invoke("runs.lookup", {"threadId": self.thread["threadId"], "clientRequestId": "request"})
         self.assertEqual(result["items"][0]["runId"], row["id"])
+
+    async def platform_fixture(self):
+        from aiohttp import web
+        from agent_manage.server import create_app
+
+        self.g.call = AsyncMock(return_value={})
+        binding = "a" * 64
+        grant = {"type": "platform.grant", "issuer": "platform", "subject": "owner", "tenantId": "tenant",
+                 "runtimeId": "one", "bindingId": binding, "nativeAgentId": "main", "agentIdentify": "one-main",
+                 "installationId": "install-1", "actions": ["chat.instance"]}
+
+        async def open_grant(scope):
+            return self.s, self.s.auth.open_platform_lease(scope, self.agent), self.agent
+
+        pool = SimpleNamespace(admits=lambda r, b: (r, b) == ("one", binding), open=open_grant, close=AsyncMock())
+        runner = web.AppRunner(create_app(self.s, pool))
+        await runner.setup()
+        self.addAsyncCleanup(runner.cleanup)
+        path = str(self.f.root / "chat.sock")
+        await web.UnixSite(runner, path).start()
+        return path, grant
+
+    async def test_platform_socket_renews_during_run_then_reconnects_without_resending(self):
+        import time
+        from aiohttp import ClientSession, UnixConnector, WSMsgType
+        path, grant = await self.platform_fixture()
+        binding = grant["bindingId"]
+        async with ClientSession(connector=UnixConnector(path=path)) as client:
+            async def open_ws(ticket):
+                ws = await client.ws_connect("http://manager/v1/platform/ws")
+                await ws.send_json({"type": "platform.bind", "runtimeId": "one", "bindingId": binding})
+                await ws.send_json({"type": "auth", "ticket": ticket})
+                self.assertEqual("platform.redeem", (await ws.receive_json(timeout=3))["type"])
+                await ws.send_json({**grant, "expiresAt": int(time.time()*1000) + 60_000})
+                self.assertTrue((await ws.receive_json(timeout=3))["seamlessRefresh"])
+                return ws
+
+            async def rpc(ws, method, **params):
+                await ws.send_json({"type": "request", "method": method, "requestId": method,
+                                    "params": {"runtimeId": "one", **params}})
+                while True:
+                    frame = await ws.receive_json(timeout=3)
+                    if frame["type"] == "response":
+                        self.assertTrue(frame["ok"], frame)
+                        return frame["result"]
+
+            thread = self.thread["threadId"]
+            async with await open_ws("b"*64) as ws:
+                await rpc(ws, "runs.create", threadId=thread, message="once", clientRequestId="once",
+                                   expectedCurrentSegmentId=self.thread["currentSegmentId"])
+                await asyncio.gather(*self.s.tasks)
+                lookup = await rpc(ws, "runs.lookup", threadId=thread, clientRequestId="once")
+                run = lookup["items"][0]["runId"]
+                await rpc(ws, "events.subscribe", threadId=thread)
+
+                async def deliver(marker):
+                    await self.s.publish("one", thread, {"type": "message.snapshot", "runId": run, "message": marker})
+                    seen = await ws.receive_json(timeout=3)
+                    self.assertEqual((seen["message"], seen["runId"]), (marker, run))
+                    return seen["sequence"]
+
+                first = await deliver("before")
+                await ws.send_json({"type": "auth.refresh", "ticket": "c"*64})
+                self.assertEqual("platform.redeem", (await ws.receive_json(timeout=3))["type"])
+                middle = await deliver("during")
+                await ws.send_json({**grant, "expiresAt": int(time.time()*1000) + 120_000})
+                ack = await ws.receive_json(timeout=3)
+                self.assertEqual(("auth.refreshed", False), (ack["type"], ack["resyncRequired"]))
+                self.assertEqual([first, first+1, first+2], [first, middle, await deliver("after")])
+
+            async with await open_ws("d"*64) as ws:
+                lookup = await rpc(ws, "runs.lookup", threadId=thread, clientRequestId="once")
+                self.assertEqual(run, lookup["items"][0]["runId"])
+                await rpc(ws, "events.subscribe", threadId=thread)
+                await self.s.publish("one", thread, {"type": "message.snapshot", "runId": run, "message": "resumed"})
+                self.assertEqual((await ws.receive_json(timeout=3))["message"], "resumed")
+                self.assertEqual(sum(c.args[0] == "chat.send" for c in self.g.call.await_args_list), 1)
+                await ws.send_json({"type": "auth.refresh", "ticket": "e"*64})
+                self.assertEqual("platform.redeem", (await ws.receive_json(timeout=3))["type"])
+                await ws.send_json({**grant, "subject": "another", "expiresAt": int(time.time()*1000) + 120_000})
+                self.assertEqual("FORBIDDEN", (await ws.receive_json(timeout=3))["error"]["code"])
+                self.assertEqual((await ws.receive(timeout=3)).type, WSMsgType.CLOSE)
+
+    @unittest.skipUnless(os.getenv("LOCAL_HOST_CHAT"), "requires locally published LocalHostChat fixture executable")
+    async def test_gateway_and_manager_platform_renewal_over_the_wire(self):
+        import socket
+        import time
+        from aiohttp import ClientSession, WSMsgType
+        path, grant = await self.platform_fixture()
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+        origin = "http://localhost:3011"
+        now = int(time.time()*1000)
+        config = self.f.root / "host.json"
+        config.write_text(json.dumps({"port": port, "managerSocketPath": path, "platformManager": True,
+            "managerAudience": "agent-manager", "allowedOrigin": origin, "grants": [
+                {"ticket": ch*64, "instanceIdentify": "one", "runtimeId": "one", "bindingId": grant["bindingId"],
+                 "issuer": grant["issuer"], "subject": who, "tenantId": grant["tenantId"], "actions": grant["actions"],
+                 "agentIdentify": "one-main", "nativeBinding": {"nativeAgentId": "main", "installationId": "install"},
+                 "expiresAt": now + ttl}
+                for ch, who, ttl in (("b", "owner", 3_590_000), ("c", "owner", 3_600_000),
+                                     ("d", "owner", 110_000), ("e", "other", 120_000))]}))
+        host = await asyncio.create_subprocess_exec(os.environ["LOCAL_HOST_CHAT"], str(config))
+        async def stop():
+            if host.returncode is None:
+                host.terminate()
+            await host.wait()
+        self.addAsyncCleanup(stop)
+        url = f"http://127.0.0.1:{port}/instances/one/chat"
+        thread = self.thread["threadId"]
+        async with ClientSession() as client:
+            for _ in range(100):
+                try:
+                    async with client.get(url):
+                        break
+                except OSError:
+                    await asyncio.sleep(.05)
+            async def connect(ch):
+                ws = await client.ws_connect(url, origin=origin)
+                await ws.send_json({"type": "auth", "ticket": ch*64})
+                hello = await ws.receive_json(timeout=5)
+                self.assertTrue(hello["seamlessRefresh"])
+                return ws, hello["connectionId"]
+            async def rpc(ws, method, **params):
+                await ws.send_json({"type": "request", "requestId": method, "method": method,
+                                    "params": {"runtimeId": "one", **params}})
+                while True:
+                    f = await ws.receive_json(timeout=5)
+                    if f["type"] == "response":
+                        self.assertTrue(f["ok"], f)
+                        return f["result"]
+            ws, cid = await connect("b")
+            async with ws:
+                await rpc(ws, "runs.create", threadId=thread, message="once", clientRequestId="over-wire",
+                          expectedCurrentSegmentId=self.thread["currentSegmentId"])
+                await asyncio.gather(*self.s.tasks)
+                run = (await rpc(ws, "runs.lookup", threadId=thread, clientRequestId="over-wire"))["items"][0]["runId"]
+                await rpc(ws, "events.subscribe", threadId=thread)
+                await ws.send_json({"type": "auth.refresh", "ticket": "c"*64})
+                await self.s.publish("one", thread, {"type": "message.snapshot", "message": "during", "runId": run})
+                frames = [await ws.receive_json(timeout=5) for _ in range(2)]
+                ack, = [f for f in frames if f["type"] == "auth.refreshed"]
+                event, = [f for f in frames if f["type"] == "message.snapshot"]
+                self.assertEqual((cid, 2, False, now + 3_600_000), (ack["connectionId"], ack["authGeneration"],
+                                 ack["resyncRequired"], ack["expiresAt"]))
+                self.assertEqual((cid, run, "during"), (event["connectionId"], event["runId"], event["message"]))
+                await self.s.publish("one", thread, {"type": "message.snapshot", "message": "after", "runId": run})
+                self.assertEqual((await ws.receive_json(timeout=5))["authGeneration"], 2)
+            ws, new_cid = await connect("d")
+            async with ws:
+                self.assertNotEqual(cid, new_cid)
+                found = await rpc(ws, "runs.lookup", threadId=thread, clientRequestId="over-wire")
+                self.assertEqual(run, found["items"][0]["runId"])
+                await rpc(ws, "events.subscribe", threadId=thread)
+                await self.s.publish("one", thread, {"type": "message.snapshot", "message": "resumed", "runId": run})
+                self.assertEqual((await ws.receive_json(timeout=5))["runId"], run)
+                await self.a.native_event({"event": "chat", "payload": {"sessionKey": self.key,
+                    "runId": self.s.store.get(run)["native"], "state": "final",
+                    "message": {"role": "assistant", "content": [{"type": "text", "text": "finished"}]}}})
+                while True:
+                    event = await ws.receive_json(timeout=5)
+                    if event["type"] == "run.updated":
+                        self.assertEqual((run, "completed"), (event["run"]["runId"], event["run"]["status"]))
+                        break
+                self.assertEqual(sum(c.args[0] == "chat.send" for c in self.g.call.await_args_list), 1)
+                await ws.send_json({"type": "auth.refresh", "ticket": "e"*64})
+                close = await ws.receive(timeout=5)
+                self.assertEqual((WSMsgType.CLOSE, 4401), (close.type, close.data))
+            async with client.ws_connect(url, origin=origin) as replay:
+                await replay.send_json({"type": "auth", "ticket": "c"*64})
+                close = await replay.receive(timeout=5)
+                self.assertEqual((WSMsgType.CLOSE, 4401), (close.type, close.data))
 
     async def test_rename_refusal_preserves_created_thread_and_receipt(self):
         async def rpc(method, params):

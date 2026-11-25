@@ -7,6 +7,7 @@ import time
 from dataclasses import dataclass
 
 from .core.errors import APIError
+from .core.auth import valid_platform_deadline
 from .core.contracts import INSTANCE_CHAT_ADDITIONS
 
 
@@ -36,6 +37,13 @@ class PlatformChatGrant:
     instance_chat: bool = False
     template_identify: str | None = None
     attached_installations: tuple[tuple[str, str, str], ...] = ()
+
+    def same_scope(self, other):
+        return ((self.issuer, self.subject, self.tenant_id, self.runtime_id, self.binding_id, self.instance_chat)
+                == (other.issuer, other.subject, other.tenant_id, other.runtime_id, other.binding_id, other.instance_chat)
+                and set(self.actions) == set(other.actions)
+                and (self.instance_chat or (self.agent_identify, self.native_agent_id, self.installation_id)
+                     == (other.agent_identify, other.native_agent_id, other.installation_id)))
 
 
 def _identifier(value, pattern=_ID):
@@ -73,17 +81,17 @@ def _grant_extensions(value):
     return value
 
 
-async def request_platform_grant(ws, runtime_id, binding_id, auth_frame, *, clock=time.time):
+async def request_platform_grant(ws, runtime_id, binding_id, auth_frame, *, clock=time.time, refresh=False, send=None):
     """Consume a browser first frame via a callback on the already private socket."""
     if not _identifier(runtime_id, _INSTANCE) or not _identifier(binding_id, _GENERATION):
         raise APIError("FORBIDDEN", "Invalid Host binding")
     if (not isinstance(auth_frame, dict) or set(auth_frame) != {"type", "ticket"}
-            or auth_frame.get("type") != "auth"
+            or auth_frame.get("type") != ("auth.refresh" if refresh else "auth")
             or not _identifier(auth_frame.get("ticket"), _GENERATION)):
         raise APIError("UNAUTHENTICATED", "A platform ticket is required")
 
     # Gateway holds the original first frame. The Manager cannot redirect the callback or replace its ticket.
-    await asyncio.wait_for(ws.send_json({"type": "platform.redeem", "runtimeId": runtime_id,
+    await asyncio.wait_for((send or ws.send_json)({"type": "platform.redeem", "runtimeId": runtime_id,
         "bindingId": binding_id}), 5)
     reply = await asyncio.wait_for(ws.receive_json(), 20)
     valid_keys = {"type", "runtimeId", "bindingId", "issuer", "subject", "tenantId", "agentIdentify",
@@ -98,9 +106,9 @@ async def request_platform_grant(ws, runtime_id, binding_id, auth_frame, *, cloc
         raise APIError("FORBIDDEN", "Platform grant does not match the Host binding")
     actions, expires_at = reply["actions"], reply["expiresAt"]
     now = int(clock() * 1000)
-    if type(expires_at) is not int or not now < expires_at <= now + 300_000:
-        raise APIError("FORBIDDEN", "Platform grant scope or expiry is invalid")
     instance_chat = actions == [_CHAT_INSTANCE]
+    if not valid_platform_deadline(expires_at, now, instance_chat):
+        raise APIError("FORBIDDEN", "Platform grant scope or expiry is invalid")
     if instance_chat:
         actions = sorted(_ACTIONS | INSTANCE_CHAT_ADDITIONS)
     elif actions == [_CHAT_SESSION]:

@@ -6,7 +6,6 @@ import json
 import os
 import re
 import stat
-import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -193,14 +192,7 @@ class PlatformRuntimePool:
         agent = (await current.read_workers(adapter.resolve_native_agent, grant.native_agent_id) if grant.instance_chat
                  else await current.read_workers(adapter.resolve_agent, grant.agent_identify))
         await adapter.gateway.connect()
-        remaining = (grant.expires_at - int(time.time() * 1000)) // 1000
-        if remaining <= 0:
-            raise APIError("UNAUTHENTICATED", "Platform authorization expired")
-        ticket = current.auth.issue_delegated_ticket({"issuer": grant.issuer, "subject": grant.subject,
-            "tenantId": grant.tenant_id, "audience": self.audience, "runtimeIds": [grant.runtime_id],
-            "agentIds": ["*"] if grant.instance_chat else [agent], "actions": list(grant.actions), "authzVersion": 1,
-            "ttlSeconds": 1, "leaseSeconds": min(remaining, 300)})
-        return current, current.auth.redeem(ticket), agent
+        return current, current.auth.open_platform_lease(grant, agent), agent
 
     async def close(self):
         async with self.lock:

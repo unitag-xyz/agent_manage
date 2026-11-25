@@ -9,6 +9,11 @@ from .errors import APIError
 from .store import canonical, now_ms
 
 
+def valid_platform_deadline(expires_at, now, instance_chat):
+    limit = 3_600_000 if instance_chat else 300_000
+    return type(expires_at) is int and now < expires_at <= now + limit
+
+
 def token_hash(token):
     if not isinstance(token, str) or not 16 <= len(token) <= 8192:
         raise APIError("UNAUTHENTICATED", "Invalid authorization")
@@ -87,10 +92,25 @@ class LeaseAuthority:
             if context["audience"] != self.audience:
                 raise APIError("UNAUTHENTICATED", "Ticket audience mismatch")
             db.execute("DELETE FROM tickets WHERE hash=?", (token_hash(ticket),))
-            context.update(leaseId=uuid.uuid4().hex, expiresAt=now_ms() + context.pop("leaseSeconds") * 1000)
-            token = secrets.token_urlsafe(32)
-            db.execute("INSERT INTO leases VALUES(?,?,?,?,0)", (token_hash(token), context["leaseId"], context["expiresAt"], canonical(context)))
+            return self._insert_lease(db, context, now_ms() + context.pop("leaseSeconds") * 1000)
+
+    @staticmethod
+    def _insert_lease(db, context, expires_at):
+        context.update(leaseId=uuid.uuid4().hex, expiresAt=expires_at)
+        token = secrets.token_urlsafe(32)
+        db.execute("INSERT INTO leases VALUES(?,?,?,?,0)", (token_hash(token), context["leaseId"], expires_at, canonical(context)))
         return Lease(token, context)
+
+    def open_platform_lease(self, grant, agent_id):
+        # The platform ticket was already consumed. This is not the private HTTP ticket-issuance API.
+        with self.store.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if not valid_platform_deadline(grant.expires_at, now_ms(), grant.instance_chat):
+                raise APIError("UNAUTHENTICATED", "Invalid platform authorization deadline")
+            return self._insert_lease(db, {"issuer": grant.issuer, "subject": grant.subject, "tenantId": grant.tenant_id,
+                "audience": self.audience, "runtimeIds": [grant.runtime_id], "actions": list(grant.actions),
+                "agentIds": ["*"] if grant.instance_chat else [agent_id], "authzVersion": 1,
+                "platformInstanceChat": grant.instance_chat}, grant.expires_at)
 
     def authenticate(self, token):
         with self.store.connect() as db:
@@ -105,6 +125,19 @@ class LeaseAuthority:
     def revoke(self, lease_id):
         with self.store.connect() as db:
             db.execute("UPDATE leases SET revoked=1 WHERE id=?", (lease_id,))
+
+    def renew_platform_expiry(self, lease, expires_at):
+        # Keep the connection-private token so in-flight requests still recheck the same lease.
+        with self.store.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            now = now_ms()
+            context = {**lease.context, "expiresAt": expires_at}
+            if not valid_platform_deadline(expires_at, now, lease.context.get("platformInstanceChat") is True) or db.execute(
+                "UPDATE leases SET expires=?, context=? WHERE hash=? AND id=? AND revoked=0 AND expires>?",
+                (expires_at, canonical(context), token_hash(lease.token), context["leaseId"], now),
+            ).rowcount != 1:
+                raise APIError("UNAUTHENTICATED", "Platform authorization expired or revoked")
+        return Lease(lease.token, context)
 
     def authorize(self, lease, method, runtime=None, agent=None, *, runtime_wide=False):
         fresh = self.authenticate(lease.token)

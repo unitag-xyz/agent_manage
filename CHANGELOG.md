@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.0.005 - 2026-11-26
+
+- Accept up to one hour for verified Chat2 instance grants at connect and renewal; one-use platform tickets and ordinary private leases retain their existing limits.
+
+- Keep the Chat2 platform WebSocket, subscriptions and streaming replies alive across successful same-scope ticket renewal. Expired or rejected authorization still ends forwarding.
+
 ## 1.0.004 - 2026-11-25
 
 - Keep OpenClaw history page cursors usable after idle periods in both the CLI and Manager API. Scope and snapshot checks remain; message, media and chunk references still expire after one hour.

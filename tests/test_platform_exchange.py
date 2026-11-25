@@ -54,6 +54,35 @@ class PlatformExchangeTests(unittest.TestCase):
         self.assertNotIn("chat.session", grant.actions)
         self.assertNotIn("*", grant.actions)
 
+    def test_only_verified_instance_chat_gets_an_hour_at_open_and_renewal(self):
+        from unittest.mock import patch
+        from agent_manage.core.auth import LeaseAuthority
+        from agent_manage.core.store import Store
+        now = 100_000
+        until = now + 3_600_000
+        grant = self.redeem(PrivateSocket(actions=["chat.instance"], expiresAt=until))
+        for marker, invalid in (("chat.instance", until + 1), ("chat.session", now + 300_001)):
+            with self.subTest(marker=marker), self.assertRaises(APIError):
+                self.redeem(PrivateSocket(actions=[marker], expiresAt=invalid))
+        with tempfile.TemporaryDirectory() as directory:
+            authority = LeaseAuthority(Store(Path(directory)), "manager")
+            with patch("agent_manage.core.auth.now_ms", return_value=now):
+                lease = authority.open_platform_lease(grant, "manager-agent")
+                self.assertEqual(until, lease.public()["expiresAt"])
+                self.assertEqual(["*"], lease.context["agentIds"])
+                with self.assertRaises(APIError):
+                    authority.issue_delegated_ticket({"issuer": "platform", "subject": "owner", "audience": "manager",
+                        "runtimeIds": ["alpha"], "agentIds": ["*"], "actions": ["messages.list"], "authzVersion": 1,
+                        "leaseSeconds": 3600})
+            with patch("agent_manage.core.auth.now_ms", return_value=until - 1):
+                new_until = until - 1 + 3_600_000
+                with self.assertRaises(APIError):
+                    authority.renew_platform_expiry(lease, new_until + 1)
+                self.assertEqual(lease.token, authority.renew_platform_expiry(lease, new_until).token)
+            with patch("agent_manage.core.auth.now_ms", return_value=new_until):
+                with self.assertRaises(APIError):
+                    authority.authenticate(lease.token)
+
     def test_instance_chat_grant_adds_sidebar_without_management_methods(self):
         instance = self.redeem(PrivateSocket(actions=["chat.instance"]))
         self.assertTrue(instance.instance_chat)
@@ -111,6 +140,35 @@ class PlatformExchangeTests(unittest.TestCase):
         with self.assertRaises(APIError):
             self.redeem(socket, {"type": "auth", "ticket": "b" * 64, "runtimeId": "beta"})
         self.assertEqual([], socket.sent)
+
+    def test_refresh_cannot_change_actor_runtime_binding_or_permissions(self):
+        from dataclasses import replace
+        grant = self.redeem(PrivateSocket(actions=["chat.instance"]))
+        self.assertTrue(grant.same_scope(replace(grant, agent_identify="another-entry", native_agent_id="other")))
+        for field, value in (("subject", "another"), ("issuer", "other"), ("tenant_id", "other"),
+                             ("runtime_id", "beta"), ("binding_id", "b"*64), ("instance_chat", False),
+                             ("actions", ("messages.list",))):
+            self.assertFalse(grant.same_scope(replace(grant, **{field: value})), field)
+        narrow = self.redeem(PrivateSocket())
+        self.assertFalse(narrow.same_scope(replace(narrow, installation_id="reinstalled")))
+
+    def test_late_confirmation_cannot_extend_an_expired_or_revoked_lease(self):
+        from unittest.mock import patch
+        from agent_manage.core.auth import LeaseAuthority
+        from agent_manage.core.store import Store
+        with tempfile.TemporaryDirectory() as directory:
+            authority = LeaseAuthority(Store(Path(directory)), "manager")
+            for revoked in (False, True):
+                with patch("agent_manage.core.auth.now_ms", return_value=1000):
+                    token = authority.issue_ticket(issuer="p", subject="owner", runtime_ids=["one"], actions=["runs.get"], lease_seconds=1)
+                    lease = authority.redeem(token)
+                if revoked:
+                    authority.revoke(lease.context["leaseId"])
+                with patch("agent_manage.core.auth.now_ms", return_value=1999 if revoked else 2000):
+                    with self.assertRaises(APIError):
+                        authority.renew_platform_expiry(lease, 5000)
+                    with self.assertRaises(APIError):
+                        authority.authenticate(lease.token)
 
 
 @unittest.skipUnless(importlib.util.find_spec("aiohttp"), "requires the server dependencies")
