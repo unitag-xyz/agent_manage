@@ -1,7 +1,7 @@
 import unittest
 
 from agent_manage.models import AddAgentsRequest, CreateInstanceRequest
-from agent_manage.orchestrator import InstanceManagerV2
+from agent_manage.adapters.openclaw.orchestrator import InstanceManagerV2
 from agent_manage.settings import (
     DEFAULT_AI_SHOP,
     DEFAULT_MODEL_ENV,

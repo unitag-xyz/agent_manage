@@ -5,14 +5,14 @@ from pathlib import Path
 from time import perf_counter
 from unittest.mock import Mock, patch
 
-from agent_manage.local import CommandError, CommandResult
+from agent_manage.adapters.openclaw.local import CommandError, CommandResult
 from agent_manage.models import (
     AddFeishuBotRequest, AddTelegramBotRequest,
     DeleteFeishuBotRequest, DeleteTelegramBotRequest, DeleteWeixinBotRequest,
 )
-from agent_manage.orchestrator import InstanceManagerV2
+from agent_manage.adapters.openclaw.orchestrator import InstanceManagerV2
 from agent_manage.response import build_error_response
-from agent_manage.seed import _atomic_write_runtime_config
+from agent_manage.adapters.openclaw.seed import _atomic_write_runtime_config
 
 
 class RefactorContractsTest(unittest.TestCase):

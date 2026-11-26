@@ -10,7 +10,7 @@ from unittest.mock import Mock, patch
 
 from agent_manage.cli import _success_response
 from agent_manage.models import AddAgentRequest, AddAgentsRequest, CreateInstanceRequest
-from agent_manage.orchestrator import InstanceManagerV2
+from agent_manage.adapters.openclaw.orchestrator import InstanceManagerV2
 from test_create_instance_v2 import FakeRunner
 
 
@@ -104,7 +104,7 @@ class HostRestartContractTest(unittest.TestCase):
 
 class StaticReloadDecisionTest(unittest.TestCase):
     def decision(self, before, after):
-        from agent_manage.restart_policy import host_restart_required
+        from agent_manage.adapters.openclaw.v2026_7.restart_policy import host_restart_required
         return host_restart_required(before, after)
 
     def test_modes_field_combinations_and_unknowns(self):
@@ -160,7 +160,7 @@ class StaticReloadDecisionTest(unittest.TestCase):
 
 class RuntimeIsolationTest(unittest.TestCase):
     def test_only_standard_host_installation_with_the_pinned_engine_can_opt_in(self):
-        from agent_manage import restart_policy
+        from agent_manage.adapters.openclaw.v2026_7 import restart_policy
         with tempfile.TemporaryDirectory() as directory:
             package = Path(directory)
             (package / "dist").mkdir()

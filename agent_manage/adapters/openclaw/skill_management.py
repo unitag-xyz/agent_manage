@@ -8,9 +8,9 @@ import zipfile
 from pathlib import Path
 from typing import Dict
 
-from .models import AddSkillRequest
-from .skill_permissions import prepare_shared_skill_path
-from .template_safety import validate_safe_name, validate_template_archive
+from ...models import AddSkillRequest
+from ...skill_permissions import prepare_shared_skill_path
+from ...template_safety import validate_safe_name, validate_template_archive
 
 
 class SkillManagementMixin:

@@ -4,7 +4,7 @@ from ....core.store import canonical
 
 
 def message_dto(raw, *, thread_id, segment_id, projection, register_resource, revision=None):
-    from ....segment_reader import millis
+    from .segment_reader import millis
     native_id = raw.get("id") or raw.get("__openclaw", {}).get("id")
     identifier = str(native_id or hashlib.sha256(canonical(raw).encode()).hexdigest())
     blocks = raw.get("content") or []
@@ -23,7 +23,7 @@ def message_dto(raw, *, thread_id, segment_id, projection, register_resource, re
             if text and (kind == "text" or not projection["omitThinking"]):
                 content.append({**common, "type": "text" if kind == "text" else "reasoning", "text": text})
         elif kind in ("toolCall", "tool_call", "tool_use", "functionCall"):
-            from ....segment_reader import preview_arguments
+            from .segment_reader import preview_arguments
             content.append({**common, "type": "tool_call", "toolCallId": block.get("id"),
                 "name": block.get("name"), "summary": block.get("summary") or preview_arguments(block.get("arguments", block.get("input"))),
                 "status": block.get("status", "unknown")})

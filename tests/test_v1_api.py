@@ -299,7 +299,7 @@ class APITest(unittest.IsolatedAsyncioTestCase):
 
     async def test_history_paging_after_a_day_still_requires_an_authorized_lease(self):
         params = {"threadId": self.thread, "segmentId": self.segment, "limit": 1}
-        with patch("agent_manage.segment_reader.time", wraps=time) as reader_clock:
+        with patch("agent_manage.adapters.openclaw.v2026_7.segment_reader.time", wraps=time) as reader_clock:
             reader_clock.time.return_value = 2000000000
             first = (await self.rpc("messages.list", {**params, "edge": "start"}))["result"]
             resume = {**params, "cursor": first["newerCursor"]}

@@ -8,8 +8,8 @@ from typing import Dict, List, Optional
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
-from .models import SetModelRequest
-from .settings import (
+from ...models import SetModelRequest
+from ...settings import (
     catalog_url_for_shop,
     gateway_for_base_url,
     model_base_url_for_shop,

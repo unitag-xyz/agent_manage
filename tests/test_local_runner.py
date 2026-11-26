@@ -5,7 +5,7 @@ import unittest
 from contextlib import redirect_stderr
 from unittest.mock import patch
 
-from agent_manage.local import CommandError, LocalRunner
+from agent_manage.adapters.openclaw.local import CommandError, LocalRunner
 
 
 class LocalRunnerEnvironmentTest(unittest.TestCase):
@@ -40,8 +40,8 @@ class LocalRunnerEnvironmentTest(unittest.TestCase):
             ["openclaw", "broken"], 1, stdout=stdout, stderr=stderr
         )
 
-        with patch("agent_manage.local.os.getuid", return_value=1000, create=True), patch(
-            "agent_manage.local.subprocess.run", return_value=completed
+        with patch("agent_manage.adapters.openclaw.local.os.getuid", return_value=1000, create=True), patch(
+            "agent_manage.adapters.openclaw.local.subprocess.run", return_value=completed
         ), redirect_stderr(captured_stderr):
             with self.assertRaises(CommandError):
                 runner.run(["openclaw", "broken"])

@@ -8,8 +8,8 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from agent_manage.cli import main
-from agent_manage.local import LocalRunner
-from agent_manage.orchestrator import InstanceManagerV2
+from agent_manage.adapters.openclaw.local import LocalRunner
+from agent_manage.adapters.openclaw.orchestrator import InstanceManagerV2
 
 
 VARIABLE = "UNITAG_AGENT_MANAGER_AGENTS_LIST_TIMEOUT_SECONDS"

@@ -11,8 +11,8 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from agent_manage.core.errors import APIError
-from agent_manage.core.recovery import recover_refreshes
-from agent_manage.refresh_management import RefreshManagementMixin
+from agent_manage.adapters.openclaw.recovery import recover_refreshes
+from agent_manage.adapters.openclaw.refresh_management import RefreshManagementMixin
 
 
 class RefreshTests(unittest.TestCase):
@@ -156,7 +156,7 @@ class ChatTests(unittest.IsolatedAsyncioTestCase):
                 calls.append((len(items), threading.get_ident() == loop_thread))
             return put(runtime, items)
         async def page(stamp):
-            with patch("agent_manage.segment_reader.time.time", return_value=stamp):
+            with patch("agent_manage.adapters.openclaw.v2026_7.segment_reader.time.time", return_value=stamp):
                 return (await self.a.invoke("messages.list", {**params, "edge": "start", "limit": 2}))["items"]
         with patch.object(self.s.store, "put_objects", side_effect=measured):
             first = await page(2000000000)
@@ -169,7 +169,7 @@ class ChatTests(unittest.IsolatedAsyncioTestCase):
             result = await self.a.invoke("messages.get", {**params, "messageId": stub["id"], **ref})
             self.assertEqual(result["message"]["revision"], stub["revision"])
         from agent_manage.response import ProtocolError
-        with patch("agent_manage.segment_reader.time.time", return_value=2000007200), self.assertRaises(ProtocolError) as expired:
+        with patch("agent_manage.adapters.openclaw.v2026_7.segment_reader.time.time", return_value=2000007200), self.assertRaises(ProtocolError) as expired:
             await self.a.invoke("messages.get", later[1]["fullMessageRef"]["params"])
         self.assertEqual(expired.exception.code, "CURSOR_EXPIRED")
         save("y")
@@ -183,7 +183,7 @@ class ChatTests(unittest.IsolatedAsyncioTestCase):
             "content": "MEDIA:/home/node/.openclaw/workspace/sample.png"}}) + "\n")
         params = {"threadId": self.thread["threadId"], "segmentId": self.thread["currentSegmentId"], "messageId": "photo"}
         async def read(stamp):
-            with patch("agent_manage.segment_reader.time.time", return_value=stamp):
+            with patch("agent_manage.adapters.openclaw.v2026_7.segment_reader.time.time", return_value=stamp):
                 return (await self.a.invoke("messages.get", params))["message"]
         missing = await read(2000000000)
         same = await read(2000000001)

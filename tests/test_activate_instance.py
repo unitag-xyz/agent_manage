@@ -11,9 +11,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from agent_manage.cli import main
-from agent_manage.local import LocalRunner
+from agent_manage.adapters.openclaw.local import LocalRunner
 from agent_manage.models import CreateInstanceRequest
-from agent_manage.orchestrator import InstanceManagerV2
+from agent_manage.adapters.openclaw.orchestrator import InstanceManagerV2
 
 
 FLY_ENV = {"UNITAG_AGENT_MANAGER_RUNTIME": "container",
@@ -67,7 +67,7 @@ class ActivateInstanceTest(unittest.TestCase):
         self.assertEqual(self.manager.config_path, self.config_path)
 
     def test_install_hook_uses_published_config_and_failure_preserves_it(self):
-        from agent_manage.agent_hooks import HookError
+        from agent_manage.adapters.openclaw.agent_hooks import HookError
         (self.workspace / "install.sh").write_text(
             'test "$OPENCLAW_CONFIG_PATH" = "' + str(self.config_path) + '" || exit 19\n'
             'echo activation-hook-error >&2\nexit 8\n')
@@ -91,7 +91,7 @@ class ActivateInstanceTest(unittest.TestCase):
                 publications.append(destination)
             return real_replace(source, destination)
 
-        with patch("agent_manage.activation.os.replace", side_effect=observe):
+        with patch("agent_manage.adapters.openclaw.activation.os.replace", side_effect=observe):
             result = self.manager.activate_instance(self.request)
         self.assertEqual(len(publications), 1)
         self.assertTrue(result["activationRequired"])
@@ -173,7 +173,7 @@ class ActivateInstanceTest(unittest.TestCase):
                 raise OSError("publish failure")
             return real_replace(source, destination)
 
-        with patch("agent_manage.activation.os.replace", side_effect=fail):
+        with patch("agent_manage.adapters.openclaw.activation.os.replace", side_effect=fail):
             with self.assertRaisesRegex(RuntimeError, "publish failure"):
                 self.manager.activate_instance(self.request)
         self.assertEqual(self.config_path.read_bytes(), self.original)
@@ -189,7 +189,7 @@ class ActivateInstanceTest(unittest.TestCase):
                 raise OSError("publish failure")
             return real_replace(source, destination)
 
-        with patch("agent_manage.activation.os.replace", side_effect=fail):
+        with patch("agent_manage.adapters.openclaw.activation.os.replace", side_effect=fail):
             with self.assertRaises(RuntimeError):
                 self.manager.activate_instance(self.request)
         self.assertFalse(self.backup.exists())
@@ -220,7 +220,7 @@ class ActivateInstanceTest(unittest.TestCase):
                 self.config_path.write_bytes(b'{"concurrent": true}\n')
             return result
 
-        with patch("agent_manage.activation.os.replace", side_effect=concurrent):
+        with patch("agent_manage.adapters.openclaw.activation.os.replace", side_effect=concurrent):
             with self.assertRaisesRegex(RuntimeError, "Concurrent configuration write"):
                 self.manager.activate_instance(self.request)
         self.assertEqual(self.config_path.read_bytes(), b'{"concurrent": true}\n')

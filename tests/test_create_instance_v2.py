@@ -8,7 +8,7 @@ import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
-from agent_manage.local import CommandError, CommandResult
+from agent_manage.adapters.openclaw.local import CommandError, CommandResult
 from agent_manage.models import (
     AddAgentRequest,
     AddAgentsRequest,
@@ -21,7 +21,7 @@ from agent_manage.models import (
     DeleteWeixinBotRequest,
     SetModelRequest,
 )
-from agent_manage.orchestrator import InstanceManagerV2
+from agent_manage.adapters.openclaw.orchestrator import InstanceManagerV2
 from agent_manage.settings import MODEL_GATEWAY_CONFIGS
 
 GLOBAL_GATEWAY_ORIGIN = MODEL_GATEWAY_CONFIGS["global"].origin

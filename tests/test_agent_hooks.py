@@ -10,11 +10,11 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
-from agent_manage import agent_hooks
-from agent_manage.agent_hooks import HookError, run_hook, start_agents
+from agent_manage.adapters.openclaw import agent_hooks
+from agent_manage.adapters.openclaw.agent_hooks import HookError, run_hook, start_agents
 from agent_manage.cli import main
-from agent_manage.local import LocalRunner
-from agent_manage.orchestrator import InstanceManagerV2
+from agent_manage.adapters.openclaw.local import LocalRunner
+from agent_manage.adapters.openclaw.orchestrator import InstanceManagerV2
 from agent_manage.models import AddAgentsRequest, AddAgentRequest
 from agent_manage.response import build_error_response
 

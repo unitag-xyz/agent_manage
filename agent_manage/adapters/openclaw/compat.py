@@ -2,8 +2,8 @@
 from contextlib import nullcontext
 from functools import wraps
 
-from .runtime import RuntimeContext, CURRENT_WRITE_GUARD
-from .transactions import runtime_write_lock
+from ...core.runtime import RuntimeContext, CURRENT_WRITE_GUARD
+from ...core.transactions import runtime_write_lock
 
 WRITES = frozenset({
     "create_instance", "configure_instance", "add_agent", "add_agents", "add_skill",

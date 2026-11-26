@@ -20,15 +20,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote, unquote, urlparse
 
-from .response import ProtocolError
-from .segment_timing import count, timed
+from ....response import ProtocolError
+from ....segment_timing import count, timed
+from ..segment_management import MAX_REFERENCE_CHARS
 
 PAGE_BYTES = 320 * 1024
 HISTORY_PAGE_BYTES = 1024 * 1024
 CHUNK_BYTES = 96 * 1024
 MEDIA_CHUNK_BYTES = 5 * 1024 * 1024
 TTL_MS = 60 * 60 * 1000
-MAX_REFERENCE_CHARS = 8192
 CANONICAL = {"message", "thinking_level_change", "model_change", "compaction",
              "branch_summary", "custom", "custom_message", "label", "session_info"}
 EXTENSIONS = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif",
@@ -233,7 +233,7 @@ class SegmentReader:
 
     def open_read(self, file):
         if self.native_path_resolver:
-            from .path_io import open_without_links
+            from ....path_io import open_without_links
             return open_without_links(file)
         return os.open(file, os.O_RDONLY | os.O_NOFOLLOW)
 
@@ -545,7 +545,7 @@ class SegmentReader:
         else:
             target = self.media_roots[0] / value
         if self.native_path_resolver and (value.startswith("file://") or Path(value).is_absolute()):
-            from .core.errors import APIError
+            from ....core.errors import APIError
             try:
                 target = self.native_path_resolver(str(target))
             except APIError:

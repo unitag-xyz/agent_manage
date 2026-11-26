@@ -11,14 +11,14 @@ from pathlib import Path
 from unittest.mock import patch
 
 from agent_manage.core.errors import APIError
-from agent_manage.core.recovery import recover_refreshes, fingerprint
+from agent_manage.adapters.openclaw.recovery import recover_refreshes, fingerprint
 from agent_manage.core.runtime import RuntimeContext
 from agent_manage.core.transactions import runtime_write_lock
 from agent_manage.file_io import write_private_json
-from agent_manage.local import LocalRunner
+from agent_manage.adapters.openclaw.local import LocalRunner
 from agent_manage.models import AddTelegramBotRequest, RefreshAgentRequest
-from agent_manage.orchestrator import InstanceManagerV2
-from agent_manage.segment_reader import SegmentReader
+from agent_manage.adapters.openclaw.orchestrator import InstanceManagerV2
+from agent_manage.adapters.openclaw.v2026_7.segment_reader import SegmentReader
 from agent_manage.segment_timing import CURRENT, ReadTiming
 
 
@@ -158,7 +158,7 @@ class BoundaryTest(unittest.TestCase):
                 atomic_write_bytes(path, data, mode)
                 if path == fixture.workspace / "SOUL.md":
                     raise SystemExit("simulated power loss")
-            with patch("agent_manage.refresh_management._atomic_bytes", interrupted), self.assertRaises(SystemExit):
+            with patch("agent_manage.adapters.openclaw.refresh_management._atomic_bytes", interrupted), self.assertRaises(SystemExit):
                 fixture.manager.refresh_agent(RefreshAgentRequest("demo", template_dir=str(fixture.source), template_only=True))
             self.assertEqual((fixture.workspace / "SOUL.md").read_text(), "version two\n")
             with runtime_write_lock(fixture.config_path.parent):

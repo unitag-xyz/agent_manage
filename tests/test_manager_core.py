@@ -6,9 +6,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from agent_manage.manager_core import ManagerCore
+from agent_manage.adapters.openclaw.manager_core import ManagerCore
 from agent_manage.models import CreateInstanceRequest
-from agent_manage.orchestrator import InstanceManagerV2
+from agent_manage.adapters.openclaw.orchestrator import InstanceManagerV2
 
 
 class DummyRunner:

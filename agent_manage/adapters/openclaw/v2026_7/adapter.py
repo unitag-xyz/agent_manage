@@ -13,10 +13,10 @@ from .... import __version__, models
 from ....core.contracts import METHODS, FUTURE_METHODS
 from ....core.errors import APIError
 from ....core.store import canonical, now_ms
-from ....local import LocalRunner
+from ..local import LocalRunner
 from ..execution import open_registered
 from ....path_io import read_without_links
-from ....segment_reader import SegmentReader, read_segment, safe_file
+from .segment_reader import SegmentReader, read_segment, safe_file
 from ....segment_timing import measured_read
 from ...base import RuntimeAdapter
 from .gateway import Gateway
@@ -701,7 +701,7 @@ class OpenClawAdapter(RuntimeAdapter):
             return {"items": [data for _, data in self.store.thread_runs(self.runtime_id, params["threadId"],
                                                                          request_key=params["clientRequestId"])]}
         if method == "runtimes.recover":
-            from ....core.recovery import recover_refreshes
+            from ..recovery import recover_refreshes
             from ....core.transactions import runtime_write_lock
             def recover():
                 with runtime_write_lock(self.context.state_dir):

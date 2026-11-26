@@ -10,7 +10,7 @@ from typing import Dict, List, Optional
 
 from .channel_bindings import count_channel_bindings, remove_account_bindings, replace_account_binding
 
-from .models import (
+from ...models import (
     AddFeishuBotRequest,
     AddTelegramBotRequest,
     AddWeixinBotRequest,

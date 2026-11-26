@@ -9,9 +9,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from agent_manage.cli import main
-from agent_manage.local import LocalRunner
+from agent_manage.adapters.openclaw.local import LocalRunner
 from agent_manage.models import RefreshAgentRequest
-from agent_manage.orchestrator import InstanceManagerV2
+from agent_manage.adapters.openclaw.orchestrator import InstanceManagerV2
 import test_refresh_management as refresh_tests
 
 
@@ -178,14 +178,14 @@ class CodexManagementTest(unittest.TestCase):
         self.manager._codex_state_path().write_text(json.dumps(state))
         original_state = self.manager._codex_state_path().read_bytes()
         original_config = self.path.read_bytes()
-        from agent_manage.codex_management import _private_json
+        from agent_manage.adapters.openclaw.codex_management import _private_json
 
         def fail_active(path, body):
             if path == self.manager._codex_state_path() and body.get("status") == "active":
                 raise OSError("state write failed")
             return _private_json(path, body)
 
-        with patch("agent_manage.codex_management._private_json", side_effect=fail_active):
+        with patch("agent_manage.adapters.openclaw.codex_management._private_json", side_effect=fail_active):
             with self.assertRaisesRegex(OSError, "state write failed"):
                 self.login()
         self.assertEqual(self.path.read_bytes(), original_config)
@@ -342,14 +342,14 @@ class CodexManagementTest(unittest.TestCase):
             row.pop("contextWindow", None)
         self.path.write_text(json.dumps(config))
         before = self.path.read_bytes(), self.manager._codex_state_path().read_bytes()
-        from agent_manage.codex_management import _private_json
+        from agent_manage.adapters.openclaw.codex_management import _private_json
 
         def fail_active(path, body):
             if path == self.manager._codex_state_path() and body.get("status") == "active":
                 raise OSError("state write failed")
             return _private_json(path, body)
 
-        with patch("agent_manage.codex_management._private_json", side_effect=fail_active):
+        with patch("agent_manage.adapters.openclaw.codex_management._private_json", side_effect=fail_active):
             with self.assertRaisesRegex(OSError, "state write failed"):
                 self.login()
         self.assertEqual((self.path.read_bytes(), self.manager._codex_state_path().read_bytes()), before)
@@ -363,13 +363,13 @@ class CodexManagementTest(unittest.TestCase):
         self.assertFalse(self.manager._codex_state_path().exists())
 
     def test_active_state_write_failure_rolls_back_config_bytes_and_mode(self):
-        from agent_manage.codex_management import _private_json
+        from agent_manage.adapters.openclaw.codex_management import _private_json
         original, mode = self.path.read_bytes(), stat.S_IMODE(self.path.stat().st_mode)
         def fail_active(path, body):
             if path == self.manager._codex_state_path() and body.get("status") == "active":
                 raise OSError("state write failed")
             return _private_json(path, body)
-        with patch("agent_manage.codex_management._private_json", side_effect=fail_active):
+        with patch("agent_manage.adapters.openclaw.codex_management._private_json", side_effect=fail_active):
             with self.assertRaisesRegex(OSError, "state write failed"):
                 self.login()
         self.assertEqual(self.path.read_bytes(), original)
@@ -492,7 +492,7 @@ class CodexManagementTest(unittest.TestCase):
         models = {"models": [{"id": "gpt-6.2-sol", "input": ["text"]}]}
         for config_changes in (True, False):
             with self.subTest(config_changes=config_changes), \
-                 patch("agent_manage.refresh_management.urlopen", return_value=io.BytesIO(json.dumps(release).encode())) as lookup, \
+                 patch("agent_manage.adapters.openclaw.refresh_management.urlopen", return_value=io.BytesIO(json.dumps(release).encode())) as lookup, \
                  patch.object(self.manager, "_codex_bridge", return_value=models):
                 result = self.manager.refresh_agent(RefreshAgentRequest("demo"))
                 self.assertEqual(lookup.call_args.args[0].full_url,
@@ -518,7 +518,7 @@ class CodexManagementTest(unittest.TestCase):
         self.login()
         config = json.loads(self.path.read_text())
         release = {"typeCode": 1, "content": {"identify": "demo", "version": "0.1.3"}}
-        with patch("agent_manage.refresh_management.urlopen", return_value=io.BytesIO(json.dumps(release).encode())) as lookup:
+        with patch("agent_manage.adapters.openclaw.refresh_management.urlopen", return_value=io.BytesIO(json.dumps(release).encode())) as lookup:
             self.assertEqual(self.manager._latest_template_release("demo", config), release["content"])
         self.assertEqual(lookup.call_args.args[0].host, "api.dolaio.cn")
 

@@ -12,9 +12,9 @@ import subprocess
 import time
 from pathlib import Path
 
-from .file_io import write_private_json
+from ...file_io import write_private_json
 from .local import CommandError, CommandResult
-from .template_safety import validate_safe_name
+from ...template_safety import validate_safe_name
 
 INSTALL_TIMEOUT = 1800
 START_TIMEOUT = 120

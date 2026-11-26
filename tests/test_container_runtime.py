@@ -6,7 +6,7 @@ from pathlib import Path
 from subprocess import CalledProcessError
 from unittest.mock import MagicMock, call, patch
 
-from agent_manage import container_runtime
+from agent_manage.adapters.openclaw import container_runtime
 
 
 class ContainerRuntimeTest(unittest.TestCase):

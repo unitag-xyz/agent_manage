@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import re
 
-from .adapters.openclaw.version import implementation, package_directory, package_version
-from .segment_reader import MAX_REFERENCE_CHARS, read_segment
-from .segment_timing import CURRENT, measured_read
+from .version import implementation, load_implementation, package_directory, package_version
+from ...segment_timing import CURRENT, measured_read
+
+
+MAX_REFERENCE_CHARS = 8192
 
 
 class SegmentManagementMixin:
@@ -49,10 +51,11 @@ class SegmentManagementMixin:
             package = package_directory(self.bin, path=env.get("PATH"))
             if package is None:
                 raise FileNotFoundError("OpenClaw is required for segment history")
-            if implementation(package_version(package), "history") is None:
+            family = implementation(package_version(package), "history")
+            if family is None:
                 raise ValueError("Segment history currently supports server OpenClaw 2026.7.x only")
         with CURRENT.get().span("configReadMs"):
             config = self._load_config()
         payload = {"action": action, "sessionKey": session_key, "sessionId": session_id,
                    "config": config, "root": str(self.config_path.parent), **params}
-        return read_segment(payload, env)
+        return load_implementation(family, "segment_reader").read_segment(payload, env)

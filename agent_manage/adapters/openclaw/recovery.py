@@ -3,8 +3,8 @@ import hashlib
 import json
 from pathlib import Path
 
-from .errors import APIError
-from ..file_io import atomic_write_bytes, fingerprint, write_private_json, sync_directory
+from ...core.errors import APIError
+from ...file_io import atomic_write_bytes, fingerprint, write_private_json, sync_directory
 
 
 def recovery_entries(config_path):

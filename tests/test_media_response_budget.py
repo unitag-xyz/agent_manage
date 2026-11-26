@@ -6,7 +6,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from unittest.mock import Mock
 
 from agent_manage.response import MAX_PROTOCOL_RESPONSE_BYTES, build_success_response, print_json
-from agent_manage.segment_reader import SegmentReader
+from agent_manage.adapters.openclaw.v2026_7.segment_reader import SegmentReader
 
 
 class MediaResponseBudgetTest(unittest.TestCase):

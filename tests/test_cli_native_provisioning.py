@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from agent_manage.cli import main
-from agent_manage.orchestrator import InstanceManagerV2
+from agent_manage.adapters.openclaw.orchestrator import InstanceManagerV2
 
 
 @unittest.skipUnless(os.environ.get("AM_DISPOSABLE_CLI_SMOKE") == "1", "requires an empty disposable tmpfs")

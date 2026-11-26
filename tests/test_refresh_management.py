@@ -13,9 +13,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from agent_manage.cli import main
-from agent_manage.local import CommandResult, LocalRunner
+from agent_manage.adapters.openclaw.local import CommandResult, LocalRunner
 from agent_manage.models import RefreshAgentRequest
-from agent_manage.orchestrator import InstanceManagerV2
+from agent_manage.adapters.openclaw.orchestrator import InstanceManagerV2
 from agent_manage.response import TYPE_CODE_OPERATION_ROLLED_BACK, build_error_response
 
 
@@ -159,7 +159,7 @@ class RefreshManagementTest(unittest.TestCase):
     def test_default_refresh_uses_local_template_when_release_lookup_is_unavailable(self):
         self.manager.template_root.mkdir()
         shutil.copytree(self.source, self.manager.template_root / "demo")
-        with patch("agent_manage.refresh_management.urlopen", side_effect=TimeoutError("unavailable")):
+        with patch("agent_manage.adapters.openclaw.refresh_management.urlopen", side_effect=TimeoutError("unavailable")):
             result = self.manager.refresh_agent(RefreshAgentRequest("demo"))
             self.assertEqual(result["template"]["version_after"], "1.0.0")
             self.assertEqual(result["template"]["release_lookup"], "unavailable")
@@ -183,7 +183,7 @@ class RefreshManagementTest(unittest.TestCase):
         self.assertEqual((self.workspace / "installs.log").read_text(), "run\n" * 3)
 
     def test_refresh_install_failure_preserves_synced_files_and_can_retry(self):
-        from agent_manage.agent_hooks import HookError
+        from agent_manage.adapters.openclaw.agent_hooks import HookError
         self.write_source("install.sh", "echo started > install-marker\nexit 7\n")
         with self.assertRaises(HookError) as caught:
             self.manager.refresh_agent(self.request())
@@ -202,7 +202,7 @@ class RefreshManagementTest(unittest.TestCase):
     def test_refresh_preview_models_only_and_failed_sync_do_not_install(self):
         self.write_source("install.sh", "touch should-not-run\n")
         (self.workspace / "install.sh").write_text("touch should-not-run\n")
-        with patch("agent_manage.refresh_management.run_hook") as hook:
+        with patch("agent_manage.adapters.openclaw.refresh_management.run_hook") as hook:
             self.runner.dry_run = True
             self.manager.refresh_agent(self.request())
             self.runner.dry_run = False
@@ -486,7 +486,7 @@ class RefreshManagementTest(unittest.TestCase):
                 raise OSError("simulate disk failure")
             return real_replace(source, target)
 
-        with patch("agent_manage.refresh_management.os.replace", side_effect=fail_once):
+        with patch("agent_manage.adapters.openclaw.refresh_management.os.replace", side_effect=fail_once):
             with self.assertRaises(RuntimeError) as caught:
                 self.manager.refresh_agent(self.request())
         response = build_error_response(caught.exception)
@@ -499,7 +499,7 @@ class RefreshManagementTest(unittest.TestCase):
         self.assertFalse((self.workspace / "A").exists())
 
     def test_directory_permission_failure_is_detected_before_writes(self):
-        with patch("agent_manage.refresh_management.os.access", return_value=False):
+        with patch("agent_manage.adapters.openclaw.refresh_management.os.access", return_value=False):
             with self.assertRaisesRegex(PermissionError, "Refresh directory is not writable"):
                 self.manager.refresh_agent(self.request())
         self.assertFalse((self.workspace / "SOUL.md").exists())
@@ -517,7 +517,7 @@ class RefreshManagementTest(unittest.TestCase):
                 raise PermissionError("temp denied")
             return atomic_write_bytes(path, *args, **kwargs)
 
-        with patch("agent_manage.refresh_management._atomic_bytes", side_effect=write_or_fail):
+        with patch("agent_manage.adapters.openclaw.refresh_management._atomic_bytes", side_effect=write_or_fail):
             with self.assertRaises(RuntimeError) as caught:
                 self.manager.refresh_agent(self.request())
         self.assertEqual(failed, [self.workspace / "SOUL.md"])

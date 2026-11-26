@@ -10,7 +10,7 @@ from copy import deepcopy
 from pathlib import Path
 from subprocess import TimeoutExpired
 
-from .file_io import atomic_write_bytes as _atomic_bytes, write_private_json as _private_json
+from ...file_io import atomic_write_bytes as _atomic_bytes, write_private_json as _private_json
 from .codex_auth import CodexAuthMixin
 
 

@@ -14,9 +14,9 @@ from dataclasses import replace
 from pathlib import Path
 from time import perf_counter
 
-from .models import CreateInstanceRequest
-from .file_io import stage_bytes
-from .response import redact_sensitive_values
+from ...models import CreateInstanceRequest
+from ...file_io import stage_bytes
+from ...response import redact_sensitive_values
 
 
 class FlyActivationMixin:

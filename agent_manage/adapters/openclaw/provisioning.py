@@ -10,10 +10,10 @@ from time import perf_counter
 from typing import Dict, List, Optional
 
 from .local import CommandError
-from .models import AddAgentRequest, CreateInstanceRequest
-from .settings import normalize_image_quality
-from .skill_permissions import prepare_shared_skill_path
-from .template_safety import (
+from ...models import AddAgentRequest, CreateInstanceRequest
+from ...settings import normalize_image_quality
+from ...skill_permissions import prepare_shared_skill_path
+from ...template_safety import (
     require_path_within,
     validate_safe_name,
     validate_template_archive,
@@ -369,7 +369,7 @@ class ProvisioningMixin:
         return sources
 
     def _builtin_common_skill_sources(self) -> List[Path]:
-        root = Path(__file__).resolve().parent / "common_skills"
+        root = Path(__file__).resolve().parents[2] / "common_skills"
         if not root.is_dir():
             raise FileNotFoundError(f"Built-in common skills folder not found: {root}")
         return sorted((item for item in root.iterdir() if item.is_dir()), key=lambda item: item.name)

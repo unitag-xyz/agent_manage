@@ -8,6 +8,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from .host_binding import native_path
+from .version import implementation
 from ...core.errors import APIError
 from ...path_io import read_without_links
 
@@ -43,7 +44,7 @@ class OpenClawPlatformHost:
             raise ValueError("Invalid private native gateway socket")
         self.native_version = profile.get("nativeVersion")
         if self.native_version is not None and (self.gateway_socket is None or not isinstance(self.native_version, str)
-                or not re.fullmatch(r"2026\.7\.[1-9][0-9]*(?:-[1-9][0-9]*)?", self.native_version)):
+                or implementation(self.native_version, "runtime") is None):
             raise ValueError("Invalid native version for private relay")
         gateway = urlsplit(self.gateway_url)
         if (not isinstance(self.origin, str) or gateway.scheme != "ws"

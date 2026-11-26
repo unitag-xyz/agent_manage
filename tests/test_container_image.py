@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
-from agent_manage.seed import (
+from agent_manage.adapters.openclaw.seed import (
     INITIALIZING_MARKER,
     assert_seed_has_no_runtime_secrets,
     initialize_openclaw_seed,
@@ -246,7 +246,7 @@ class ContainerImageTest(unittest.TestCase):
         self.assertIn(".unitag-seed-initialized", validation_script)
         self.assertIn("ImmutableReference=", publish_script)
 
-        seed_module = (Path(__file__).resolve().parents[1] / "agent_manage" / "seed.py").read_text(
+        seed_module = (Path(__file__).resolve().parents[1] / "agent_manage/adapters/openclaw/seed.py").read_text(
             encoding="utf-8"
         )
         self.assertIn("dirs_exist_ok=True, symlinks=True", seed_module)

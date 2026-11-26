@@ -20,14 +20,14 @@ from pathlib import Path
 from urllib.parse import quote, urlsplit
 from urllib.request import Request, urlopen
 
-from .settings import DEFAULT_MODEL_ENV, MODEL_GATEWAY_CONFIGS
+from ...settings import DEFAULT_MODEL_ENV, MODEL_GATEWAY_CONFIGS
 
 from .agent_hooks import HookError, run_hook
-from .skill_permissions import prepare_shared_skill_path
-from .models import RefreshAgentRequest
-from .file_io import atomic_write_bytes as _atomic_bytes, fingerprint, write_private_json as _private_json
-from .template_download import download_template_archive, replace_template_archive, validate_template_url
-from .template_safety import validate_safe_name, validate_template_archive
+from ...skill_permissions import prepare_shared_skill_path
+from ...models import RefreshAgentRequest
+from ...file_io import atomic_write_bytes as _atomic_bytes, fingerprint, write_private_json as _private_json
+from ...template_download import download_template_archive, replace_template_archive, validate_template_url
+from ...template_safety import validate_safe_name, validate_template_archive
 
 
 def _protected(relative: Path) -> bool:
@@ -262,7 +262,7 @@ class RefreshManagementMixin:
                                             state_path, previous, new_state, name, job_id)
             # Journal all intended bytes BEFORE the first live write. A killed process
             # can then be recovered without executing installation scripts again.
-            from .file_io import encode_json
+            from ...file_io import encode_json
             recovery_entries = list(manifest["files"])
             recovery_entries.append({"path": str(self.config_path),
                 "before": fingerprint(self.config_path), "backup_file": "openclaw.json",
@@ -291,7 +291,7 @@ class RefreshManagementMixin:
                     attempted.append(item)
                     if item["action"] == "delete":
                         target.unlink()
-                        from .file_io import sync_directory
+                        from ...file_io import sync_directory
                         sync_directory(target.parent)
                     else:
                         missing = []
@@ -345,7 +345,7 @@ class RefreshManagementMixin:
                             raise RuntimeError("File changed independently; retain it and report rollback conflict")
                         if item["before"] is None:
                             item["target"].unlink(missing_ok=True)
-                            from .file_io import sync_directory
+                            from ...file_io import sync_directory
                             sync_directory(item["target"].parent)
                         else:
                             _atomic_bytes(item["target"], (backup / item["backup_file"]).read_bytes(), item["before"]["mode"])
@@ -420,7 +420,7 @@ class RefreshManagementMixin:
         if self.runner.dry_run:
             yield
             return
-        from .core.transactions import runtime_write_lock
+        from ...core.transactions import runtime_write_lock
         with runtime_write_lock(root.parent):
             for path in [root, root / "agents", root / "backups"]:
                 if path.is_symlink():

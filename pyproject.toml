@@ -15,7 +15,8 @@ server = ["aiohttp>=3.13,<4", "cryptography>=46,<47"]
 version = {attr = "agent_manage.__version__"}
 
 [tool.setuptools.package-data]
-agent_manage = ["*.mjs", "common_skills/*/SKILL.md", "common_skills/*/agents/*.yaml"]
+agent_manage = ["common_skills/*/SKILL.md", "common_skills/*/agents/*.yaml"]
+"agent_manage.adapters.openclaw.v2026_7" = ["*.mjs"]
 
 [project.scripts]
 agent-manage = "agent_manage.cli:main"

@@ -10,9 +10,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from agent_manage.cli import main
-from agent_manage.local import LocalRunner
+from agent_manage.adapters.openclaw.local import LocalRunner
 from agent_manage.models import AddSkillRequest
-from agent_manage.orchestrator import InstanceManagerV2
+from agent_manage.adapters.openclaw.orchestrator import InstanceManagerV2
 from agent_manage.response import TYPE_CODE_CONFLICT, TYPE_CODE_INVALID_ARGUMENT, TYPE_CODE_NOT_FOUND
 
 
@@ -123,7 +123,7 @@ class SkillManagementTest(unittest.TestCase):
                 raise OSError("simulated swap failure")
             return real_replace(path, target)
 
-        with patch("agent_manage.skill_management.shutil.copytree", side_effect=OSError("copy failure")):
+        with patch("agent_manage.adapters.openclaw.skill_management.shutil.copytree", side_effect=OSError("copy failure")):
             with self.assertRaises(OSError):
                 self.manager.add_skill(request)
         with patch.object(Path, "replace", fail_install):

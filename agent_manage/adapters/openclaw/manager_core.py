@@ -12,10 +12,10 @@ from time import perf_counter
 from typing import Dict, List, Optional
 
 from .local import LocalRunner
-from .error_details import command_error_details, embedded_error_payload
-from .file_io import atomic_write_bytes, encode_json, stage_bytes
-from .restart_policy import host_restart_required, standard_host_reload_available
-from .settings import (
+from ...error_details import command_error_details, embedded_error_payload
+from ...file_io import atomic_write_bytes, encode_json, stage_bytes
+from .v2026_7.restart_policy import host_restart_required, standard_host_reload_available
+from ...settings import (
     DEFAULT_AI_SHOP,
     DEFAULT_IMAGE_QUALITY,
     DEFAULT_MODEL_ENV,
@@ -325,7 +325,7 @@ class ManagerCore:
                 shutil.copy2(self.config_path, backup_path)
                 os.chmod(backup_path, 0o600)
             tmp_path.replace(self.config_path)
-            from .file_io import sync_directory
+            from ...file_io import sync_directory
             sync_directory(self.config_path.parent)
             self._last_config_write = (self.config_path, self._config_digest())
             self._config_read_revision = self._last_config_write

@@ -5,9 +5,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from agent_manage.manager_core import ManagerCore
-from agent_manage.refresh_management import _atomic_bytes
-from agent_manage.seed import _atomic_write_runtime_config
+from agent_manage.adapters.openclaw.manager_core import ManagerCore
+from agent_manage.adapters.openclaw.refresh_management import _atomic_bytes
+from agent_manage.adapters.openclaw.seed import _atomic_write_runtime_config
 
 
 class FileWriteContractsTest(unittest.TestCase):

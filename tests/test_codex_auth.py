@@ -9,11 +9,11 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
-from agent_manage.codex_auth import GLOBAL_PROFILE, run_login_worker
+from agent_manage.adapters.openclaw.codex_auth import GLOBAL_PROFILE, run_login_worker
 from agent_manage.cli import main
-from agent_manage.local import LocalRunner
-from agent_manage.orchestrator import InstanceManagerV2
-from agent_manage.refresh_management import _private_json
+from agent_manage.adapters.openclaw.local import LocalRunner
+from agent_manage.adapters.openclaw.orchestrator import InstanceManagerV2
+from agent_manage.adapters.openclaw.refresh_management import _private_json
 import test_codex_management as model_tests
 
 
@@ -300,7 +300,7 @@ class GlobalCodexTest(unittest.TestCase):
         marker = self.path.parent / "auth-mutated"
         sdk.write_text("import fs from 'node:fs';\nexport function updateAuthProfileStoreWithLock(){"
                        f"fs.writeFileSync({json.dumps(str(marker))},'changed'); throw new Error('unexpected');" + "}")
-        result = subprocess.run(["node", str(Path(__file__).resolve().parents[1] / "agent_manage/codex_auth_bridge.mjs")],
+        result = subprocess.run(["node", str(Path(__file__).resolve().parents[1] / "agent_manage/adapters/openclaw/v2026_7/codex_auth_bridge.mjs")],
                                 input=json.dumps({"package": str(package), "action": "inspect"}),
                                 text=True, capture_output=True, timeout=10)
         self.assertEqual(result.returncode, 1)

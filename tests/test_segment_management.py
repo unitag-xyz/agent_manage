@@ -11,10 +11,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 from agent_manage.cli import main
-from agent_manage.local import LocalRunner
-from agent_manage.orchestrator import InstanceManagerV2
+from agent_manage.adapters.openclaw.local import LocalRunner
+from agent_manage.adapters.openclaw.orchestrator import InstanceManagerV2
 from agent_manage.response import ProtocolError, build_error_response, build_success_response, print_json
-from agent_manage.segment_reader import SegmentReader, read_segment, select_rows
+from agent_manage.adapters.openclaw.v2026_7.segment_reader import SegmentReader, read_segment, select_rows
 
 
 class SegmentCliTest(unittest.TestCase):
@@ -334,7 +334,7 @@ class DirectSegmentReaderTest(unittest.TestCase):
             large, image = page["messages"]
             return ({"action": "message", **large["fullMessageRef"]["params"]},
                     {"action": "media", **image["mediaRefs"][0]["params"], "mediaOffset": 0, "mediaLength": 1})
-        with patch("agent_manage.segment_reader.time.time") as clock:
+        with patch("agent_manage.adapters.openclaw.v2026_7.segment_reader.time.time") as clock:
             clock.return_value = 2000000000
             page = read()
             original = reads_for(page)
@@ -832,7 +832,7 @@ await sdk.saveSessionStore(process.argv[2], JSON.parse(process.argv[3]), {skipMa
                 read_bytes += len(data)
             return data
 
-        with patch("agent_manage.segment_reader.os.read", side_effect=observed_read):
+        with patch("agent_manage.adapters.openclaw.v2026_7.segment_reader.os.read", side_effect=observed_read):
             messages = self.history(limit=2)["messages"][-2:]
         self.assertEqual(read_bytes, image.stat().st_size)
         self.assertEqual([len(message["mediaRefs"]) for message in messages], [1, 1])

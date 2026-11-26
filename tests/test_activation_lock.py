@@ -10,16 +10,16 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from agent_manage.activation import FlyActivationMixin
+from agent_manage.adapters.openclaw.activation import FlyActivationMixin
 
 
 CHILD = r'''
 import json, os, sys, time
 from pathlib import Path
 from unittest.mock import patch
-from agent_manage.local import LocalRunner
+from agent_manage.adapters.openclaw.local import LocalRunner
 from agent_manage.models import CreateInstanceRequest
-from agent_manage.orchestrator import InstanceManagerV2
+from agent_manage.adapters.openclaw.orchestrator import InstanceManagerV2
 
 config, ready, release, hold = sys.argv[1:]
 os.environ.update(UNITAG_AGENT_MANAGER_RUNTIME="container",
@@ -97,7 +97,7 @@ class ActivationLockTests(unittest.TestCase):
     def test_wrong_owner_fails_before_flock_without_changing_file(self):
         self.lock.write_bytes(b'keep owner file')
         self.lock.chmod(0o600)
-        with patch('agent_manage.activation.os.geteuid', return_value=os.geteuid() + 1), \
+        with patch('agent_manage.adapters.openclaw.activation.os.geteuid', return_value=os.geteuid() + 1), \
                 patch('fcntl.flock') as flock:
             with self.assertRaisesRegex(RuntimeError, 'Unsafe activation lock'):
                 with FlyActivationMixin._activation_lock(self.lock):

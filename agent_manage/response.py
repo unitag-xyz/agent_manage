@@ -6,7 +6,7 @@ import sys
 from datetime import datetime
 from typing import Any, Dict
 
-from .local import CommandError
+from .process_result import CommandError
 from .error_details import command_error_details, embedded_error_payload as _embedded_error_payload
 from .segment_timing import CURRENT
 from .core.errors import APIError

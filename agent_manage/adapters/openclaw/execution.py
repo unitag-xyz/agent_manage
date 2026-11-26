@@ -3,9 +3,9 @@
 import os
 
 from ...core.errors import APIError
-from ...manager_core import ManagerCore
-from ...local import LocalRunner
-from ...orchestrator import InstanceManagerV2
+from .manager_core import ManagerCore
+from .local import LocalRunner
+from .orchestrator import InstanceManagerV2
 from ..execution import LocalOptions
 
 

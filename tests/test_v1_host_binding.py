@@ -860,7 +860,7 @@ class HostBindingTest(unittest.IsolatedAsyncioTestCase):
                 self.service(bad)
 
     async def test_strict_read_rejects_parent_link_even_after_legacy_check(self):
-        from agent_manage.segment_reader import safe_file
+        from agent_manage.adapters.openclaw.v2026_7.segment_reader import safe_file
         self.registration()
         sessions = self.root / "one/config/agents/main/sessions"
         sessions.mkdir(parents=True)

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from .local import CommandError
+from .process_result import CommandError
 
 
 def embedded_error_payload(exc: Exception) -> dict:
