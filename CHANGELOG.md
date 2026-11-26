@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Codex 模型目录同步失败时，刷新结果附带脱敏的失败分类和可用的 HTTP 状态码。
+
 ## 1.0.009 - 2026-11-26
 
 - Notify subscribed Host Chat2 windows when a Run is accepted or observed. Preserve early tool events during discovery, recheck overlapping notifications, and finish native observer registration when a tab leaves.
