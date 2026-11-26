@@ -103,9 +103,25 @@ class CodexManagementMixin(CodexAuthMixin):
         if not previous:
             return config, {**status, "reason": "codex_catalog_not_configured"}
         try:
-            rows = self._codex_bridge("list-models").get("models")
-        except (OSError, RuntimeError, TimeoutExpired, ValueError):
-            return config, {**status, "reason": "codex_catalog_unavailable"}
+            catalog = self._codex_bridge("list-models")
+        except TimeoutExpired:
+            catalog = {"catalog_error": {"code": "timeout"}}
+        except (OSError, RuntimeError, ValueError):
+            catalog = {"catalog_error": {"code": "bridge_failed"}}
+        if not isinstance(catalog, dict):
+            catalog = {"catalog_error": {"code": "invalid_response"}}
+        error = catalog.get("catalog_error")
+        if isinstance(error, dict):
+            code = error.get("code")
+            if code not in ("sdk_unavailable", "oauth_unavailable", "network_error", "timeout", "http_error",
+                            "invalid_response", "response_too_large", "bridge_failed"):
+                code = "bridge_failed"
+            details = {"code": code}
+            http_status = error.get("http_status")
+            if code == "http_error" and type(http_status) is int and 300 <= http_status <= 599:
+                details["http_status"] = http_status
+            return config, {**status, "reason": "codex_catalog_unavailable", "catalog_error": details}
+        rows = catalog.get("models")
         models = {}
         media_refs = self._configured_media_model_refs(config) | {self.CODEX_IMAGE_MODEL}
         for row in rows if isinstance(rows, list) else []:

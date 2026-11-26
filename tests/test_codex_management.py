@@ -469,6 +469,7 @@ class CodexManagementTest(unittest.TestCase):
         with patch.object(self.manager, "_codex_bridge", side_effect=RuntimeError("upstream unavailable")):
             result = self.manager.refresh_agent(request)
         self.assertEqual(result["models"]["reason"], "codex_catalog_unavailable")
+        self.assertEqual(result["models"]["catalog_error"], {"code": "bridge_failed"})
         self.assertTrue(result["models"]["skipped"])
         self.assertEqual(self.path.read_bytes(), before)
         self.assertEqual((self.fixture.workspace / "SOUL.md").read_text(), "version one\n")

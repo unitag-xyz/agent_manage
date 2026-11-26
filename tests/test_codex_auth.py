@@ -418,6 +418,20 @@ globalThis.fetch = async (url, options) => {
         self.assertFalse(models["skipped"], models)
         self.assertEqual(models["supported_model_refs"], ["openai/gpt-6.2-sol", "openai/gpt-6.1-sol"])
         self.assertNotIn("test-existing-access", json.dumps(models))
+        before = self.path.read_bytes()
+        for reply, expected in (
+            ('return new Response("private response body", {status: 403});', {"code": "http_error", "http_status": 403}),
+            ('throw new TypeError("private transport details");', {"code": "network_error"}),
+        ):
+            with self.subTest(expected=expected):
+                catalog_fixture.write_text(f"globalThis.fetch = async () => {{ {reply} }};\n")
+                with patch.dict(os.environ, {"NODE_OPTIONS": f"--import={catalog_fixture.as_uri()}"}):
+                    failed = self.manager.refresh_agent(RefreshAgentRequest("demo", models_only=True))["models"]
+                self.assertTrue(failed["skipped"])
+                self.assertEqual(failed["reason"], "codex_catalog_unavailable")
+                self.assertEqual(failed["catalog_error"], expected)
+                self.assertNotIn("private", json.dumps(failed))
+                self.assertEqual(self.path.read_bytes(), before)
         # New agents inherit the main account without copying the refresh token.
         config = json.loads(self.path.read_text())
         config["agents"]["list"].append({"id": "new"})

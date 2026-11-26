@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Include optional `triggerMessageId` on OpenClaw Runs when a native user record proves which message triggered the Run. Existing Chat2 events and message history retain their shapes.
+- Codex 模型目录同步失败时，刷新结果附带脱敏的失败分类和可用的 HTTP 状态码。
 
 ## 1.0.009 - 2026-11-26
 

@@ -18,40 +18,53 @@ async function local(dir, updater = () => false) {
 }
 
 async function fetchCodexModels() {
-  const runtime = await import(pathToFileURL(path.join(input.package, 'dist/plugin-sdk/provider-auth-runtime.js')));
-  const cfg = JSON.parse(fs.readFileSync(process.env.OPENCLAW_CONFIG_PATH, 'utf8'));
-  const profile = {provider: 'openai', cfg, agentDir: input.main, profileId: GLOBAL};
-  const auth = await runtime.resolveApiKeyForProvider({...profile, lockedProfile: true, modelApi: 'openai-chatgpt-responses'});
-  if (auth.mode !== 'oauth' || auth.profileId !== GLOBAL || !auth.apiKey) throw new Error('missing_codex_oauth_profile');
-  const {accountId} = runtime.resolveProviderAuthProfileMetadata(profile);
-  // Match the model discovery endpoint used by the supported July server series.
-  const response = await fetch('https://chatgpt.com/backend-api/codex/models?client_version=1.0.0', {
-    headers: {
-      Accept: 'application/json',
-      Authorization: `Bearer ${auth.apiKey}`,
-      ...(accountId ? {'ChatGPT-Account-ID': accountId} : {}),
-    },
-    redirect: 'error',
-    signal: AbortSignal.timeout(10000),
-  });
-  if (!response.ok || !response.body) throw new Error('codex_catalog_unavailable');
-  const chunks = [];
-  let size = 0;
-  for await (const chunk of response.body) {
-    size += chunk.length;
-    if (size > 4 * 1024 * 1024) throw new Error('codex_catalog_too_large');
-    chunks.push(chunk);
+  const failure = code => ({catalog_error: {code}});
+  let stage = 'sdk_unavailable';
+  let signal;
+  try {
+    const runtime = await import(pathToFileURL(path.join(input.package, 'dist/plugin-sdk/provider-auth-runtime.js')));
+    const cfg = JSON.parse(fs.readFileSync(process.env.OPENCLAW_CONFIG_PATH, 'utf8'));
+    stage = 'oauth_unavailable';
+    const profile = {provider: 'openai', cfg, agentDir: input.main, profileId: GLOBAL};
+    const auth = await runtime.resolveApiKeyForProvider({...profile, lockedProfile: true, modelApi: 'openai-chatgpt-responses'});
+    if (auth.mode !== 'oauth' || auth.profileId !== GLOBAL || !auth.apiKey) return failure(stage);
+    const {accountId} = runtime.resolveProviderAuthProfileMetadata(profile);
+    stage = 'network_error';
+    signal = AbortSignal.timeout(10000);
+    // Match the model discovery endpoint used by the supported July server series.
+    const response = await fetch('https://chatgpt.com/backend-api/codex/models?client_version=1.0.0', {
+      headers: {
+        Accept: 'application/json',
+        Authorization: `Bearer ${auth.apiKey}`,
+        ...(accountId ? {'ChatGPT-Account-ID': accountId} : {}),
+      },
+      redirect: 'error',
+      signal,
+    });
+    if (!response.ok) return {catalog_error: {code: 'http_error', http_status: response.status}};
+    if (!response.body) return failure('invalid_response');
+    const chunks = [];
+    let size = 0;
+    for await (const chunk of response.body) {
+      size += chunk.length;
+      if (size > 4 * 1024 * 1024) return failure('response_too_large');
+      chunks.push(chunk);
+    }
+    stage = 'invalid_response';
+    const {models} = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    if (!Array.isArray(models)) return failure(stage);
+    const visibleModels = models
+      .filter(row => row && (!row.visibility || row.visibility === 'list')
+        && (row.show_in_picker ?? row.showInPicker) !== false)
+      .map(row => ({
+        id: row.slug ?? row.id,
+        name: row.display_name ?? row.displayName,
+        input: row.input_modalities ?? row.inputModalities,
+      }));
+    return {models: visibleModels};
+  } catch {
+    return failure(signal?.aborted ? 'timeout' : stage);
   }
-  const {models} = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-  if (!Array.isArray(models)) throw new Error('invalid_codex_catalog');
-  return models
-    .filter(row => row && (!row.visibility || row.visibility === 'list')
-      && (row.show_in_picker ?? row.showInPicker) !== false)
-    .map(row => ({
-      id: row.slug ?? row.id,
-      name: row.display_name ?? row.displayName,
-      input: row.input_modalities ?? row.inputModalities,
-    }));
 }
 
 function health(c) {
@@ -139,7 +152,7 @@ try {
     emit({auth_status: health(shared), logged_in: ['valid', 'refreshable'].includes(health(shared)) && agents.every(a => a.shared_auth),
       canonical_auth_available: !!existing, account: summarize(shared), agents});
   } else if (input.action === 'list-models') {
-    emit({models: await fetchCodexModels()});
+    emit(await fetchCodexModels());
   } else if (input.action === 'apply') {
     let credential = input.credential;
     if (!credential) credential = Object.values((await local(input.main)).profiles)
