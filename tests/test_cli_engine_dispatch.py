@@ -41,6 +41,18 @@ def run_cli(argv, stdin=""):
 
 
 class CliEngineRoutingTests(unittest.TestCase):
+    def test_omitted_and_explicit_openclaw_preserve_cli_response(self):
+        from agent_manage.adapters.registry import ENGINES, EngineDriver
+        execution = RecordingExecution()
+        with patch.dict(ENGINES, openclaw=EngineDriver(lambda _: execution, None)):
+            with patch.dict(os.environ, clear=True):
+                implicit = run_cli(["current-model"])
+                os.environ["UNITAG_AGENT_MANAGER_ENGINE"] = "openclaw"
+                explicit = run_cli(["current-model"])
+        self.assertEqual(implicit, explicit)
+        self.assertEqual(implicit[0], 0)
+        self.assertEqual(execution.calls, ["get_current_model", "get_current_model"])
+
     def test_bootstrap_and_reads_use_only_selected_engine(self):
         from agent_manage.adapters.registry import ENGINES, EngineDriver
         execution = RecordingExecution()
