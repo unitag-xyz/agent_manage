@@ -91,9 +91,12 @@ class AdapterSelectionTest(unittest.IsolatedAsyncioTestCase):
                                 "executable": str(executable), "configPath": str(package / "state/openclaw.json")}
                 if identifier == "future":
                     registration["gatewayUrl"] = "ws://127.0.0.1:18789"
+                    registration["executable"] = "openclaw"
+                    registration["environment"] = {"PATH": str(package)}
                 runtimes.append(registration)
 
-            with patch("agent_manage.adapters.openclaw.v2026_7.adapter.Gateway") as gateway:
+            with (patch("agent_manage.adapters.openclaw.v2026_7.adapter.Gateway") as gateway,
+                  patch.dict(os.environ, PATH=str(root / "tested"))):
                 service = build_service({"stateDirectory": str(root / "manager"), "runtimes": runtimes})
                 gateway.assert_not_called()
             try:

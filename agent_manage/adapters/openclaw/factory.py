@@ -1,10 +1,12 @@
 """Detect the installed OpenClaw version and select its protocol implementation."""
 
+import os
 from pathlib import Path
 from urllib.parse import urlparse
 
 from ...core.runtime import RuntimeContext
 from ..base import RuntimeAdapter, UnsupportedRuntimeAdapter
+from .local import executable_search_path
 from .version import detect_version, implementation, load_implementation
 
 
@@ -54,7 +56,8 @@ def create_adapter(registration, store, workers, publish) -> RuntimeAdapter:
     # confirms the pinned version and config hash with the native server.
     version = registration.get("externalNativeVersion") if binding else None
     if not isinstance(version, str):
-        version = detect_version(context.executable)
+        path, _ = executable_search_path(context.home, environment.get("PATH", os.environ.get("PATH")))
+        version = detect_version(context.executable, path=path)
     if family := implementation(version, "runtime"):
         module = load_implementation(family, "adapter")
         return module.OpenClawAdapter(registration, store, workers, publish, context=context, version=version,

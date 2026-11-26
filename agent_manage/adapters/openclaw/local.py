@@ -14,6 +14,14 @@ from typing import List, Optional, Sequence
 from ...process_result import CommandError, CommandResult
 
 
+def executable_search_path(home, inherited):
+    npm_bin = str(Path(home) / ".npm-global" / "bin")
+    path_parts = inherited.split(os.pathsep) if inherited else []
+    required_paths = [npm_bin, "/usr/local/sbin", "/usr/sbin", "/sbin"]
+    missing = [path for path in required_paths if path not in path_parts]
+    return os.pathsep.join([*missing, *path_parts]), missing
+
+
 class LocalRunner:
     COMMAND_OUTPUT_TAIL_BYTES = 16 * 1024
     def __init__(
@@ -200,13 +208,9 @@ class LocalRunner:
         env["XDG_RUNTIME_DIR"] = runtime_dir
         env["DBUS_SESSION_BUS_ADDRESS"] = dbus_address
 
-        npm_bin = str(Path(home) / ".npm-global" / "bin")
-        path_parts = env.get("PATH", "").split(os.pathsep) if env.get("PATH") else []
-        required_paths = [npm_bin, "/usr/local/sbin", "/usr/sbin", "/sbin"]
-        missing_paths = [path for path in required_paths if path not in path_parts]
+        search_path, missing_paths = executable_search_path(home, env.get("PATH"))
         if missing_paths:
-            path_parts = [*missing_paths, *path_parts]
-            env["PATH"] = os.pathsep.join(path_parts)
+            env["PATH"] = search_path
             self._log(f"env: prepended PATH with {os.pathsep.join(missing_paths)}")
 
         self._log(

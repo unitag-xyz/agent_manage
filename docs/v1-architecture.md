@@ -28,8 +28,8 @@ flowchart TD
 
 | 模块 | 负责 | 不负责 |
 | --- | --- | --- |
-| `core/runtime.py` | 显式配置、状态目录、HOME、子进程环境 | 不切换进程全局环境变量 |
-| `core/transactions.py` / `recovery.py` | 本机进程与线程间写互斥、已知刷新文件恢复 | 不回滚网络请求、npm 安装或任意脚本 |
+| `core/runtime.py` | 显式配置、状态目录、HOME/XDG | 不生成底座专属变量，不切换进程全局环境变量 |
+| `core/transactions.py` / `adapters/openclaw/recovery.py` | 公共写互斥、OpenClaw 已知刷新文件恢复 | 不回滚网络请求、npm 安装或任意脚本 |
 | `core/store.py` | 稳定 ID、幂等记录、操作状态、租约 | 不复制全文 transcript，不成为原生聊天数据库 |
 | `core/auth.py` | 执行租约中的 Runtime、Agent、action 范围 | 不维护用户、团队、订单或套餐 |
 | `core/service.py` | 调度、授权、限流、持久化操作 | 不向客户端提供任意 native RPC 或 shell 转发 |
@@ -68,7 +68,7 @@ agent_manage/
 ```
 
 1. **按底座和版本范围建目录。** 每个底座在 `adapters/<engine>/factory.py` 提供自己的工厂，并在 `registry.py` 注册。包括 DSH 在内，首个实现也放在 `adapters/<engine>/<version_family>/`。该目录内的 `adapter.py` 实现统一接口，`client.py` 或 `gateway.py` 调用原生协议，`projection.py` 转换消息和事件。
-2. **按协议兼容范围选实现。** 工厂从实际可执行文件或安装元数据探测版本，并校验该底座的注册配置。原生协议、配置和存储格式兼容的版本可共用一个子目录，已验证的具体版本单独记录。DSH 的预发行版本也要单独判断兼容性。同一个底座可在多个 Runtime 上选择不同实现，各自绑定配置、状态目录、HOME 和原生连接。
+2. **按已确认的能力兼容范围选实现。** 工厂从实际可执行文件或安装元数据探测版本，并校验该底座的注册配置。协议、存储格式和 SDK 分开判断；只有明确匹配的能力允许复用较旧的实现，版本未知时不猜测，执行失败后也不换实现重试。已验证的具体版本单独记录。同一个底座可在多个 Runtime 上选择不同实现，各自绑定配置、状态目录、HOME 和原生连接。
 3. **复用统一方法合同。** 在 `adapter.py` 实现 `base.py` 的 `RuntimeAdapter`。用 `resolve_scope` 按 Runtime 内的对象归属定位 Agent，用 `invoke` 接收统一请求和返回统一数据。媒体通过 `resource_chunk` 提供分块读取，实时事件通过传入的 `publish` 回调送到统一 WSS。关停连接由 `close` 处理。增加公开方法时，在 `core/contracts.py` 一次定义参数、读写类型和授权范围。
 4. **按实际能力声明和验证。** `capabilities.get` 分别报告支持、就绪、授权和已验证版本。已注册底座的版本匹配失败时，仍可查询 Runtime 信息和能力，底座操作返回 `UNSUPPORTED_VERSION`。未实现的方法声明为 `unsupported`，调用时返回 `UNSUPPORTED`。新增实现应验证版本路由、对象归属隔离，以及所声明能力的原生调用和统一输出。
 

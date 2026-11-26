@@ -5,6 +5,9 @@ version-dispatched service runtime factory, and optional trusted platform Host d
 Only OpenClaw is registered. CLI command names are not native method names: the
 parser admits public commands and `CLI_OPERATIONS` maps each to a fixed internal operation.
 CLI arguments, stdin redaction, output envelopes and exit codes remain transport concerns.
+The engine can normalize CLI defaults and validate native prerequisites through
+`EngineDriver.validate_cli`. For example, the existing OpenClaw provisioning commands
+still require their model credential; a different engine need not require it.
 The v1 transport still applies its own capabilities, authorization, operation receipts,
 and native ID resolution. Do not expose local commands as arbitrary RPC methods.
 
@@ -38,10 +41,47 @@ another namespace. These settings are trusted launcher inputs, never request opt
 or a substitute for Host authorization. For deployments that don't supply them
 there is no independent CLI check against a Host catalog.
 
-CLI operations do not require the service to be running. Host-bound service
-adapters still refuse local management execution. A new engine may support a
+CLI operations do not require the service to be running. OpenClaw Host-bound
+service adapters still refuse local management execution. A new engine may support a
 subset of operations; report UNSUPPORTED rather than constructing OpenClaw as a
-fallback. Use a new static runtime ID when changing its engine; static runtime IDs
-name durable objects and receipts. Dynamic Host bindings keep engine-specific
+fallback. Static registration rejects a runtime ID already recorded under a
+different engine. Use a new ID rather than reusing its durable objects and receipts.
+Dynamic Host bindings keep engine-specific
 ledger identities without renaming existing OpenClaw ledgers. No DSH
 implementation or automatic installation is included.
+
+## Adding an engine or a version family
+
+1. Add `adapters/<engine>/factory.py` and register an `EngineDriver`. Supply local
+   execution and/or a Runtime factory as needed. Keep its native filesystem,
+   environment variables and child process setup inside the engine package;
+   `RuntimeContext.environment()` provides only common HOME/XDG and trusted
+   environment overrides.
+2. Use `VersionFamily` rules to choose an implementation by **observed version
+   and capability**. Put protocol, SDK and native storage formats in their version
+   families. Use the same compatibility rules for CLI and HTTP/WSS where they
+   share a capability. Local OpenClaw probes its package metadata; the private
+   Host relay uses a trusted version pin and validates the actual native handshake.
+3. For a verified compatible release, map a specific capability to the older
+   implementation explicitly. Rules must not overlap for the same capability.
+   Unknown versions must not run version-sensitive code; version-independent
+   operations need not probe at all. A native exception, timeout or unknown
+   outcome is **not** a reason to try another implementation. Preserve the
+   original operation receipt and reconcile without resending.
+4. To support shared Host, supply a platform driver for the trusted profile,
+   readiness, grant resolution and native connection lifecycle. Expose
+   `HostIsolation` with local roots and any namespaced exclusive native
+   resources. Core still checks mount overlap and resource collisions. An
+   engine with no native Gateway token need not invent one. To support inline
+   Chat attachments, expose `InlineAttachments`; the service still enforces
+   global frame, byte and count budgets.
+5. Run the CLI, Unix HTTP/WSS and platform WSS gates. The test-only second
+   engine in `tests/test_engine_extension.py` demonstrates exact selection,
+   capability-specific reuse and an ambiguous write that is not retried.
+
+OpenClaw's `execution.py` delegates offline management to the engine's application
+modules. Its `v2026_7/` contains the native Gateway, transcript reader, Codex SDK
+bridge, and July 1 Host reload policy. July compatibility alone never opts a
+package into reload; the existing release location and source fingerprints must
+also match. The old seed, container runtime and detached worker module entry
+points remain compatibility wrappers for existing images and launchers.

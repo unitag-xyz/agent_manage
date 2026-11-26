@@ -43,9 +43,9 @@ def package_version(package: Path, *, metadata: dict | None = None) -> str:
     return version if isinstance(version, str) and version else "unknown"
 
 
-def detect_version(executable: str) -> str:
+def detect_version(executable: str, *, path: str | None = None) -> str:
     try:
-        package = package_directory(executable)
+        package = package_directory(executable, path=path)
         return package_version(package) if package else "unknown"
     except (OSError, ValueError):
         return "unknown"

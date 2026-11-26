@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Isolate OpenClaw management, container and version-specific SDK, history and Gateway code behind the engine boundary while preserving legacy CLI and image entry points.
+- Share explicit version compatibility rules without retrying native operations through a different version family.
+- Reject static runtime registrations that would reuse a different engine's durable IDs and operation receipts.
+
 ## 1.0.010 - 2026-11-26
 
 - Include optional `triggerMessageId` on OpenClaw Runs when a native user record proves which message triggered the Run. Existing Chat2 events and message history retain their shapes.
