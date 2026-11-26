@@ -12,6 +12,7 @@ import os
 import shutil
 from pathlib import Path
 
+from .adapters.openclaw.version import implementation
 
 HOST_INSTALL_ROOT = Path("/opt/unitag-agent-manager")
 RELOAD_SOURCE_HASHES = {
@@ -33,7 +34,7 @@ def standard_host_reload_available(binary: str, *, container_runtime: bool) -> b
         if executable is None:
             return False
         package = Path(executable).resolve().parent
-        if json.loads((package / "package.json").read_text())["version"] != "2026.7.1":
+        if implementation(str(json.loads((package / "package.json").read_text())["version"]), "host_reload") is None:
             return False
         return all(hashlib.sha256((package / "dist" / name).read_bytes()).hexdigest() == digest
                    for name, digest in RELOAD_SOURCE_HASHES.items())

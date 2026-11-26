@@ -13,6 +13,7 @@ import time
 import uuid
 from pathlib import Path
 
+from .adapters.openclaw.version import implementation, package_directory, package_metadata, package_version
 from .file_io import atomic_write_bytes as _atomic_bytes, write_private_json as _private_json
 
 GLOBAL_PROFILE = "openai:agent-manage-global"
@@ -45,16 +46,15 @@ class CodexAuthMixin:
         return agents
 
     def _codex_bridge_input(self, action, **extra):
-        binary = shutil.which(self.bin, path=self.runner._command_env().get("PATH"))
-        if not binary:
+        package = package_directory(self.bin, path=self.runner._command_env().get("PATH"))
+        if package is None:
             raise FileNotFoundError("OpenClaw executable was not found")
-        package = Path(binary).resolve().parent
         metadata = package / "package.json"
         if not metadata.is_file():
             raise ValueError("Cannot locate the server OpenClaw package from its executable")
-        info = json.loads(metadata.read_text())
-        version = info.get("version")
-        if info.get("name") != "openclaw" or not isinstance(version, str) or not re.fullmatch(r"2026\.7\.[1-9][0-9]*(?:-[1-9][0-9]*)?", version):
+        info = package_metadata(package)
+        version = package_version(package, metadata=info)
+        if implementation(version, "codex_auth") is None:
             raise ValueError(
                 "Codex global authentication currently supports server OpenClaw "
                 "2026.7.* stable releases only (including numeric packaging revisions); "

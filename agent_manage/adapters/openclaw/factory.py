@@ -1,32 +1,16 @@
 """Detect the installed OpenClaw version and select its protocol implementation."""
 
-import json
-import re
-import shutil
 from pathlib import Path
 from urllib.parse import urlparse
 
 from ...core.runtime import RuntimeContext
 from ..base import RuntimeAdapter, UnsupportedRuntimeAdapter
+from .version import detect_version, implementation, load_implementation
 
 
 def create_local(options):
     from .execution import open_local
     return open_local(options)
-
-
-def detect_version(executable: str) -> str:
-    binary = shutil.which(executable)
-    if binary:
-        try:
-            package = json.loads((Path(binary).resolve().parent / "package.json").read_text())
-            if isinstance(package, dict) and package.get("name") == "openclaw":
-                version = package.get("version")
-                if isinstance(version, str) and version:
-                    return version
-        except (OSError, ValueError):
-            pass
-    return "unknown"
 
 
 def create_adapter(registration, store, workers, publish) -> RuntimeAdapter:
@@ -62,9 +46,8 @@ def create_adapter(registration, store, workers, publish) -> RuntimeAdapter:
     version = registration.get("externalNativeVersion") if binding else None
     if not isinstance(version, str):
         version = detect_version(context.executable)
-    if re.fullmatch(r"2026\.7\.[1-9][0-9]*(?:-[1-9][0-9]*)?", version):
-        from .v2026_7.adapter import OpenClawAdapter
-
-        return OpenClawAdapter(registration, store, workers, publish, context=context, version=version,
-                               host_binding=binding)
+    if family := implementation(version, "runtime"):
+        module = load_implementation(family, "adapter")
+        return module.OpenClawAdapter(registration, store, workers, publish, context=context, version=version,
+                                      host_binding=binding)
     return UnsupportedRuntimeAdapter(registration, context, engine="openclaw", version=version)

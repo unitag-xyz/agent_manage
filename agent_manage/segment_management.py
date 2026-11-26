@@ -1,11 +1,9 @@
 """Read-only physical transcript segments for a logical OpenClaw thread."""
 from __future__ import annotations
 
-import json
 import re
-import shutil
-from pathlib import Path
 
+from .adapters.openclaw.version import implementation, package_directory, package_version
 from .segment_reader import MAX_REFERENCE_CHARS, read_segment
 from .segment_timing import CURRENT, measured_read
 
@@ -48,12 +46,10 @@ class SegmentManagementMixin:
                 raise ValueError(f"Invalid {key}")
         with CURRENT.get().span("environmentAndVersionMs"):
             env = self.runner._command_env()
-            binary = shutil.which(self.bin, path=env.get("PATH"))
-            if not binary:
+            package = package_directory(self.bin, path=env.get("PATH"))
+            if package is None:
                 raise FileNotFoundError("OpenClaw is required for segment history")
-            package = Path(binary).resolve().parent
-            info = json.loads((package / "package.json").read_text())
-            if info.get("name") != "openclaw" or not re.fullmatch(r"2026\.7\.[1-9][0-9]*(?:-[1-9][0-9]*)?", str(info.get("version", ""))):
+            if implementation(package_version(package), "history") is None:
                 raise ValueError("Segment history currently supports server OpenClaw 2026.7.x only")
         with CURRENT.get().span("configReadMs"):
             config = self._load_config()
