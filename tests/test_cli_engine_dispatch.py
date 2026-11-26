@@ -16,13 +16,15 @@ class RecordingExecution:
 
     def __init__(self):
         self.calls = []
+        self.arguments = []
 
     def operation(self, name):
-        if name not in {"get_current_model", "create_instance"}:
+        if name not in {"get_current_model", "create_instance", "add_agents"}:
             raise APIError("UNSUPPORTED", "Unsupported fixture operation")
 
         def run(*args):
             self.calls.append(name)
+            self.arguments.extend(args)
             return {"engine": "fixture", "operation": name}
         return run
 
@@ -76,6 +78,19 @@ class CliEngineRoutingTests(unittest.TestCase):
         commands = next(a.choices for a in build_parser()._actions if isinstance(a, argparse._SubParsersAction))
         self.assertEqual(set(commands), set(CLI_OPERATIONS))
         self.assertEqual(set(CLI_OPERATIONS.values()), OpenClawExecution.operations)
+
+    def test_native_prerequisites_and_workspace_belong_to_selected_driver(self):
+        from agent_manage.adapters.registry import ENGINES, EngineDriver
+        execution = RecordingExecution()
+        with patch.dict(ENGINES, fixture=EngineDriver(lambda _: execution, None)), patch.dict(os.environ, clear=True):
+            code, result = run_cli(["create-instance"])
+            self.assertEqual(code, 1)
+            self.assertIn("--model-key", result["message"])
+            os.environ["UNITAG_AGENT_MANAGER_ENGINE"] = "fixture"
+            self.assertEqual(run_cli(["create-instance"])[0], 0)
+            self.assertEqual(run_cli(["add-agents", "--agents", '["first"]'])[0], 0)
+        self.assertEqual(execution.arguments[0].model_key, "")
+        self.assertEqual(execution.arguments[1].workspace_root, "/fixture/workspace")
 
     def test_unknown_engine_denied_but_version_does_not_need_one(self):
         with patch.dict(os.environ, {"UNITAG_AGENT_MANAGER_ENGINE": "missing"}):

@@ -116,7 +116,7 @@ def build_parser():
 
     add_agents = subparsers.add_parser("add-agents")
     add_agents.add_argument("--agents", required=True)
-    add_agents.add_argument("--workspace-root", default="~/data")
+    add_agents.add_argument("--workspace-root")
     add_agents.add_argument("--base-url")
 
     add_skill = subparsers.add_parser("add-skill")
@@ -247,6 +247,8 @@ def _main(argv: Optional[List[str]] = None) -> int:
         driver = cli_driver(args)
         if driver.open_local is None:
             raise APIError("UNSUPPORTED", "Runtime engine does not support local execution")
+        if driver.validate_cli is not None:
+            driver.validate_cli(args, parser)
         client = driver.open_local(LocalOptions(args.command, args.openclaw_bin, args.project_dir, args.dry_run,
                                                 args.template_root, args.config_path))
         execute = client.operation(CLI_OPERATIONS[args.command])
@@ -261,12 +263,6 @@ def _main(argv: Optional[List[str]] = None) -> int:
 
         if args.command in SIMPLE_COMMAND_HANDLERS:
             result = execute()
-            if args.command == "agents-start" and not result["ok"]:
-                print_json(build_error_response(RuntimeError(json.dumps({
-                    "error": "One or more agent start.sh scripts failed",
-                    "details": {"returncode": 1, "agents": result["agents"]},
-                }))))
-                return 1
             print_json(_success_response(result, client))
             return 0
 
@@ -278,7 +274,7 @@ def _main(argv: Optional[List[str]] = None) -> int:
                     args.model_key_stdin,
                     sensitive_values,
                     client.register_secret,
-                ),
+                ) if args.model_key is not None or args.model_key_stdin else "",
                 model_env=args.model_env,
                 ai_shop=args.ai_shop,
                 model=getattr(args, "model", None),
@@ -291,7 +287,8 @@ def _main(argv: Optional[List[str]] = None) -> int:
                 local=getattr(args, "local", False),
             )
             if args.command == "activate-instance":
-                sensitive_values.append(request.model_key.strip())
+                if request.model_key:
+                    sensitive_values.append(request.model_key.strip())
                 result = execute(request)
                 activation_required = bool(result.pop("activationRequired", False))
                 response = _success_response(result, client)
@@ -547,7 +544,7 @@ def _add_instance_arguments(parser, *, activation: bool = False) -> None:
         parser.add_argument("--template-name")
         parser.add_argument("--agent-zip")
         parser.add_argument("--local", action="store_true")
-    model_key = parser.add_mutually_exclusive_group(required=True)
+    model_key = parser.add_mutually_exclusive_group()
     if not activation:
         model_key.add_argument("--model-key")
     else:

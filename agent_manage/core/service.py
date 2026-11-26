@@ -103,22 +103,21 @@ class Service:
         if adapter.runtime_id in self.adapters:
             raise ValueError("Duplicate runtime registration")
         context = adapter.context
-        binding = getattr(adapter, "host_binding", None)
+        binding = getattr(adapter, "host_isolation", None)
         if binding:
             private = self.store.path.parent
-            if any(local.is_relative_to(private) or private.is_relative_to(local) for _, local in binding.mappings):
+            if any(local.is_relative_to(private) or private.is_relative_to(local) for local in binding.local_roots):
                 raise ValueError("Manager private state must not overlap tenant mounts")
         for existing in self.adapters.values():
-            binding, other = getattr(adapter, "host_binding", None), getattr(existing, "host_binding", None)
-            local_roots = [local for _, local in binding.mappings] if binding else [context.state_dir]
-            previous_roots = [local for _, local in other.mappings] if other else [existing.context.state_dir]
+            other = getattr(existing, "host_isolation", None)
+            local_roots = binding.local_roots if binding else (context.state_dir,)
+            previous_roots = other.local_roots if other else (existing.context.state_dir,)
             if binding or other:
                 if any(left.is_relative_to(right) or right.is_relative_to(left)
                        for left in local_roots for right in previous_roots):
                     raise ValueError("Host-bound runtimes must not overlap local mounts")
-            if binding and other:
-                if binding.token_digest == other.token_digest or adapter.host_endpoint == existing.host_endpoint:
-                    raise ValueError("Host-bound runtimes require distinct Gateway tokens and endpoints")
+            if binding and other and not binding.exclusive_resources.isdisjoint(other.exclusive_resources):
+                raise ValueError("Host-bound runtimes require distinct native resource identities")
             left, right = existing.context.state_dir, context.state_dir
             if left.is_relative_to(right) or right.is_relative_to(left):
                 raise ValueError("Runtimes must not overlap state directories")
@@ -149,8 +148,7 @@ class Service:
         agent = adapter.resolve_scope(method, params) if adapter else None
         lease = self.auth.authorize(lease, method, runtime, agent, runtime_wide=spec.scope == "runtime"
                                     or method == "runs.create" and bool(params.get("attachments")))
-        binding = getattr(adapter, "host_binding", None)
-        if method == "runs.cancel" and binding and binding.instance_chat:
+        if method == "runs.cancel" and getattr(adapter, "instance_chat", False):
             run = self.store.get(params["runId"], kind="run", runtime=runtime)
             operation_id = run["data"].get("operationId")
             if not operation_id:
@@ -230,8 +228,9 @@ class Service:
                 raise APIError("INVALID_ARGUMENT", "At most five inline attachments are supported")
             total = 0
             adapter = self.adapters.get(params["runtimeId"])
-            image_limit = getattr(adapter, "inline_image_limit", None)
-            image_types = ("image/png", "image/jpeg", "image/webp", "image/gif")
+            policy = getattr(adapter, "inline_attachments", None)
+            if attachments and adapter is not None and adapter.supported and policy is None:
+                raise APIError("UNSUPPORTED", "Runtime does not support inline attachments")
             for item in attachments:
                 if not isinstance(item, dict) or item.keys() != {"type", "mimeType", "fileName", "content"}:
                     raise APIError("INVALID_ARGUMENT", "Invalid attachment fields")
@@ -239,8 +238,9 @@ class Service:
                 if (not isinstance(name, str) or not 1 <= len(name) <= 128 or name in (".", "..")
                         or any(char in name for char in "/\\:") or not name.isprintable()
                         or not isinstance(content, str) or not content
-                        or not (kind == "image" and mime in image_types
-                                or kind == "file" and mime in ("application/pdf", "text/plain"))):
+                        or not isinstance(mime, str)
+                        or not (kind == "image" and (policy is None or mime in policy.image_types)
+                                or kind == "file" and (policy is None or mime in policy.file_types))):
                     raise APIError("INVALID_ARGUMENT", "Invalid inline attachment")
                 total += len(content)
                 if total > MAX_INLINE_ATTACHMENT_BASE64:
@@ -251,8 +251,8 @@ class Service:
                         raise ValueError("empty attachment")
                 except ValueError as exc:
                     raise APIError("INVALID_ARGUMENT", "Attachment content must be base64") from exc
-                if kind == "image" and image_limit is not None and decoded_bytes > image_limit:
-                    raise APIError("REQUEST_TOO_LARGE", adapter.inline_image_limit_message)
+                if kind == "image" and policy is not None and decoded_bytes > policy.max_image_bytes:
+                    raise APIError("REQUEST_TOO_LARGE", policy.image_limit_message)
         if "omitThinking" in params and type(params["omitThinking"]) is not bool:
             raise APIError("INVALID_ARGUMENT", "omitThinking must be a boolean")
         if "options" in params and not isinstance(params["options"], dict):
@@ -373,14 +373,13 @@ class Service:
                 value["authorized"] = "*" in lease.context["actions"] or action in lease.context["actions"]
                 if action in METHODS and METHODS[action].scope == "runtime" and "*" not in lease.context["agentIds"]:
                     value["authorized"] = False
-            binding = getattr(adapter, "host_binding", None)
-            image_limit = getattr(adapter, "inline_image_limit", None)
-            if (image_limit is not None and binding and binding.instance_chat and "*" in lease.context["agentIds"]
+            policy = getattr(adapter, "inline_attachments", None)
+            if (policy is not None and getattr(adapter, "instance_chat", False) and "*" in lease.context["agentIds"]
                     and result["methods"]["runs.create"]["authorized"]):
                 result["attachments"] = {"mode": "inline", "maxCount": MAX_INLINE_ATTACHMENT_COUNT,
-                    "maxBase64Bytes": MAX_INLINE_ATTACHMENT_BASE64, "maxImageBytes": image_limit,
+                    "maxBase64Bytes": MAX_INLINE_ATTACHMENT_BASE64, "maxImageBytes": policy.max_image_bytes,
                     "maxRequestBytes": MAX_ATTACHMENT_REQUEST,
-                    "mimeTypes": ["image/png", "image/jpeg", "image/webp", "image/gif", "application/pdf", "text/plain"]}
+                    "mimeTypes": [*policy.image_types, *policy.file_types]}
             return result
         if method == "runtimes.get":
             return self.runtime_info(adapter)

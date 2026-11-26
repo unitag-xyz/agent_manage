@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 from .execution import LocalExecution, LocalOptions
-from .openclaw.factory import create_adapter as create_openclaw_adapter, create_local as open_local
+from .openclaw.factory import create_adapter as create_openclaw_adapter, create_local as open_local, validate_cli
 from .openclaw.platform_host import OpenClawPlatformHost
 
 
@@ -13,10 +13,11 @@ class EngineDriver:
     open_local: Callable[[LocalOptions], LocalExecution] | None
     create_runtime: Callable | None
     platform_host: type | None = None
+    validate_cli: Callable | None = None
 
 
 DEFAULT_ENGINE = "openclaw"
-ENGINES = {DEFAULT_ENGINE: EngineDriver(open_local, create_openclaw_adapter, OpenClawPlatformHost)}
+ENGINES = {DEFAULT_ENGINE: EngineDriver(open_local, create_openclaw_adapter, OpenClawPlatformHost, validate_cli)}
 
 
 def resolve_engine(engine):

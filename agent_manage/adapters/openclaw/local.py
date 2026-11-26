@@ -191,6 +191,7 @@ class LocalRunner:
             for key in ("OPENCLAW_PROFILE", "OPENCLAW_CONFIG_PATH", "OPENCLAW_STATE_DIR"):
                 env.pop(key, None)
             env.update(context.environment())
+            env.update(OPENCLAW_CONFIG_PATH=str(context.config_path), OPENCLAW_STATE_DIR=str(context.state_dir))
         home = env.get("HOME") or str(Path.home())
         runtime_dir = env.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
         dbus_address = env.get("DBUS_SESSION_BUS_ADDRESS") or f"unix:path={runtime_dir}/bus"

@@ -18,7 +18,7 @@ from ..execution import open_registered
 from ....path_io import read_without_links
 from .segment_reader import SegmentReader, read_segment, safe_file
 from ....segment_timing import measured_read
-from ...base import RuntimeAdapter
+from ...base import HostIsolation, InlineAttachments, RuntimeAdapter
 from .gateway import Gateway
 from .input_triggers import InputTriggers, event_evidence, evidence
 from .projection import message_dto
@@ -171,12 +171,24 @@ class OpenClawAdapter(RuntimeAdapter):
             self.store.put_objects(self.runtime_id, mappings)
         return result
 
-    inline_image_limit = 6 * 1024 * 1024
-    inline_image_limit_message = "An image exceeds OpenClaw's 6 MiB limit"
+    inline_attachments = InlineAttachments(
+        ("image/png", "image/jpeg", "image/webp", "image/gif"),
+        ("application/pdf", "text/plain"), 6 * 1024 * 1024, "An image exceeds OpenClaw's 6 MiB limit",
+    )
 
     @property
-    def host_endpoint(self):
-        return self.gateway.url
+    def host_isolation(self):
+        binding = self.host_binding
+        if binding is None:
+            return None
+        resources = {("openclaw.gateway.token", binding.token_digest)}
+        if self.gateway is not None:
+            resources.add(("openclaw.gateway.url", self.gateway.url))
+        return HostIsolation(binding.binding_id, tuple(local for _, local in binding.mappings), frozenset(resources))
+
+    @property
+    def instance_chat(self):
+        return bool(self.host_binding and self.host_binding.instance_chat)
 
     def resolve_installed_agents(self, targets):
         return {agent["agentId"]: targets.get(agent["extensions"]["openclaw"]["agentId"])

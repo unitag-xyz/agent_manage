@@ -23,8 +23,7 @@ class RuntimeContext:
     extra_env: tuple = ()
 
     def environment(self):
-        result = {**dict(self.extra_env), "OPENCLAW_CONFIG_PATH": str(self.config_path),
-                  "OPENCLAW_STATE_DIR": str(self.state_dir)}
+        result = dict(self.extra_env)
         if self.home:
             result.update(HOME=str(self.home), XDG_CONFIG_HOME=str(self.home / ".config"),
                           XDG_DATA_HOME=str(self.home / ".local/share"), XDG_CACHE_HOME=str(self.home / ".cache"))

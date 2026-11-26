@@ -1,5 +1,6 @@
 """Offline OpenClaw operations shared by the CLI and the versioned runtime adapter."""
 
+import json
 import os
 
 from ...core.errors import APIError
@@ -21,14 +22,26 @@ class OpenClawExecution:
         "segment_media_get",
     })
 
-    def __init__(self, manager, *, container):
+    def __init__(self, manager, *, container, cli_command=None):
         self._manager = manager
         self.container = container
+        self.cli_command = cli_command
 
     def operation(self, name):
         if name not in self.operations:
             raise APIError("UNSUPPORTED", "Operation is not supported by the OpenClaw adapter")
+        if self.cli_command == "agents-start" and name == "start_agent_services":
+            return self._start_from_cli
         return getattr(self._manager, name)
+
+    def _start_from_cli(self):
+        result = self._manager.start_agent_services()
+        if not result["ok"]:
+            raise RuntimeError(json.dumps({
+                "error": "One or more agent start.sh scripts failed",
+                "details": {"returncode": 1, "agents": result["agents"]},
+            }))
+        return result
 
     @property
     def restart_required(self):
@@ -49,7 +62,8 @@ def open_local(options: LocalOptions):
     executable = "openclaw" if options.executable is None else options.executable
     manager = InstanceManagerV2(LocalRunner(executable, options.project_dir, options.dry_run),
                                 template_root=options.template_root, config_path=options.config_path)
-    return OpenClawExecution(manager, container=os.environ.get("UNITAG_AGENT_MANAGER_RUNTIME") == "container")
+    return OpenClawExecution(manager, container=os.environ.get("UNITAG_AGENT_MANAGER_RUNTIME") == "container",
+                             cli_command=options.command)
 
 
 def open_registered(context, template_root, registration):

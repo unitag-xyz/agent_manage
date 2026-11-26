@@ -10,6 +10,13 @@ from agent_manage.platform_runtime import PlatformRuntimePool
 
 
 class PlatformEngineBoundaryTests(unittest.TestCase):
+    def test_generic_context_does_not_add_openclaw_routing_variables(self):
+        from agent_manage.core.runtime import RuntimeContext
+        root = Path("/fixture")
+        context = RuntimeContext("test", "test", root / "config", root, executable="fixture", home=root)
+        self.assertEqual(context.environment()["HOME"], str(root))
+        self.assertFalse(any(key.startswith("OPENCLAW_") for key in context.environment()))
+
     def test_legacy_profile_and_explicit_openclaw_register_identically(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
@@ -35,7 +42,7 @@ class NativeRunOwnershipTests(unittest.IsolatedAsyncioTestCase):
             service = Service(Path(directory).resolve() / "manager")
             try:
                 service.adapters["one"] = SimpleNamespace(
-                    host_binding=SimpleNamespace(instance_chat=True),
+                    instance_chat=True,
                     resolve_scope=lambda method, params: "agent-one", close=AsyncMock())
                 lease = service.auth.redeem(service.auth.issue_ticket(
                     issuer="test", subject="owner", runtime_ids=["one"], agent_ids=["agent-one"],

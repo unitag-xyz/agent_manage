@@ -91,13 +91,14 @@ def create_app(service, platform_pool=None, platform_release=None):
                 raise APIError("INVALID_ARGUMENT", "runtimeId and agentIdentify are required")
             adapter = service.adapter(body["runtimeId"])
             resolver = getattr(adapter, "resolve_agent", None)
-            if resolver is None:
+            isolation = getattr(adapter, "host_isolation", None)
+            if resolver is None or isolation is None:
                 raise APIError("UNSUPPORTED", "Runtime does not expose trusted Agent bindings")
             identifier = await service.read_workers(resolver, body["agentIdentify"])
             row = service.store.get(identifier, kind="agent", runtime=adapter.runtime_id)
             return web.json_response({"ok": True, "result": {"runtimeId": adapter.runtime_id,
                 "agentIdentify": body["agentIdentify"], "agentId": identifier,
-                "bindingId": adapter.host_binding.binding_id,
+                "bindingId": isolation.binding_id,
                 "installationId": row["data"]["installationId"]}})
 
     async def redeem(request):

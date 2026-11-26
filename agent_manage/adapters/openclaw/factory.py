@@ -13,6 +13,15 @@ def create_local(options):
     return open_local(options)
 
 
+def validate_cli(args, parser):
+    if args.command == "add-agents" and args.workspace_root is None:
+        args.workspace_root = "~/data"
+    if args.command in {"create-instance", "configure-instance", "activate-instance"}:
+        if args.model_key is None and not args.model_key_stdin:
+            required = "--model-key-stdin" if args.command == "activate-instance" else "--model-key --model-key-stdin"
+            parser.error(f"one of the arguments {required} is required")
+
+
 def create_adapter(registration, store, workers, publish) -> RuntimeAdapter:
     lifecycle = registration.get("lifecycle", "external")
     if lifecycle not in ("external", "openclaw"):

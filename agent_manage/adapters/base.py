@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from ..core.contracts import FUTURE_METHODS, METHODS
@@ -17,6 +19,35 @@ class ObservedNativeRuns(Protocol):
     """Optional: recognize stored Runs discovered without a Manager operation."""
 
     def is_observed_native_run(self, data: dict) -> bool: ...
+
+
+@dataclass(frozen=True)
+class HostIsolation:
+    binding_id: str
+    local_roots: tuple[Path, ...]
+    # Namespaced opaque identities for native resources that tenants may not share.
+    exclusive_resources: frozenset[tuple[str, str]] = frozenset()
+
+
+@dataclass(frozen=True)
+class InlineAttachments:
+    image_types: tuple[str, ...]
+    file_types: tuple[str, ...]
+    max_image_bytes: int
+    image_limit_message: str
+
+
+class HostBoundRuntime(Protocol):
+    @property
+    def host_isolation(self) -> HostIsolation | None: ...
+    @property
+    def instance_chat(self) -> bool: ...
+    def resolve_agent(self, identify: str) -> str: ...
+    def resolve_installed_agents(self, targets: dict[str, str]) -> dict[str, str]: ...
+
+
+class InlineAttachmentRuntime(Protocol):
+    inline_attachments: InlineAttachments
 
 
 class RuntimeAdapter(Protocol):
