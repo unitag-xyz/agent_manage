@@ -97,6 +97,17 @@ class Store:
     def object(self, kind, runtime, native, data=None):
         return self.put_objects(runtime, [(kind, native, data or {})])[0]
 
+    def remember_runtime(self, runtime, *, engine, environment_id, config_path):
+        identifier = self.object_id("runtime", runtime, runtime)
+        data = canonical({"engine": engine, "environmentId": environment_id, "configPath": str(config_path)})
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT data FROM objects WHERE id=?", (identifier,)).fetchone()
+            if row is not None and json.loads(row["data"]).get("engine") != engine:
+                raise ValueError(f"Runtime {runtime!r} already belongs to another engine; use a new runtime ID")
+            db.execute("INSERT INTO objects VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data "
+                       "WHERE objects.data <> excluded.data", (identifier, "runtime", runtime, runtime, data))
+
     def thread_runs(self, runtime, thread, *, request_key=None):
         query = "SELECT native,data FROM objects WHERE kind='run' AND runtime=? AND json_extract(data,'$.threadId')=?"
         args = [runtime, thread]

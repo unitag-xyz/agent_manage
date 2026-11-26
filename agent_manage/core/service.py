@@ -123,12 +123,12 @@ class Service:
                 raise ValueError("Runtimes must not overlap state directories")
             if existing.context.environment_id != context.environment_id and existing.context.home == context.home:
                 raise ValueError("Different environments need explicit distinct home directories")
+        if persist_registration:
+            self.store.remember_runtime(adapter.runtime_id, engine=adapter.engine,
+                environment_id=context.environment_id, config_path=context.config_path)
         self.adapters[adapter.runtime_id] = adapter
         adapter.control_workers = self.write_workers
         adapter.media_workers = self.media_workers
-        if persist_registration:
-            self.store.object("runtime", adapter.runtime_id, adapter.runtime_id,
-                {"engine": adapter.engine, "environmentId": context.environment_id, "configPath": str(context.config_path)})
 
     def adapter(self, runtime) -> RuntimeAdapter:
         if runtime not in self.adapters:

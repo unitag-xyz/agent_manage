@@ -37,6 +37,38 @@ class PlatformEngineBoundaryTests(unittest.TestCase):
 
 
 class NativeRunOwnershipTests(unittest.IsolatedAsyncioTestCase):
+    async def test_static_runtime_cannot_adopt_another_engines_ledger_after_restart(self):
+        from agent_manage.core.runtime import RuntimeContext
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            state = root / "manager"
+            principal = {"issuer": "test", "subject": "owner"}
+
+            def adapter(engine, version):
+                path = root / engine / "config"
+                return SimpleNamespace(runtime_id="one", engine=engine, version=version,
+                    context=RuntimeContext("one", "env", path, path.parent), close=AsyncMock())
+
+            service = Service(state)
+            try:
+                service.register(adapter("openclaw", "1"))
+                thread = service.store.object("thread", "one", "native-thread", {"label": "original"})
+                receipt, _ = service.store.claim(principal, "one", "threads.update", "request", {})
+            finally:
+                await service.close()
+
+            service = Service(state)
+            try:
+                with self.assertRaisesRegex(ValueError, "use a new runtime ID"):
+                    service.register(adapter("fixture", "1"))
+                self.assertEqual(service.adapters, {})
+                self.assertEqual(service.store.lookup("runtime", "one", "one")["data"]["engine"], "openclaw")
+                service.register(adapter("openclaw", "2"))
+                self.assertEqual(service.store.get(thread, kind="thread", runtime="one")["data"], {"label": "original"})
+                self.assertEqual(service.store.operation(receipt["operationId"], principal, "one"), receipt)
+            finally:
+                await service.close()
+
     async def test_another_adapter_cannot_skip_ownership_via_openclaw_source(self):
         with tempfile.TemporaryDirectory() as directory:
             service = Service(Path(directory).resolve() / "manager")
