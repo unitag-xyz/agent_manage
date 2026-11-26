@@ -94,7 +94,8 @@ class HostBindingTest(unittest.IsolatedAsyncioTestCase):
                   patch("agent_manage.adapters.openclaw.v2026_7.gateway.Gateway.call", new_callable=AsyncMock) as native_call):
                 def scoped_titles(method, params):
                     self.assertIn(method, ("sessions.list", "sessions.describe"))
-                    self.assertTrue(params["includeDerivedTitles"] and params["includeLastMessage"])
+                    self.assertTrue(params["includeDerivedTitles"])
+                    self.assertNotIn("includeLastMessage", params)
                     row = {"key": "agent:attached:session", "sessionId": "11111111-2222-4333-8444-555555555555",
                            "displayName": "Attached", "label": "Attached", "derivedTitle": "Attached"}
                     if method == "sessions.describe":

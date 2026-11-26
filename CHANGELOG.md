@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 1.0.007 - 2026-11-26
+
+- Return an empty Chat2 title when OpenClaw only has a session-ID fallback; preserve named sessions and do not use the last message as the title.
+
 ## 1.0.006 - 2026-11-26
 
 - Return OpenClaw's native session titles in the Chat2 sidebar, expanded lists and thread details without requiring the client to open each conversation.

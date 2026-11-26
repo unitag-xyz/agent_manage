@@ -1,7 +1,10 @@
 """Project OpenClaw's session titles; only the Gateway derives them from transcripts."""
 import asyncio
+import re
 
 from ....core.errors import APIError
+
+_SESSION_DATE_SUFFIX = re.compile(r" \([0-9]{4}-[0-9]{2}-[0-9]{2}\)")
 
 
 def project_titles(entry):
@@ -9,16 +12,27 @@ def project_titles(entry):
         value = entry.get(field)
         return value.strip()[:256] if isinstance(value, str) and value.strip() else None
 
-    derived = text("derivedTitle")
-    # Native session rows already prefer a label when building displayName.
-    return {"title": text("label") or text("displayName") or derived or text("lastMessagePreview"),
+    session_id = entry.get("sessionId")
+
+    def automatic(field):
+        value = text(field)
+        if value and isinstance(session_id, str) and session_id:
+            prefix = session_id[:8]
+            if value in (session_id, prefix) or (
+                value.startswith(prefix) and _SESSION_DATE_SUFFIX.fullmatch(value[len(prefix):])
+            ):
+                return None
+        return value
+
+    derived = automatic("derivedTitle")
+    return {"title": text("label") or automatic("displayName") or derived,
             **({"derivedTitle": derived} if derived else {})}
 
 
 async def enrich_titles(gateway, targets, *, detail=False):
     if not gateway or not targets:
         return
-    flags = {"includeDerivedTitles": True, "includeLastMessage": True}
+    flags = {"includeDerivedTitles": True}
 
     def apply(native, allowed):
         if not isinstance(native, dict) or not isinstance(native.get("key"), str):

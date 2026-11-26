@@ -6,6 +6,33 @@ from agent_manage.core.errors import APIError
 
 
 class ThreadTitleTest(unittest.IsolatedAsyncioTestCase):
+    def test_title_fallback_is_scoped_to_the_native_session(self):
+        entry = {"sessionId": "adfea059-1234-4234-8234-0123456789ab",
+                 "lastMessagePreview": "Not a title"}
+        for fallback in (entry["sessionId"], "adfea059", "adfea059 (2026-11-15)"):
+            with self.subTest(fallback=fallback):
+                row = dict(entry, displayName=fallback, derivedTitle=fallback)
+                self.assertEqual({"title": None}, project_titles(row))
+                self.assertEqual({"title": fallback}, project_titles(dict(row, label=fallback)))
+        self.assertEqual({"title": None}, project_titles(entry))
+        for title in ("hihi", "different-id", "deadbeef (2026-11-15)", "adfea059 notes"):
+            self.assertEqual({"title": title, "derivedTitle": title},
+                             project_titles(dict(entry, derivedTitle=title)))
+
+    async def test_native_list_and_detail_do_not_fill_title_with_id_or_preview(self):
+        key = "agent:main:old"
+        session_id = "adfea059-1234-4234-8234-0123456789ab"
+        native = {"key": key, "sessionId": session_id, "derivedTitle": "adfea059 (2026-11-15)",
+                  "lastMessagePreview": "A recent reply"}
+        gateway = AsyncMock()
+        for detail in (False, True):
+            with self.subTest(detail=detail):
+                gateway.call.return_value = {"session": native} if detail else {"sessions": [native]}
+                for indexed in ({"title": None}, {"title": "Indexed", "derivedTitle": "Indexed"}):
+                    row = indexed.copy()
+                    await enrich_titles(gateway, {key: (session_id, row, False)}, detail=detail)
+                    self.assertEqual(indexed, row)
+
     async def test_native_pages_enrich_existing_rows_only(self):
         targets = {f"agent:main:{i}": (f"session-{i}", {"title": None}, False) for i in range(101)}
         gateway = AsyncMock()
@@ -13,7 +40,8 @@ class ThreadTitleTest(unittest.IsolatedAsyncioTestCase):
         def page(method, params):
             self.assertEqual("sessions.list", method)
             self.assertEqual("main", params["agentId"])
-            self.assertTrue(params["includeDerivedTitles"] and params["includeLastMessage"])
+            self.assertTrue(params["includeDerivedTitles"])
+            self.assertNotIn("includeLastMessage", params)
             start = params.get("offset", 0)
             self.assertEqual(1 if start else 100, params["limit"])
             rows = [{"key": f"agent:main:{i}", "sessionId": f"session-{i}", "derivedTitle": f"native {i}"}
@@ -38,7 +66,7 @@ class ThreadTitleTest(unittest.IsolatedAsyncioTestCase):
         await enrich_titles(gateway, {"agent:a:one": ("s", row, True), "agent:b:key": (None, {}, False)})
         self.assertEqual({"title": "renamed", "derivedTitle": "renamed"}, row)
         gateway.call.assert_awaited_once_with("sessions.list", {"agentId": "a", "limit": 1, "archived": True,
-            "includeDerivedTitles": True, "includeLastMessage": True})
+            "includeDerivedTitles": True})
 
     async def test_gateway_unavailable_preserves_index_title(self):
         gateway = AsyncMock()
