@@ -511,6 +511,7 @@ class SegmentReader:
         if self.manager_read and self.input["action"] in ("history", "message"):
             messages = [payload["message"]] if "message" in payload else payload.get("messages", ())
             payload["revisions"] = {msg["id"]: self.by_id[msg["id"]]["revision"] for msg in messages}
+            payload["_inputKeys"] = {msg["id"]: key for msg in messages if (key := self.by_id[msg["id"]].get("inputKey"))}
         return payload
 
     def ref_token(self, kind, **values):
@@ -708,6 +709,9 @@ class SegmentReader:
         if with_statistics:
             message["statistics"] = statistics
         if pending is not None:
+            key = message.get("idempotencyKey")
+            if raw.get("id") == message["id"] and message.get("role") == "user" and isinstance(key, str) and len(key) <= 261:
+                row["inputKey"] = key
             row["revision"] = digest(json.dumps(message, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode())
             for params, claims in pending:
                 params["ref"] = self.ref_token("media", **claims)

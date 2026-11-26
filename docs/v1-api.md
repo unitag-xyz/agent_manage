@@ -135,6 +135,14 @@ send is accepted or a native OpenClaw start is verified. The event carries the e
 opaque `threadId`, `run.runId` and `run.status`; it may arrive before the receiving
 client has a local turn. Native session keys and raw start payloads are not forwarded.
 
+A Run may include `triggerMessageId`: the `id` of its triggering user message within that
+Run's thread and segment. On OpenClaw July, the adapter matches the explicit native send key
+on a user event or a transcript row, not text, timestamps, or the latest active Run.
+The association can arrive after acceptance or completion. Read the latest Run via
+`runs.get` or thread activity; reading a history page can also reconcile its user records.
+An absent or null field means unknown (including conflicting evidence). Older Managers
+need not return it. This does not emit an additional message snapshot or terminal event.
+
 `options` 使用 camelCase，映射到保留的请求模型。例如：
 
 ```json

@@ -252,6 +252,32 @@ class APITest(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(.005)
         self.fail("operation did not finish")
 
+    async def test_history_reconciles_explicit_user_record_ids_on_compact_and_full_reads(self):
+        native = "history-input"
+        rid = self.service.store.object_id("run", "one", native)
+        self.service.store.object("run", "one", native, {"runId": rid, "threadId": self.thread,
+            "segmentId": self.current_segment, "status": "completed"})
+        path = self.sessions / (self.physical_ids[1] + ".jsonl")
+        big = self.record("stable-user", "user", "x" * 700000, "a1")
+        big["message"]["idempotencyKey"] = native + ":user"
+        with path.open("a") as fp:
+            fp.write(json.dumps(big) + "\n")
+        params = {"threadId": self.thread, "segmentId": self.current_segment}
+        response = await self.rpc("messages.list", {**params, "limit": 1})
+        self.assertTrue(response["ok"], response)
+        msg, = response["result"]["items"]
+        self.assertEqual(("stable-user", "reference"), (msg["id"], msg["completeness"]))
+        self.assertNotIn("idempotencyKey", msg)
+        self.assertEqual("stable-user", self.service.store.get(rid)["data"].get("triggerMessageId"))
+        # Even an otherwise matching record with no native entry ID must not bind an entry-offset fallback.
+        other = self.record("missing", "user", "x", "stable-user")
+        del other["id"]
+        other["message"]["idempotencyKey"] = native + ":user"
+        with path.open("a") as fp:
+            fp.write(json.dumps(other) + "\n")
+        await self.rpc("messages.list", {**params, "limit": 1, "view": "full"})
+        self.assertEqual("stable-user", self.service.store.get(rid)["data"].get("triggerMessageId"))
+
     async def test_history_projection_resources_and_byte_range(self):
         before = self.index_path.read_bytes(), self.index_path.stat().st_mtime_ns
         page = await self.rpc("messages.list", {"threadId": self.thread, "segmentId": self.segment, "omitThinking": True, "limit": 30})

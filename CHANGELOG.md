@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Include optional `triggerMessageId` on OpenClaw Runs when a native user record proves which message triggered the Run. Existing Chat2 events and message history retain their shapes.
+
 ## 1.0.009 - 2026-11-26
 
 - Notify subscribed Host Chat2 windows when a Run is accepted or observed. Preserve early tool events during discovery, recheck overlapping notifications, and finish native observer registration when a tab leaves.

@@ -105,6 +105,77 @@ class HostBindingTest(unittest.IsolatedAsyncioTestCase):
         self.services.append(service)
         return service
 
+    def trigger_fixture(self):
+        reg = self.registration()
+        reg["hostBinding"].update(instanceChat=True, agentBindings=[])
+        adapter = self.service(reg).adapter("one")
+        agent_id = adapter.agents()[0]["agentId"]
+        key, physical = "agent:main:probe", "physical-one"
+        thread = adapter.register_thread(agent_id, key)
+        segment = adapter.segment_id(thread, physical)
+        adapter.watch_thread(thread)
+        adapter.publish = AsyncMock()
+        return adapter, key, physical, thread, segment
+
+    async def test_trigger_uses_exact_send_key_in_either_order_without_extra_chat_events(self):
+        a, key, physical, thread, segment = self.trigger_fixture()
+        def frame(native, message_id, **extra):
+            return {"event": "session.message", "payload": {"sessionKey": key, "sessionId": physical,
+                "messageId": message_id, "message": {"role": "user", "content": "continue",
+                "idempotencyKey": native + ":user"}, **extra}}
+        def read(native):
+            return a.store.lookup("run", "one", native)["data"]
+        local, external = "manager-send", "chat1-send"
+        a.store.object("run", "one", local, {"runId": a.store.object_id("run", "one", local),
+            "threadId": thread, "segmentId": segment, "status": "running", "nativeRunId": "different-ack"})
+        await a.native_event(frame("different-ack", "wrong"))
+        await a.native_event(frame(local, "wrong", sessionId="other-segment"))
+        await a.native_event(frame(local, "wrong", sessionKey="agent:main:another"))
+        self.assertNotIn("triggerMessageId", read(local))
+        damaged = frame(local, "wrong")
+        damaged["payload"]["message"]["__openclaw"] = {"id": "different"}
+        await a.native_event(damaged)
+        self.assertNotIn("triggerMessageId", read(local))
+        await a.native_event(frame(local, "first"))
+        await a.native_event(frame(local, "first"))
+        await a.native_event(frame(external, "second"))
+        self.assertEqual("first", read(local).get("triggerMessageId"))
+        self.assertIsNone(a.store.lookup("run", "one", external))
+        a.publish.assert_not_awaited()
+        with (patch.object(a.gateway, "call", AsyncMock(return_value={"sessionKey": key, "sessionId": physical,
+                "sessionInfo": {"activeRunIds": [external]}})),
+              patch.object(a, "restore_run_observers", AsyncMock())):
+            await a.discover_external_runs(a.store.get(thread), {"sessionId": physical})
+        self.assertEqual("second", read(external).get("triggerMessageId"))
+        self.assertEqual("second", a.publish.await_args.args[2]["run"].get("triggerMessageId"))
+        summary = a.store.thread_run_activity("one", [thread])[thread]
+        self.assertEqual({"first", "second"}, {r.get("triggerMessageId") for r in summary["activeRuns"]})
+
+    async def test_history_can_repair_terminal_trigger_without_changing_message_shape_or_run_state(self):
+        a, key, physical, thread, segment = self.trigger_fixture()
+        native = "local-send"
+        original = {"runId": a.store.object_id("run", "one", native), "threadId": thread, "segmentId": segment,
+                    "status": "completed", "resultSync": "unknown"}
+        a.store.object("run", "one", native, original)
+        def history(message_id, send_key, role="user"):
+            message = {"id": message_id, "role": role, "content": "continue", "idempotencyKey": send_key}
+            with patch.object(a, "history", return_value={"message": message, "revisions": {message_id: "rev"},
+                              "_inputKeys": {message_id: send_key} if role == "user" else {},
+                              "view": "full", "omitThinking": False}):
+                return a.project_history({"threadId": thread, "segmentId": segment}, "message")["message"]
+        history("not-user", native + ":user", "assistant")
+        history("no-key", "other:user")
+        history("wrong-suffix", native + ":assistant")
+        self.assertEqual(original, a.store.lookup("run", "one", native)["data"])
+        msg = history("first", native + ":user")
+        self.assertNotIn("idempotencyKey", msg)
+        self.assertNotIn("runId", msg)
+        self.assertEqual({**original, "triggerMessageId": "first"}, a.store.lookup("run", "one", native)["data"])
+        history("conflicting", native + ":user")
+        history("first", native + ":user")
+        self.assertIsNone(a.store.lookup("run", "one", native)["data"].get("triggerMessageId"))
+        a.publish.assert_not_awaited()
+
     async def test_owner_sidebar_and_agent_switch_share_a_single_platform_socket(self):
         from agent_manage.platform_runtime import PlatformRuntimePool
 

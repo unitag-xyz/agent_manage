@@ -20,6 +20,7 @@ from ....segment_reader import SegmentReader, read_segment, safe_file
 from ....segment_timing import measured_read
 from ...base import RuntimeAdapter
 from .gateway import Gateway
+from .input_triggers import InputTriggers, event_evidence, evidence
 from .projection import message_dto
 from .thread_titles import enrich_titles, project_titles
 
@@ -60,6 +61,7 @@ class OpenClawAdapter(RuntimeAdapter):
         self.native_writes = asyncio.Lock()
         self.run_observers = {}
         self.thread_watches = {}
+        self.input_triggers = InputTriggers(store, self.runtime_id)
         self.start_probes = {}
         self.start_dirty = set()
         self.pending_tools = {}
@@ -469,6 +471,8 @@ class OpenClawAdapter(RuntimeAdapter):
         items = [self.project(msg, params, projection, result["revisions"][msg["id"]], mappings) for msg in messages]
         if mappings:
             self.store.put_objects(self.runtime_id, mappings)
+        pairs = [pair for mid, key in result.get("_inputKeys", {}).items() if (pair := evidence(mid, key))]
+        self.input_triggers.remember(params["threadId"], params["segmentId"], pairs)
         if action == "message":
             return {"message": items[0]}
         return {"threadId": params["threadId"], "segmentId": params["segmentId"], "items": items,
@@ -1171,7 +1175,7 @@ class OpenClawAdapter(RuntimeAdapter):
                     "usageStatus": "unknown"}
             if type(started_at) is int and 0 < started_at <= (1 << 53) - 1:
                 data["createdAt"] = data["startedAt"] = started_at
-            self.store.object("run", self.runtime_id, native, data)
+            self.input_triggers.register_observed(native, data)
             observed = external = True
             if key in self.thread_watches:
                 await self.publish(self.runtime_id, thread["id"], {"type": "run.updated", "run": data})
@@ -1293,6 +1297,11 @@ class OpenClawAdapter(RuntimeAdapter):
             await self.publish(self.runtime_id, None, {"type": "resync_required", "reason": "native_disconnected"})
             return
         if event in ("sessions.changed", "session.message"):
+            if event == "session.message" and isinstance(payload.get("sessionKey"), str):
+                pair = event_evidence(payload)
+                if pair:
+                    watch = self.thread_watches.get(payload["sessionKey"])
+                    await asyncio.to_thread(self.input_triggers.live, payload, pair, watch[0] if watch else None)
             self.observe_native_start(payload)
             if event == "sessions.changed":
                 await self.publish(self.runtime_id, None, {"type": "sessions.changed"})
