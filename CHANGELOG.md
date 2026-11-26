@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 1.0.006 - 2026-11-26
+
+- Return OpenClaw's native session titles in the Chat2 sidebar, expanded lists and thread details without requiring the client to open each conversation.
+
 ## 1.0.005 - 2026-11-26
 
 - Accept up to one hour for verified Chat2 instance grants at connect and renewal; one-use platform tickets and ordinary private leases retain their existing limits.

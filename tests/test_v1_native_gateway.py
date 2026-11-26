@@ -62,6 +62,15 @@ class NativeGatewayTest(unittest.IsolatedAsyncioTestCase):
                 listener.bind(("127.0.0.1", 0))
                 port = listener.getsockname()[1]
             config_path = root / "openclaw.json"
+            old_key = "agent:main:old-title-fixture"
+            session_id = "4d38639c-3ccf-443c-8431-dd7e91ffd295"
+            sessions_dir = root / "agents/main/sessions"
+            sessions_dir.mkdir(parents=True)
+            old_log = sessions_dir / f"{session_id}.jsonl"
+            (sessions_dir / "sessions.json").write_text(json.dumps({old_key: {
+                "sessionId": session_id, "sessionFile": str(old_log), "updatedAt": 10}}))
+            old_log.write_text(json.dumps({"type": "message", "id": "fixture-message", "message": {
+                "role": "user", "content": [{"type": "text", "text": "hihi"}]}}) + "\n")
             workspace = root / "workspace"
             workspace.mkdir()
             (workspace / "AGENTS.md").write_text("Reply briefly. Do not invoke tools for this fixture.\n")
@@ -101,6 +110,18 @@ class NativeGatewayTest(unittest.IsolatedAsyncioTestCase):
                 except Exception as error:
                     self.fail(f"Native handshake failed: {getattr(error, 'details', None)}\n" + (root / "gateway.log").read_text()[-6000:])
                 self.assertIsNotNone(gateway.hello)
+                from agent_manage.adapters.openclaw.v2026_7.thread_titles import enrich_titles
+                row = {"title": None}
+                targets = {old_key: (session_id, row, False)}
+                for expected in ("hihi", "Renamed fixture"):
+                    if expected != "hihi":
+                        await gateway.call("sessions.patch", {"key": old_key, "label": expected})
+                    native = await gateway.call("sessions.describe", {"key": old_key, "includeDerivedTitles": True})
+                    self.assertEqual(expected, native["session"]["derivedTitle"])
+                    for detail in (False, True):
+                        row.clear()
+                        await enrich_titles(gateway, targets, detail=detail)
+                        self.assertEqual({"title": expected, "derivedTitle": expected}, row)
                 created = await gateway.call("sessions.create", {"agentId": "main"})
                 key = created["key"]
                 other_key = (await gateway.call("sessions.create", {"agentId": "main"}))["key"]
@@ -167,6 +188,14 @@ class NativeGatewayTest(unittest.IsolatedAsyncioTestCase):
                 matching = [message for message in history["messages"] if message["role"] == "user"
                             and "Continue without the WebSocket" in json.dumps(message["content"])]
                 self.assertEqual(len(matching), 1, "Reconnect must not create a second user turn")
+
+                flags = {"includeDerivedTitles": True, "includeLastMessage": True}
+                session = (await gateway.call("sessions.describe", {"key": other_key, **flags}))["session"]
+                self.assertTrue(session["derivedTitle"])
+                row = {"title": None}
+                targets = {other_key: (session["sessionId"], row, False)}
+                await enrich_titles(gateway, targets, detail=True)
+                self.assertEqual(session["derivedTitle"], row["derivedTitle"])
 
                 # Reconnect before completion too: history alone cannot prove
                 # that the replacement socket receives live native events.

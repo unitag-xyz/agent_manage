@@ -21,6 +21,7 @@ from ....segment_timing import measured_read
 from ...base import RuntimeAdapter
 from .gateway import Gateway
 from .projection import message_dto
+from .thread_titles import enrich_titles, project_titles
 
 NATIVE = {"threads.create": "sessions.create", "threads.reset": "sessions.reset",
           "threads.update": "sessions.patch", "threads.models.update": "sessions.patch", "threads.delete": "sessions.delete",
@@ -278,13 +279,15 @@ class OpenClawAdapter(RuntimeAdapter):
         parts = key.split(":", 2)
         return len(parts) == 3 and parts[0] == "agent" and parts[2] in ("main", main_key)
 
-    def thread_summary(self, config, key, entry):
+    def thread_summary(self, config, key, entry, targets=None, **fields):
         is_main = self.is_main_thread(config, key)
-        title = next((value.strip()[:256] for field in ("displayName", "label", "derivedTitle", "lastMessagePreview")
-                      if isinstance(value := entry.get(field), str) and value.strip()), None)
         updated = entry.get("updatedAt")
-        return {"title": title, "updatedAt": updated if type(updated) is int and 0 <= updated <= 253402300799999 else None,
-                "isMain": is_main, "canDelete": not is_main}
+        row = {**fields, **project_titles(entry),
+               "updatedAt": updated if type(updated) is int and 0 <= updated <= 253402300799999 else None,
+               "isMain": is_main, "canDelete": not is_main}
+        if targets is not None:
+            targets[key] = (entry.get("sessionId"), row, entry.get("archivedAt") is not None)
+        return row
 
     def include_run_activity(self, rows):
         activity = self.store.thread_run_activity(self.runtime_id, (row["threadId"] for row in rows))
@@ -294,7 +297,7 @@ class OpenClawAdapter(RuntimeAdapter):
             row["runActivity"] = {"source": "manager", **observed,
                                   "activeRunId": active[0]["runId"] if len(active) == 1 else None}
 
-    def chat_sidebar(self, limit):
+    def chat_sidebar(self, limit, targets=None):
         config = self.config()
         groups = []
         mappings = []
@@ -344,13 +347,13 @@ class OpenClawAdapter(RuntimeAdapter):
             for key, entry in rows[:limit]:
                 native = self.thread_identity(agent_id, key)
                 mappings.append(("thread", native, {"agentId": agent_id, "nativeSessionKey": key}))
-                group["items"].append({"threadId": self.store.object_id("thread", self.runtime_id, native),
-                    **self.thread_summary(config, key, entry)})
+                group["items"].append(self.thread_summary(config, key, entry, targets,
+                    threadId=self.store.object_id("thread", self.runtime_id, native)))
         self.store.put_objects(self.runtime_id, mappings)
         self.include_run_activity([row for group in groups for row in group["items"]])
         return {"items": groups}
 
-    def threads(self, agent_id):
+    def threads(self, agent_id, targets=None):
         config = self.config()
         agent, index = self.index(agent_id, config)
         result = []
@@ -366,8 +369,8 @@ class OpenClawAdapter(RuntimeAdapter):
                 identity = canonical([identifier, session])
                 mappings.append(("segment", identity, {"threadId": identifier, "sessionId": session}))
                 segment = self.store.object_id("segment", self.runtime_id, identity)
-            result.append({"threadId": identifier, "agentId": agent_id, **self.thread_summary(config, key, entry),
-                           "currentSegmentId": segment})
+            result.append(self.thread_summary(config, key, entry, targets, threadId=identifier, agentId=agent_id,
+                                              currentSegmentId=segment))
         self.store.put_objects(self.runtime_id, mappings)
         self.include_run_activity(result)
         return result
@@ -627,17 +630,25 @@ class OpenClawAdapter(RuntimeAdapter):
             limit = params.get("limit", 5)
             if not 1 <= limit <= 20:
                 raise APIError("INVALID_ARGUMENT", "Sidebar limit must be between 1 and 20")
-            return await self.workers(self.chat_sidebar, limit)
+            targets = {}
+            result = await self.workers(self.chat_sidebar, limit, targets)
+            await enrich_titles(self.gateway, targets)
+            return result
         if method == "threads.list":
-            return {"items": await self.workers(self.threads, params["agentId"])}
+            targets = {}
+            rows = await self.workers(self.threads, params["agentId"], targets)
+            await enrich_titles(self.gateway, targets)
+            return {"items": rows}
         if method in ("threads.get", "segments.list"):
             thread, entry = await self.workers(self.thread, params["threadId"])
             if method == "threads.get":
+                targets = {}
                 def summarize():
-                    row = {"threadId": thread["id"], **self.thread_summary(self.config(), self.native_key(thread), entry)}
+                    row = self.thread_summary(self.config(), self.native_key(thread), entry, targets, threadId=thread["id"])
                     self.include_run_activity([row])
                     return row
                 summary = await self.workers(summarize)
+                await enrich_titles(self.gateway, targets, detail=True)
                 return {"threadId": thread["id"], "agentId": thread["data"]["agentId"], **summary,
                         **{key: entry[key] for key in ("totalTokens", "contextTokens")
                            if type(entry.get(key)) is int and 0 <= entry[key] <= (1 << 53) - 1},

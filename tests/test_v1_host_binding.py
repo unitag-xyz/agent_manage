@@ -90,7 +90,17 @@ class HostBindingTest(unittest.IsolatedAsyncioTestCase):
         await web.UnixSite(runner, socket_path).start()
         try:
             with (patch("agent_manage.adapters.openclaw.factory.detect_version", return_value="2026.7.1-2"),
-                  patch("agent_manage.adapters.openclaw.v2026_7.gateway.Gateway.connect", new_callable=AsyncMock)):
+                  patch("agent_manage.adapters.openclaw.v2026_7.gateway.Gateway.connect", new_callable=AsyncMock),
+                  patch("agent_manage.adapters.openclaw.v2026_7.gateway.Gateway.call", new_callable=AsyncMock) as native_call):
+                def scoped_titles(method, params):
+                    self.assertIn(method, ("sessions.list", "sessions.describe"))
+                    self.assertTrue(params["includeDerivedTitles"] and params["includeLastMessage"])
+                    row = {"key": "agent:attached:session", "sessionId": "11111111-2222-4333-8444-555555555555",
+                           "displayName": "Attached", "label": "Attached", "derivedTitle": "Attached"}
+                    if method == "sessions.describe":
+                        return {"session": row if params["key"] == row["key"] else None}
+                    return {"sessions": [row] if params["agentId"] == "attached" else []}
+                native_call.side_effect = scoped_titles
                 async with ClientSession(connector=UnixConnector(path=socket_path)) as client:
                     async def open_chat(native, marker="chat.instance", template_identify=None, subject="owner"):
                         ws = await client.ws_connect("http://manager/v1/platform/ws")
@@ -185,6 +195,8 @@ class HostBindingTest(unittest.IsolatedAsyncioTestCase):
                         thread_id = attached_rows[0]["threadId"]
                         detail = await rpc(first, "threads.get", threadId=thread_id)
                         self.assertEqual("Attached", detail["result"]["title"])
+                        self.assertEqual("Attached", detail["result"]["derivedTitle"])
+                        self.assertEqual("Attached", next(row["derivedTitle"] for row in attached_rows if row["threadId"] == thread_id))
                         self.assertTrue(detail["result"]["canDelete"])
                         self.assertEqual((42, 100, False), tuple(detail["result"][k]
                             for k in ("totalTokens", "contextTokens", "totalTokensFresh")))
@@ -192,6 +204,7 @@ class HostBindingTest(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual("Primary", protected["title"])
                         self.assertFalse(protected["canDelete"])
                         sidebar_attached = (await rpc(first, "chat.sidebar"))["result"]["items"][1]
+                        self.assertEqual("Attached", next(row["derivedTitle"] for row in sidebar_attached["items"] if row["threadId"] == thread_id))
                         self.assertEqual(2, sidebar_attached["totalCount"])
                         self.assertIn(protected["threadId"], [item["threadId"] for item in sidebar_attached["items"]
                                                                if item["isMain"] and not item["canDelete"]])
