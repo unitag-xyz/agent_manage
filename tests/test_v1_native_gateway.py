@@ -151,6 +151,9 @@ class NativeGatewayTest(unittest.IsolatedAsyncioTestCase):
                 await asyncio.wait_for(model_started.wait(), 10)
                 listed = await gateway.call("sessions.list", {"agentId": "main", "search": key, "limit": 16})
                 self.assertIs(next(item for item in listed["sessions"] if item["key"] == key)["hasActiveRun"], True)
+                active = await gateway.call("chat.history", {"sessionKey": key, "limit": 1, "maxChars": 1000})
+                self.assertEqual(key, active["sessionKey"])
+                self.assertIn(sent["runId"], active["sessionInfo"]["activeRunIds"])
                 release_model.set()
                 for _ in range(300):
                     if any(frame.get("event") == "chat" and frame.get("payload", {}).get("state") in ("final", "error") for frame in events):

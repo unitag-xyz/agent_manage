@@ -3,8 +3,11 @@
 ## Unreleased
 
 - Route offline CLI operations and service runtimes through one trusted engine registry without changing legacy OpenClaw command lines; optional container binding pins the CLI to an assigned engine and generation.
-
 - Separate shared Host Chat runtime setup by engine, retaining OpenClaw as the only registered engine and the default for existing profiles. Existing CLI and API calls are unchanged.
+
+## 1.0.008 - 2026-11-26
+
+- Observe active OpenClaw Runs started outside AgentManager in Host Chat2 thread detail and correlate their live events without resending the request. An authorized instance Chat2 connection can cancel the exact observed Run in the current session segment.
 
 ## 1.0.007 - 2026-11-26
 

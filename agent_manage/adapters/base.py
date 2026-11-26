@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from ..core.contracts import FUTURE_METHODS, METHODS
 from ..core.errors import APIError
@@ -10,6 +10,13 @@ from ..core.runtime import RuntimeContext
 
 if TYPE_CHECKING:
     from ..core.service import Workers
+
+
+@runtime_checkable
+class ObservedNativeRuns(Protocol):
+    """Optional: recognize stored Runs discovered without a Manager operation."""
+
+    def is_observed_native_run(self, data: dict) -> bool: ...
 
 
 class RuntimeAdapter(Protocol):

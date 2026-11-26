@@ -8,7 +8,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
-from ..adapters.base import RuntimeAdapter
+from ..adapters.base import ObservedNativeRuns, RuntimeAdapter
 from .auth import LeaseAuthority
 from .contracts import METHODS, schema
 from .errors import APIError
@@ -154,6 +154,8 @@ class Service:
             run = self.store.get(params["runId"], kind="run", runtime=runtime)
             operation_id = run["data"].get("operationId")
             if not operation_id:
+                if isinstance(adapter, ObservedNativeRuns) and adapter.is_observed_native_run(run["data"]) is True:
+                    return lease
                 raise APIError("FORBIDDEN", "The Run has no verifiable Chat operation owner")
             try:
                 operation = self.store.operation(operation_id, lease.context, runtime)

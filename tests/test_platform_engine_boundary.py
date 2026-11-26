@@ -1,7 +1,11 @@
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
+from agent_manage.core.errors import APIError
+from agent_manage.core.service import Service
 from agent_manage.platform_runtime import PlatformRuntimePool
 
 
@@ -23,3 +27,22 @@ class PlatformEngineBoundaryTests(unittest.TestCase):
             for unsupported in ("dsh", "", None, []):
                 with self.subTest(engine=unsupported), self.assertRaises(ValueError):
                     PlatformRuntimePool(root, "test", {**profile, "engine": unsupported})
+
+
+class NativeRunOwnershipTests(unittest.IsolatedAsyncioTestCase):
+    async def test_another_adapter_cannot_skip_ownership_via_openclaw_source(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service = Service(Path(directory).resolve() / "manager")
+            try:
+                service.adapters["one"] = SimpleNamespace(
+                    host_binding=SimpleNamespace(instance_chat=True),
+                    resolve_scope=lambda method, params: "agent-one", close=AsyncMock())
+                lease = service.auth.redeem(service.auth.issue_ticket(
+                    issuer="test", subject="owner", runtime_ids=["one"], agent_ids=["agent-one"],
+                    actions=["runs.cancel"]))
+                run_id = service.store.object("run", "one", "observed", {"source": "openclaw", "threadId": "thread"})
+                with self.assertRaises(APIError) as denied:
+                    service.authorize(lease, "runs.cancel", {"runtimeId": "one", "runId": run_id})
+                self.assertEqual(denied.exception.code, "FORBIDDEN")
+            finally:
+                await service.close()
