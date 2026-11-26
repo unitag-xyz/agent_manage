@@ -14,7 +14,7 @@ from ....core.contracts import METHODS, FUTURE_METHODS
 from ....core.errors import APIError
 from ....core.store import canonical, now_ms
 from ....local import LocalRunner
-from ....orchestrator import InstanceManagerV2
+from ..execution import open_registered
 from ....path_io import read_without_links
 from ....segment_reader import SegmentReader, read_segment, safe_file
 from ....segment_timing import measured_read
@@ -73,11 +73,7 @@ class OpenClawAdapter(RuntimeAdapter):
     def manager(self):
         if self.host_binding:
             raise APIError("UNSUPPORTED", "Host-bound Chat does not execute local management commands")
-        manager = InstanceManagerV2(LocalRunner(self.context.executable), template_root=self.template_root,
-                                    config_path=str(self.context.config_path))
-        manager.runtime_context = self.context
-        if "environmentKind" in self.registration:
-            manager.container_runtime = self.registration["environmentKind"] == "container"
+        manager = open_registered(self.context, self.template_root, self.registration)
         self.redact(manager, self.config())
         return manager
 
@@ -86,7 +82,7 @@ class OpenClawAdapter(RuntimeAdapter):
         if isinstance(value, dict):
             for key, child in value.items():
                 if re.search(r"key|token|secret|password", key, re.I) and isinstance(child, str):
-                    manager.runner.add_redaction_value(child)
+                    manager.register_secret(child)
                 else:
                     OpenClawAdapter.redact(manager, child)
         elif isinstance(value, list):
@@ -167,6 +163,17 @@ class OpenClawAdapter(RuntimeAdapter):
         if mappings:
             self.store.put_objects(self.runtime_id, mappings)
         return result
+
+    inline_image_limit = 6 * 1024 * 1024
+    inline_image_limit_message = "An image exceeds OpenClaw's 6 MiB limit"
+
+    @property
+    def host_endpoint(self):
+        return self.gateway.url
+
+    def resolve_installed_agents(self, targets):
+        return {agent["agentId"]: targets.get(agent["extensions"]["openclaw"]["agentId"])
+                for agent in self.agents()}
 
     def resolve_native_agent(self, native_id):
         for agent in self.agents():
@@ -721,36 +728,38 @@ class OpenClawAdapter(RuntimeAdapter):
         self.redact(manager, options)
         if method == "agents.create":
             options.setdefault("workspace_root", str(self.context.state_dir / "data"))
-            return manager.add_agent(**options)
+            return manager.operation("add_agent")(**options)
         if method == "dola.runtime.configure":
-            return manager.configure_instance(models.CreateInstanceRequest(**options))
+            return manager.operation("configure_instance")(models.CreateInstanceRequest(**options))
         if method in ("agents.refresh", "dola.agents.refresh", "agents.install"):
             name = self.store.get(params["agentId"], kind="agent", runtime=self.runtime_id)["native"]
             if method == "agents.refresh":
                 if options.get("models_only") or options.get("template_only") is False:
                     raise APIError("INVALID_ARGUMENT", "Model catalog refresh belongs to dola.agents.refresh")
                 options["template_only"] = True
-            return manager.refresh_agent(models.RefreshAgentRequest(agent_name=name, **options)) if method.endswith("refresh") else manager.install_agent_service(name)
+            if method == "agents.install":
+                return manager.operation("install_agent_service")(name)
+            return manager.operation("refresh_agent")(models.RefreshAgentRequest(agent_name=name, **options))
         if method == "skills.install":
-            return manager.add_skill(models.AddSkillRequest(**options))
+            return manager.operation("add_skill")(models.AddSkillRequest(**options))
         simple = {"models.list": "get_supported_models", "models.get": "get_current_model", "dola.models.refresh": "update_model_catalog",
                   "connections.get": "codex_status", "connections.login": "codex_login", "connections.logout": "codex_logout",
                   "services.start": "start_agent_services"}
         if method in simple:
-            return getattr(manager, simple[method])()
+            return manager.operation(simple[method])()
         if method == "models.select":
-            return manager.set_model(models.SetModelRequest(params["modelId"]))
+            return manager.operation("set_model")(models.SetModelRequest(params["modelId"]))
         channels = {"telegram": ("tg", models.AddTelegramBotRequest, models.DeleteTelegramBotRequest),
                     "feishu": ("feishu", models.AddFeishuBotRequest, models.DeleteFeishuBotRequest),
                     "weixin": ("weixin", models.AddWeixinBotRequest, models.DeleteWeixinBotRequest)}
         if method == "channels.list":
-            return {"items": [{"channel": name, "status": getattr(manager, f"get_{entry[0]}_bot_status")()}
+            return {"items": [{"channel": name, "status": manager.operation(f"get_{entry[0]}_bot_status")()}
                                for name, entry in channels.items() if not params.get("channel") or name == params["channel"]]}
         if method in ("channels.configure", "channels.remove"):
             if params["channel"] not in channels:
                 raise APIError("INVALID_ARGUMENT", "Unknown channel")
             name, add, remove = channels[params["channel"]]
-            return getattr(manager, f"add_{name}_bot" if method.endswith("configure") else f"delete_{name}_bot")(
+            return manager.operation(f"add_{name}_bot" if method.endswith("configure") else f"delete_{name}_bot")(
                 (add if method.endswith("configure") else remove)(**options))
         raise APIError("UNSUPPORTED", "Method is not implemented by this adapter")
 

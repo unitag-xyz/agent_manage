@@ -13,11 +13,14 @@ flowchart TD
     HTTP --> Auth
     Auth --> Core[统一调度 / 能力 / 幂等 / 操作状态]
     Core --> Store[SQLite 注册映射与操作记录]
-    Core --> Adapter[OpenClaw July Adapter]
+    Core --> Registry[按可信注册的 engine 选工厂]
+    Registry --> Adapter[版本匹配的 RuntimeAdapter]
     Adapter --> Gateway[原生 Gateway 协议 4]
     Adapter --> History[原生索引 / transcript 只读解析]
-    Adapter --> Legacy[保留的管理与安装应用服务]
-    CLI[原 CLI] --> Legacy
+    Adapter --> Local[底座本机执行接口]
+    CLI[原 CLI] --> Select[按工作负载绑定或启动配置选 engine]
+    Select --> Local
+    Local --> Legacy[保留的 OpenClaw 管理与安装应用服务]
     Legacy --> Boundary[运行环境 / 公共写锁 / 写前日志]
     Controller[外部 DockerManager / 服务控制器] --> Runtime[OpenClaw 运行实例]
     Gateway --> Runtime
@@ -39,6 +42,8 @@ flowchart TD
 保留旧应用服务并由 adapter 调用，使现有测试继续约束业务语义；没有复制一套创建、刷新和登录实现。
 当前控制命令的详细 `result` 仍是脱敏后的旧业务结果，外层 Operation、鉴权、标识与 Chat DTO 已统一。
 后续可逐域替换内部实现，不要求前端重新实现原生协议。
+
+CLI 与统一服务的底座选择、原有操作对应关系及容器绑定规则见 [Engine execution](v1-engine-execution.md)。
 
 ## 新底座与版本适配
 
@@ -66,6 +71,11 @@ agent_manage/
 2. **按协议兼容范围选实现。** 工厂从实际可执行文件或安装元数据探测版本，并校验该底座的注册配置。原生协议、配置和存储格式兼容的版本可共用一个子目录，已验证的具体版本单独记录。DSH 的预发行版本也要单独判断兼容性。同一个底座可在多个 Runtime 上选择不同实现，各自绑定配置、状态目录、HOME 和原生连接。
 3. **复用统一方法合同。** 在 `adapter.py` 实现 `base.py` 的 `RuntimeAdapter`。用 `resolve_scope` 按 Runtime 内的对象归属定位 Agent，用 `invoke` 接收统一请求和返回统一数据。媒体通过 `resource_chunk` 提供分块读取，实时事件通过传入的 `publish` 回调送到统一 WSS。关停连接由 `close` 处理。增加公开方法时，在 `core/contracts.py` 一次定义参数、读写类型和授权范围。
 4. **按实际能力声明和验证。** `capabilities.get` 分别报告支持、就绪、授权和已验证版本。已注册底座的版本匹配失败时，仍可查询 Runtime 信息和能力，底座操作返回 `UNSUPPORTED_VERSION`。未实现的方法声明为 `unsupported`，调用时返回 `UNSUPPORTED`。新增实现应验证版本路由、对象归属隔离，以及所声明能力的原生调用和统一输出。
+
+共享 Host 在可信绑定中读取 `engine`；旧绑定省略该字段时仍使用 OpenClaw。平台接入工厂
+负责校验底座配置和组装原生连接，再由运行时工厂选择版本实现。实例和代际校验、挂载隔离、
+租约及操作回执仍由公共层负责。当前仅注册 OpenClaw；已有 CLI 安装入口不改名、不新增参数，
+也不要求通过统一服务安装。后续接入其他底座时再按其真实安装与生命周期定义合同。
 
 ## 对象与数据流
 

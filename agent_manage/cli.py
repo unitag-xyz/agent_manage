@@ -10,7 +10,8 @@ import sys
 from typing import List, Optional
 
 from . import __version__
-from .local import LocalRunner
+from .adapters.cli_binding import cli_driver
+from .adapters.execution import LocalExecution, LocalOptions
 from .segment_timing import CURRENT, ReadTiming
 from .models import (
     AddAgentRequest,
@@ -26,7 +27,8 @@ from .models import (
     SetModelRequest,
     RefreshAgentRequest,
 )
-from .orchestrator import InstanceManagerV2
+from .settings import DEFAULT_AI_SHOP, DEFAULT_IMAGE_QUALITY, DEFAULT_MODEL_ENV, IMAGE_QUALITY_CHOICES, MODEL_GATEWAYS
+from .core.errors import APIError
 from .response import (
     CliArgumentError,
     JsonArgumentParser,
@@ -37,11 +39,7 @@ from .response import (
     redact_sensitive_values,
 )
 
-MODEL_ENV_CHOICES = sorted(InstanceManagerV2.MODEL_GATEWAYS.keys())
-DEFAULT_MODEL_ENV = InstanceManagerV2.DEFAULT_MODEL_ENV
-DEFAULT_AI_SHOP = InstanceManagerV2.DEFAULT_AI_SHOP
-DEFAULT_IMAGE_QUALITY = InstanceManagerV2.DEFAULT_IMAGE_QUALITY
-IMAGE_QUALITY_CHOICES = InstanceManagerV2.IMAGE_QUALITY_CHOICES
+MODEL_ENV_CHOICES = sorted(MODEL_GATEWAYS)
 SIMPLE_COMMAND_HANDLERS = {
     "check-server-status": "check_server_status",
     "tg-bot-status": "get_tg_bot_status",
@@ -53,6 +51,20 @@ SIMPLE_COMMAND_HANDLERS = {
     "models": "get_supported_models",
     "update-model": "update_model_catalog",
     "current-gateway-token": "get_current_gateway_token",
+}
+
+CLI_OPERATIONS = {
+    **SIMPLE_COMMAND_HANDLERS,
+    "create-instance": "create_instance", "configure-instance": "configure_instance",
+    "activate-instance": "activate_instance", "agent-install": "install_agent_service",
+    "add-agent": "add_agent", "add-agents": "add_agents", "refresh-agent": "refresh_agent",
+    "add-skill": "add_skill", "set-model": "set_model", "codex-login": "codex_login",
+    "codex-status": "codex_status", "codex-logout": "codex_logout",
+    "sessions-segments-history": "segment_history", "sessions-segments-message-get": "segment_message_get",
+    "sessions-segments-media-get": "segment_media_get",
+    "add-tg-bot": "add_tg_bot", "delete-tg-bot": "delete_tg_bot",
+    "add-feishu-bot": "add_feishu_bot", "delete-feishu-bot": "delete_feishu_bot",
+    "add-weixin-bot": "add_weixin_bot", "delete-weixin-bot": "delete_weixin_bot",
 }
 
 
@@ -70,10 +82,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         CURRENT.reset(token)
 
 
-def _main(argv: Optional[List[str]] = None) -> int:
-    raw_argv = list(sys.argv[1:] if argv is None else argv)
+def build_parser():
     parser = JsonArgumentParser(prog="agent-manage")
-    parser.add_argument("--openclaw-bin", default="openclaw")
+    parser.add_argument("--openclaw-bin")
     parser.add_argument("--project-dir")
     parser.add_argument("--template-root")
     parser.add_argument("--config-path")
@@ -223,35 +234,33 @@ def _main(argv: Optional[List[str]] = None) -> int:
 
     subparsers.add_parser("current-gateway-token")
 
+    return parser
+
+
+def _main(argv: Optional[List[str]] = None) -> int:
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    parser = build_parser()
     sensitive_values: List[str] = []
     try:
         args = parser.parse_args(argv)
-        if args.command == "activate-instance":
-            InstanceManagerV2.require_fly_activation()
         _reject_container_path_overrides(raw_argv)
-        container_runtime = os.environ.get("UNITAG_AGENT_MANAGER_RUNTIME") == "container"
-        client = InstanceManagerV2(
-            LocalRunner(
-                openclaw_bin=args.openclaw_bin,
-                project_dir=args.project_dir,
-                dry_run=args.dry_run,
-            ),
-            template_root=args.template_root,
-            config_path=args.config_path,
-        )
+        driver = cli_driver(args)
+        if driver.open_local is None:
+            raise APIError("UNSUPPORTED", "Runtime engine does not support local execution")
+        client = driver.open_local(LocalOptions(args.command, args.openclaw_bin, args.project_dir, args.dry_run,
+                                                args.template_root, args.config_path))
+        execute = client.operation(CLI_OPERATIONS[args.command])
         timing = CURRENT.get()
         if timing is not None:
             timing.phases["cliSetupMs"] = (time.perf_counter() - timing.started) * 1000
             timing.calls["cliSetupMs"] = 1
 
-
         if args.command == "agent-install":
-            print_json(_success_response(client.install_agent_service(args.agent), client))
+            print_json(_success_response(execute(args.agent), client))
             return 0
 
-        handler = SIMPLE_COMMAND_HANDLERS.get(args.command)
-        if handler is not None:
-            result = getattr(client, handler)()
+        if args.command in SIMPLE_COMMAND_HANDLERS:
+            result = execute()
             if args.command == "agents-start" and not result["ok"]:
                 print_json(build_error_response(RuntimeError(json.dumps({
                     "error": "One or more agent start.sh scripts failed",
@@ -268,7 +277,7 @@ def _main(argv: Optional[List[str]] = None) -> int:
                     args.model_key,
                     args.model_key_stdin,
                     sensitive_values,
-                    client.runner.add_redaction_value,
+                    client.register_secret,
                 ),
                 model_env=args.model_env,
                 ai_shop=args.ai_shop,
@@ -276,40 +285,28 @@ def _main(argv: Optional[List[str]] = None) -> int:
                 image_quality=args.image_quality,
                 base_url=args.base_url,
                 workspace_root=getattr(args, "workspace_root", None)
-                or (
-                    InstanceManagerV2.CONTAINER_WORKSPACE_ROOT
-                    if container_runtime
-                    else ("~/.openclaw/data" if getattr(args, "local", False) else "~/data")
-                ),
+                or client.default_workspace(local=getattr(args, "local", False)),
                 rollback_on_fail=not getattr(args, "no_rollback", False),
                 agent_zip=getattr(args, "agent_zip", None),
                 local=getattr(args, "local", False),
             )
             if args.command == "activate-instance":
                 sensitive_values.append(request.model_key.strip())
-                result = client.activate_instance(request)
+                result = execute(request)
                 activation_required = bool(result.pop("activationRequired", False))
                 response = _success_response(result, client)
                 response["activationRequired"] = activation_required
                 print_json(response)
                 return 0
-            result = (
-                client.create_instance(request)
-                if args.command == "create-instance"
-                else client.configure_instance(request)
-            )
+            result = execute(request)
             print_json(_success_response(result, client))
             return 0
         if args.command == "add-agent":
-            result = client.add_agent(
+            result = execute(
                 template_name=args.template_name,
                 agent_name=args.agent_name,
                 workspace_root=args.workspace_root
-                or (
-                    InstanceManagerV2.CONTAINER_WORKSPACE_ROOT
-                    if container_runtime
-                    else "~/data"
-                ),
+                or client.default_workspace(),
                 model=args.model,
                 base_url=args.base_url,
                 template_zip_url=args.template_zip_url,
@@ -318,47 +315,43 @@ def _main(argv: Optional[List[str]] = None) -> int:
             print_json(_success_response(result, client))
             return 0
         if args.command == "add-agents":
-            result = client.add_agents(
+            result = execute(
                 AddAgentsRequest(
                     agents=_parse_add_agents(args.agents),
                     workspace_root=args.workspace_root
-                    or (
-                        InstanceManagerV2.CONTAINER_WORKSPACE_ROOT
-                        if container_runtime
-                        else "~/data"
-                    ),
+                    or client.default_workspace(),
                     base_url=args.base_url,
                 )
             )
             print_json(_success_response(result, client))
             return 0
         if args.command == "codex-login":
-            result = client.codex_login()
+            result = execute()
             print_json(build_success_response(result, type_code=TYPE_CODE_ACCEPTED if result.get("status") in ("starting", "pending") else 1))
             return 0
         if args.command == "codex-logout":
-            print_json(build_success_response(client.codex_logout()))
+            print_json(build_success_response(execute()))
             return 0
         if args.command == "codex-status":
-            print_json(build_success_response(client.codex_status()))
+            print_json(build_success_response(execute()))
             return 0
         if args.command == "sessions-segments-history":
-            result = client.segment_history(args.session_key, args.session_id, edge=args.edge,
+            result = execute(args.session_key, args.session_id, edge=args.edge,
                                             limit=args.limit, cursor=args.cursor, view=args.view,
                                             **({"omit_thinking": args.omit_thinking == "true"} if args.omit_thinking is not None else {}))
             print_json(build_success_response(result))
             return 0
         if args.command == "sessions-segments-message-get":
-            result = client.segment_message_get(args.session_key, args.session_id, args.message_id,
+            result = execute(args.session_key, args.session_id, args.message_id,
                                                 ref=args.ref, cursor=args.cursor)
             print_json(build_success_response(result))
             return 0
         if args.command == "sessions-segments-media-get":
-            result = client.segment_media_get(args.session_key, args.session_id, args.ref, cursor=args.cursor)
+            result = execute(args.session_key, args.session_id, args.ref, cursor=args.cursor)
             print_json(build_success_response(result))
             return 0
         if args.command == "refresh-agent":
-            result = client.refresh_agent(RefreshAgentRequest(
+            result = execute(RefreshAgentRequest(
                 agent_name=args.agent,
                 template_dir=args.template_dir,
                 agent_zip=args.agent_zip,
@@ -374,7 +367,7 @@ def _main(argv: Optional[List[str]] = None) -> int:
             print_json(build_success_response(result))
             return 0
         if args.command == "add-skill":
-            result = client.add_skill(
+            result = execute(
                 AddSkillRequest(
                     agent_name=args.agent,
                     common=args.common,
@@ -387,14 +380,14 @@ def _main(argv: Optional[List[str]] = None) -> int:
             print_json(build_success_response(result))
             return 0
         if args.command == "add-tg-bot":
-            result = client.add_tg_bot(
+            result = execute(
                 AddTelegramBotRequest(
                     agent_name=args.agent,
                     bot_token=_secret_argument(
                         args.tg_token,
                         args.tg_token_stdin,
                         sensitive_values,
-                        client.runner.add_redaction_value,
+                        client.register_secret,
                     ),
                     bot_name=args.bot_name,
                 )
@@ -402,7 +395,7 @@ def _main(argv: Optional[List[str]] = None) -> int:
             print_json(_success_response(result, client))
             return 0
         if args.command == "add-feishu-bot":
-            result = client.add_feishu_bot(
+            result = execute(
                 AddFeishuBotRequest(
                     agent_name=args.agent,
                     domain=args.domain,
@@ -412,7 +405,7 @@ def _main(argv: Optional[List[str]] = None) -> int:
                         args.app_secret,
                         args.app_secret_stdin,
                         sensitive_values,
-                        client.runner.add_redaction_value,
+                        client.register_secret,
                     ),
                     bot_name=args.bot_name,
                     dm_policy=args.dm_policy,
@@ -424,7 +417,7 @@ def _main(argv: Optional[List[str]] = None) -> int:
             print_json(_success_response(result, client))
             return 0
         if args.command == "add-weixin-bot":
-            result = client.add_weixin_bot(
+            result = execute(
                 AddWeixinBotRequest(
                     agent_name=args.agent,
                     ilink_bot_id=args.ilink_bot_id,
@@ -432,7 +425,7 @@ def _main(argv: Optional[List[str]] = None) -> int:
                         args.bot_token,
                         args.bot_token_stdin,
                         sensitive_values,
-                        client.runner.add_redaction_value,
+                        client.register_secret,
                     ),
                     baseurl=args.baseurl,
                     ilink_user_id=args.ilink_user_id,
@@ -444,7 +437,7 @@ def _main(argv: Optional[List[str]] = None) -> int:
             print_json(_success_response(result, client))
             return 0
         if args.command == "delete-tg-bot":
-            result = client.delete_tg_bot(
+            result = execute(
                 DeleteTelegramBotRequest(
                     bot_name=args.bot_name,
                 )
@@ -452,7 +445,7 @@ def _main(argv: Optional[List[str]] = None) -> int:
             print_json(_success_response(result, client))
             return 0
         if args.command == "delete-feishu-bot":
-            result = client.delete_feishu_bot(
+            result = execute(
                 DeleteFeishuBotRequest(
                     account_id=args.account_id,
                 )
@@ -460,7 +453,7 @@ def _main(argv: Optional[List[str]] = None) -> int:
             print_json(_success_response(result, client))
             return 0
         if args.command == "delete-weixin-bot":
-            result = client.delete_weixin_bot(
+            result = execute(
                 DeleteWeixinBotRequest(
                     ilink_bot_id=args.ilink_bot_id,
                 )
@@ -468,7 +461,7 @@ def _main(argv: Optional[List[str]] = None) -> int:
             print_json(_success_response(result, client))
             return 0
         if args.command == "set-model":
-            result = client.set_model(
+            result = execute(
                 SetModelRequest(
                     model_ref=args.model,
                 )
@@ -606,7 +599,7 @@ def _secret_argument(
     raise ValueError("Secret value must not be empty")
 
 
-def _success_response(result: object, client: InstanceManagerV2) -> dict:
+def _success_response(result: object, client: LocalExecution) -> dict:
     result_restart_required = (
         isinstance(result, dict) and bool(result.get("restart_required", False))
     )

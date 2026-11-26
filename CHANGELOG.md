@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Route offline CLI operations and service runtimes through one trusted engine registry without changing legacy OpenClaw command lines; optional container binding pins the CLI to an assigned engine and generation.
+
+- Separate shared Host Chat runtime setup by engine, retaining OpenClaw as the only registered engine and the default for existing profiles. Existing CLI and API calls are unchanged.
+
 ## 1.0.007 - 2026-11-26
 
 - Return an empty Chat2 title when OpenClaw only has a session-ID fallback; preserve named sessions and do not use the last message as the title.

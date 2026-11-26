@@ -144,24 +144,28 @@ class SharedPlatformRuntimeTests(unittest.IsolatedAsyncioTestCase):
             bindings.mkdir()
             relays.mkdir()
 
-            def publish(runtime, generation):
+            def publish(runtime, generation, **fields):
                 temp = bindings / (runtime + ".next")
                 temp.write_text(json.dumps({"instanceIdentify": runtime, "bindingId": generation,
                     "mountRoot": str(root / runtime), "gatewayOriginDomain": "agent.example",
-                    "nativeVersion": "2026.7.1-2"}))
+                    "nativeVersion": "2026.7.1-2", **fields}))
                 temp.replace(bindings / (runtime + ".json"))
 
             a, b, a2 = ("a" * 64, "b" * 64, "c" * 64)
             publish("alpha", a)
-            publish("beta", b)
+            publish("beta", b, engine="openclaw")
+            publish("delta", "d" * 64, engine="dsh")
             shared = SharedPlatformRuntimePool(root / "private", "test", {
                 "bindingDirectory": str(bindings), "relayDirectory": str(relays)})
             try:
                 first = shared.select("alpha", a)
                 other = shared.select("beta", b)
-                self.assertEqual(first.origin, "https://alpha.agent.example")
-                self.assertEqual(other.gateway_socket, str(relays / b / "openclaw.sock"))
+                self.assertEqual(first.host.origin, "https://alpha.agent.example")
+                self.assertEqual(other.host.gateway_socket, str(relays / b / "openclaw.sock"))
                 self.assertFalse(shared.admits("alpha", b))
+                self.assertFalse(shared.admits("delta", "d" * 64))
+                with self.assertRaises(APIError):
+                    shared.select("delta", "d" * 64)
                 publish("alpha", a2)
                 with self.assertRaises(APIError):
                     first.binding_guard()

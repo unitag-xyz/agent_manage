@@ -4,6 +4,16 @@ import stat
 from pathlib import Path
 
 
+def local_path(value):
+    path = Path(value)
+    if not path.is_absolute() or ".." in path.parts:
+        raise ValueError("Host bindings require absolute local paths")
+    for ancestor in (path, *path.parents):
+        if ancestor.is_symlink():
+            raise ValueError("Host binding paths must not contain links")
+    return path.resolve()
+
+
 def open_without_links(path):
     path = Path(path)
     if not path.is_absolute() or ".." in path.parts:

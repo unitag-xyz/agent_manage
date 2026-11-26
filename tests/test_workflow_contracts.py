@@ -19,7 +19,7 @@ class WorkflowContractsTest(unittest.TestCase):
                     "tg-bot-status": "get_tg_bot_status", "feishu-bot-status": "get_feishu_bot_status",
                     "weixin-bot-status": "get_weixin_bot_status"}
         for command, method in commands.items():
-            with self.subTest(command=command), patch("agent_manage.cli.InstanceManagerV2") as cls:
+            with self.subTest(command=command), patch("agent_manage.adapters.openclaw.execution.InstanceManagerV2") as cls:
                 manager = cls.return_value
                 manager.container_runtime = True
                 manager.restart_required = True

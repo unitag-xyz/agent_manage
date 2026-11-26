@@ -22,7 +22,7 @@ from agent_manage.response import (
 
 class CliResponseTest(unittest.TestCase):
     def test_agent_manage_add_agent_dispatches_template_registration(self):
-        with patch("agent_manage.cli.InstanceManagerV2") as manager_cls:
+        with patch("agent_manage.adapters.openclaw.execution.InstanceManagerV2") as manager_cls:
             manager_cls.return_value.add_agent.return_value = {"ok": True}
             stdout = io.StringIO()
             with redirect_stdout(stdout):
@@ -50,7 +50,7 @@ class CliResponseTest(unittest.TestCase):
         )
 
     def test_agent_manage_add_agent_accepts_base_url(self):
-        with patch("agent_manage.cli.InstanceManagerV2") as manager_cls:
+        with patch("agent_manage.adapters.openclaw.execution.InstanceManagerV2") as manager_cls:
             manager_cls.return_value.add_agent.return_value = {"ok": True}
             with redirect_stdout(io.StringIO()):
                 exit_code = agent_manage_main(
@@ -71,7 +71,7 @@ class CliResponseTest(unittest.TestCase):
 
     def test_agent_manage_add_agent_accepts_template_archive_source(self):
         digest = "a" * 64
-        with patch("agent_manage.cli.InstanceManagerV2") as manager_cls:
+        with patch("agent_manage.adapters.openclaw.execution.InstanceManagerV2") as manager_cls:
             manager_cls.return_value.add_agent.return_value = {"ok": True}
             with redirect_stdout(io.StringIO()):
                 exit_code = agent_manage_main(
@@ -92,7 +92,7 @@ class CliResponseTest(unittest.TestCase):
         self.assertEqual(kwargs["template_zip_sha256"], digest)
 
     def test_agent_manage_add_agent_surfaces_restart_required(self):
-        with patch("agent_manage.cli.InstanceManagerV2") as manager_cls:
+        with patch("agent_manage.adapters.openclaw.execution.InstanceManagerV2") as manager_cls:
             manager_cls.return_value.add_agent.return_value = {
                 "ok": True,
                 "restart_required": True,
@@ -107,7 +107,7 @@ class CliResponseTest(unittest.TestCase):
         self.assertTrue(json.loads(stdout.getvalue())["restartRequired"])
 
     def test_agent_manage_configure_instance_dispatches_without_create(self):
-        with patch("agent_manage.cli.InstanceManagerV2") as manager_cls:
+        with patch("agent_manage.adapters.openclaw.execution.InstanceManagerV2") as manager_cls:
             manager_cls.return_value.configure_instance.return_value = {
                 "ok": True,
                 "restart_required": True,
@@ -211,7 +211,7 @@ class CliResponseTest(unittest.TestCase):
         self.assertEqual(stdout.getvalue().strip(), f"agent-manage {__version__}")
 
     def test_agent_manage_success_response_uses_result_envelope(self):
-        with patch("agent_manage.cli.InstanceManagerV2") as manager_cls:
+        with patch("agent_manage.adapters.openclaw.execution.InstanceManagerV2") as manager_cls:
             manager_cls.return_value.create_instance.return_value = {
                 "ok": True,
                 "agent_name": "base",
@@ -235,7 +235,7 @@ class CliResponseTest(unittest.TestCase):
         self.assertEqual(request.ai_shop, "shop")
 
     def test_agent_manage_not_found_error_is_structured(self):
-        with patch("agent_manage.cli.InstanceManagerV2") as manager_cls:
+        with patch("agent_manage.adapters.openclaw.execution.InstanceManagerV2") as manager_cls:
             manager_cls.return_value.create_instance.side_effect = FileNotFoundError(
                 "Template archive not found: /tmp/base.zip"
             )
@@ -253,7 +253,7 @@ class CliResponseTest(unittest.TestCase):
         self.assertIsNone(payload["result"])
 
     def test_agent_manage_create_instance_accepts_cn_model_env(self):
-        with patch("agent_manage.cli.InstanceManagerV2") as manager_cls:
+        with patch("agent_manage.adapters.openclaw.execution.InstanceManagerV2") as manager_cls:
             manager_cls.return_value.create_instance.return_value = {
                 "ok": True,
                 "agent_name": "base",
@@ -280,7 +280,7 @@ class CliResponseTest(unittest.TestCase):
         self.assertEqual(payload["result"]["agent_name"], "base")
 
     def test_agent_manage_create_instance_accepts_ai_shop(self):
-        with patch("agent_manage.cli.InstanceManagerV2") as manager_cls:
+        with patch("agent_manage.adapters.openclaw.execution.InstanceManagerV2") as manager_cls:
             manager_cls.return_value.create_instance.return_value = {
                 "ok": True,
                 "agent_name": "base",
@@ -307,7 +307,7 @@ class CliResponseTest(unittest.TestCase):
         self.assertEqual(payload["result"]["agent_name"], "base")
 
     def test_agent_manage_create_instance_accepts_image_quality_default(self):
-        with patch("agent_manage.cli.InstanceManagerV2") as manager_cls:
+        with patch("agent_manage.adapters.openclaw.execution.InstanceManagerV2") as manager_cls:
             manager_cls.return_value.create_instance.return_value = {
                 "ok": True,
                 "agent_name": "base",
@@ -332,7 +332,7 @@ class CliResponseTest(unittest.TestCase):
         self.assertEqual(request.image_quality, "low")
 
     def test_agent_manage_create_instance_accepts_base_url(self):
-        with patch("agent_manage.cli.InstanceManagerV2") as manager_cls:
+        with patch("agent_manage.adapters.openclaw.execution.InstanceManagerV2") as manager_cls:
             manager_cls.return_value.create_instance.return_value = {
                 "ok": True,
                 "agent_name": "base",
@@ -360,7 +360,7 @@ class CliResponseTest(unittest.TestCase):
         self.assertTrue(payload["restartRequired"])
 
     def test_agent_manage_create_instance_accepts_local_agent_zip(self):
-        with patch("agent_manage.cli.InstanceManagerV2") as manager_cls:
+        with patch("agent_manage.adapters.openclaw.execution.InstanceManagerV2") as manager_cls:
             manager_cls.return_value.create_instance.return_value = {
                 "ok": True,
                 "agent_name": "base",
@@ -391,7 +391,7 @@ class CliResponseTest(unittest.TestCase):
         self.assertEqual(payload["result"]["agent_name"], "base")
 
     def test_agent_manage_tg_bot_status_uses_result_envelope(self):
-        with patch("agent_manage.cli.InstanceManagerV2") as manager_cls:
+        with patch("agent_manage.adapters.openclaw.execution.InstanceManagerV2") as manager_cls:
             manager_cls.return_value.get_tg_bot_status.return_value = {
                 "ok": True,
                 "tg_bot_count": 3,
@@ -408,7 +408,7 @@ class CliResponseTest(unittest.TestCase):
         self.assertEqual(payload["result"]["bound_tg_bot_count"], 2)
 
     def test_agent_manage_add_agents_dispatches_correctly(self):
-        with patch("agent_manage.cli.InstanceManagerV2") as manager_cls:
+        with patch("agent_manage.adapters.openclaw.execution.InstanceManagerV2") as manager_cls:
             manager_cls.return_value.add_agents.return_value = {
                 "ok": True,
                 "added_count": 2,
@@ -437,7 +437,7 @@ class CliResponseTest(unittest.TestCase):
         self.assertEqual(payload["result"]["added_count"], 2)
 
     def test_agent_manage_add_agents_parses_optional_template_name(self):
-        with patch("agent_manage.cli.InstanceManagerV2") as manager_cls:
+        with patch("agent_manage.adapters.openclaw.execution.InstanceManagerV2") as manager_cls:
             manager_cls.return_value.add_agents.return_value = {
                 "ok": True,
                 "added_count": 1,
@@ -465,7 +465,7 @@ class CliResponseTest(unittest.TestCase):
         self.assertEqual(request.agents[0].template_zip_sha256, "a" * 64)
 
     def test_agent_manage_weixin_bot_status_uses_result_envelope(self):
-        with patch("agent_manage.cli.InstanceManagerV2") as manager_cls:
+        with patch("agent_manage.adapters.openclaw.execution.InstanceManagerV2") as manager_cls:
             manager_cls.return_value.get_weixin_bot_status.return_value = {
                 "ok": True,
                 "weixin_bot_count": 2,
@@ -481,7 +481,7 @@ class CliResponseTest(unittest.TestCase):
         self.assertEqual(payload["result"]["weixin_bot_count"], 2)
 
     def test_agent_manage_feishu_bot_status_uses_result_envelope(self):
-        with patch("agent_manage.cli.InstanceManagerV2") as manager_cls:
+        with patch("agent_manage.adapters.openclaw.execution.InstanceManagerV2") as manager_cls:
             manager_cls.return_value.get_feishu_bot_status.return_value = {
                 "ok": True,
                 "feishu_bot_count": 2,
@@ -497,7 +497,7 @@ class CliResponseTest(unittest.TestCase):
         self.assertEqual(payload["result"]["feishu_bot_count"], 2)
 
     def test_agent_manage_add_feishu_bot_dispatches_correctly(self):
-        with patch("agent_manage.cli.InstanceManagerV2") as manager_cls:
+        with patch("agent_manage.adapters.openclaw.execution.InstanceManagerV2") as manager_cls:
             manager_cls.return_value.add_feishu_bot.return_value = {
                 "ok": True,
                 "account_id": "main",
@@ -532,7 +532,7 @@ class CliResponseTest(unittest.TestCase):
         self.assertTrue(request.bind_lark_cli)
 
     def test_agent_manage_delete_feishu_bot_dispatches_correctly(self):
-        with patch("agent_manage.cli.InstanceManagerV2") as manager_cls:
+        with patch("agent_manage.adapters.openclaw.execution.InstanceManagerV2") as manager_cls:
             manager_cls.return_value.delete_feishu_bot.return_value = {
                 "ok": True,
                 "deleted_account_id": "main",
@@ -553,7 +553,7 @@ class CliResponseTest(unittest.TestCase):
         self.assertEqual(payload["result"]["deleted_account_id"], "main")
 
     def test_agent_manage_add_weixin_bot_dispatches_correctly(self):
-        with patch("agent_manage.cli.InstanceManagerV2") as manager_cls:
+        with patch("agent_manage.adapters.openclaw.execution.InstanceManagerV2") as manager_cls:
             manager_cls.return_value.add_weixin_bot.return_value = {
                 "ok": True,
                 "account_id": "b0f5860fdecb-im-bot",
@@ -579,7 +579,7 @@ class CliResponseTest(unittest.TestCase):
 
     def test_container_mode_reads_model_key_from_stdin_and_strips_one_newline(self):
         with patch.dict(os.environ, {"UNITAG_AGENT_MANAGER_RUNTIME": "container"}):
-            with patch("agent_manage.cli.InstanceManagerV2") as manager_cls:
+            with patch("agent_manage.adapters.openclaw.execution.InstanceManagerV2") as manager_cls:
                 manager_cls.return_value.create_instance.return_value = {"ok": True}
                 manager_cls.return_value.restart_required = False
                 stdout = io.StringIO()
@@ -595,7 +595,7 @@ class CliResponseTest(unittest.TestCase):
 
     def test_container_mode_uses_persistent_workspace_root_for_create_instance(self):
         with patch.dict(os.environ, {"UNITAG_AGENT_MANAGER_RUNTIME": "container"}):
-            with patch("agent_manage.cli.InstanceManagerV2") as manager_cls:
+            with patch("agent_manage.adapters.openclaw.execution.InstanceManagerV2") as manager_cls:
                 manager_cls.CONTAINER_WORKSPACE_ROOT = "/home/node/.openclaw/data"
                 manager_cls.return_value.create_instance.return_value = {"ok": True}
                 manager_cls.return_value.restart_required = False
@@ -620,7 +620,7 @@ class CliResponseTest(unittest.TestCase):
             with self.subTest(command=command), patch.dict(
                 os.environ, {"UNITAG_AGENT_MANAGER_RUNTIME": "container"}
             ):
-                with patch("agent_manage.cli.InstanceManagerV2") as manager_cls:
+                with patch("agent_manage.adapters.openclaw.execution.InstanceManagerV2") as manager_cls:
                     getattr(manager_cls.return_value, method).return_value = {"ok": True}
                     manager_cls.return_value.restart_required = False
                     with patch("sys.stdin", io.StringIO("token\n")), redirect_stdout(io.StringIO()):
@@ -645,7 +645,7 @@ class CliResponseTest(unittest.TestCase):
 
     def test_secret_is_redacted_from_error_output(self):
         secret = "never-print-this-secret"
-        with patch("agent_manage.cli.InstanceManagerV2") as manager_cls:
+        with patch("agent_manage.adapters.openclaw.execution.InstanceManagerV2") as manager_cls:
             manager_cls.return_value.add_tg_bot.side_effect = ValueError(f"failed: {secret}")
             stdout = io.StringIO()
             with redirect_stdout(stdout):
@@ -658,7 +658,7 @@ class CliResponseTest(unittest.TestCase):
         self.assertIn("[REDACTED]", stdout.getvalue())
 
     def test_agent_manage_delete_weixin_bot_dispatches_correctly(self):
-        with patch("agent_manage.cli.InstanceManagerV2") as manager_cls:
+        with patch("agent_manage.adapters.openclaw.execution.InstanceManagerV2") as manager_cls:
             manager_cls.return_value.delete_weixin_bot.return_value = {
                 "ok": True,
                 "deleted_account_id": "caf8d0cd98a9-im-bot",
@@ -679,7 +679,7 @@ class CliResponseTest(unittest.TestCase):
         self.assertEqual(payload["result"]["deleted_account_id"], "caf8d0cd98a9-im-bot")
 
     def test_agent_manage_delete_tg_bot_dispatches_correctly(self):
-        with patch("agent_manage.cli.InstanceManagerV2") as manager_cls:
+        with patch("agent_manage.adapters.openclaw.execution.InstanceManagerV2") as manager_cls:
             manager_cls.return_value.delete_tg_bot.return_value = {
                 "ok": True,
                 "deleted_bot_name": "publicbot",
@@ -696,7 +696,7 @@ class CliResponseTest(unittest.TestCase):
         self.assertEqual(payload["result"]["deleted_bot_name"], "publicbot")
 
     def test_agent_manage_set_model_dispatches_correctly(self):
-        with patch("agent_manage.cli.InstanceManagerV2") as manager_cls:
+        with patch("agent_manage.adapters.openclaw.execution.InstanceManagerV2") as manager_cls:
             manager_cls.return_value.set_model.return_value = {
                 "ok": True,
                 "model_ref": "unipay-fun/gpt-5.4",
@@ -713,7 +713,7 @@ class CliResponseTest(unittest.TestCase):
         self.assertEqual(payload["result"]["model_ref"], "unipay-fun/gpt-5.4")
 
     def test_agent_manage_set_model_rejects_unknown_choice(self):
-        with patch("agent_manage.cli.InstanceManagerV2") as manager_cls:
+        with patch("agent_manage.adapters.openclaw.execution.InstanceManagerV2") as manager_cls:
             manager_cls.return_value.set_model.side_effect = ValueError(
                 "Unsupported model 'gpt-4o'. Allowed: unipay-fun/gpt-5.4"
             )
@@ -728,7 +728,7 @@ class CliResponseTest(unittest.TestCase):
         self.assertEqual(payload["error"]["code"], "VALIDATION_ERROR")
 
     def test_agent_manage_agents_list_dispatches_correctly(self):
-        with patch("agent_manage.cli.InstanceManagerV2") as manager_cls:
+        with patch("agent_manage.adapters.openclaw.execution.InstanceManagerV2") as manager_cls:
             manager_cls.return_value.list_agents.return_value = {
                 "ok": True,
                 "agent_count": 1,
@@ -745,7 +745,7 @@ class CliResponseTest(unittest.TestCase):
         self.assertEqual(payload["result"]["agents"][0]["id"], "unipay-claw-base")
 
     def test_agent_manage_current_model_dispatches_correctly(self):
-        with patch("agent_manage.cli.InstanceManagerV2") as manager_cls:
+        with patch("agent_manage.adapters.openclaw.execution.InstanceManagerV2") as manager_cls:
             manager_cls.return_value.get_current_model.return_value = {
                 "ok": True,
                 "current_model": "unipay-fun/gpt-5.4-nano",
@@ -760,7 +760,7 @@ class CliResponseTest(unittest.TestCase):
         self.assertEqual(payload["result"]["current_model"], "unipay-fun/gpt-5.4-nano")
 
     def test_agent_manage_models_dispatches_correctly(self):
-        with patch("agent_manage.cli.InstanceManagerV2") as manager_cls:
+        with patch("agent_manage.adapters.openclaw.execution.InstanceManagerV2") as manager_cls:
             manager_cls.return_value.get_supported_models.return_value = {
                 "ok": True,
                 "supported_model_refs": [
@@ -781,7 +781,7 @@ class CliResponseTest(unittest.TestCase):
         )
 
     def test_agent_manage_update_model_dispatches_correctly(self):
-        with patch("agent_manage.cli.InstanceManagerV2") as manager_cls:
+        with patch("agent_manage.adapters.openclaw.execution.InstanceManagerV2") as manager_cls:
             manager_cls.return_value.update_model_catalog.return_value = {
                 "ok": True,
                 "current_model_after": "unipay-fun/gpt-5.4",
@@ -796,7 +796,7 @@ class CliResponseTest(unittest.TestCase):
         self.assertEqual(payload["result"]["current_model_after"], "unipay-fun/gpt-5.4")
 
     def test_agent_manage_current_gateway_token_dispatches_correctly(self):
-        with patch("agent_manage.cli.InstanceManagerV2") as manager_cls:
+        with patch("agent_manage.adapters.openclaw.execution.InstanceManagerV2") as manager_cls:
             manager_cls.return_value.get_current_gateway_token.return_value = {
                 "ok": True,
                 "gateway_auth_mode": "token",

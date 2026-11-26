@@ -8,15 +8,14 @@ import re
 import stat
 from contextlib import asynccontextmanager
 from pathlib import Path
-from urllib.parse import urlsplit
 
-from .adapters.openclaw.host_binding import local_path, native_path
-from .adapters.registry import create_runtime_adapter
+from .adapters.registry import DEFAULT_ENGINE, create_runtime_adapter, platform_host_factory
+from .adapters.binding import read_engine_binding
 from .core.errors import APIError
 from .core.service import Service
 from .core.store import canonical
 from .file_io import encode_json, stage_bytes, sync_directory
-from .path_io import read_without_links
+from .path_io import local_path, read_without_links
 
 
 def shared_listen_path(value, state, pool):
@@ -33,39 +32,20 @@ def shared_listen_path(value, state, pool):
 class PlatformRuntimePool:
     def __init__(self, root, audience, profile, *, relay_root=None, binding_guard=None):
         expected = {"instanceIdentify", "bindingId", "mountRoot"}
-        optional = {"gatewayUrl", "executable", "gatewaySocket", "nativeVersion", "gatewayOrigin", "gatewayOriginDomain"}
-        if not isinstance(profile, dict) or not expected <= profile.keys() or profile.keys() - expected - optional:
+        if not isinstance(profile, dict) or not expected <= profile.keys():
+            raise ValueError("An isolated platform network and mount profile is required")
+        self.engine = profile.get("engine", DEFAULT_ENGINE)
+        factory = platform_host_factory(self.engine)
+        if profile.keys() - expected - {"engine"} - factory.profile_fields:
             raise ValueError("An isolated platform network and mount profile is required")
         self.instance = profile["instanceIdentify"]
         self.generation = profile["bindingId"]
         self.mount = local_path(profile["mountRoot"])
-        self.origin_domain = profile.get("gatewayOriginDomain")
-        if ("gatewayOrigin" in profile) == ("gatewayOriginDomain" in profile):
-            raise ValueError("Configure exactly one native Gateway Origin source")
-        if "gatewayOriginDomain" in profile:
-            if (not isinstance(self.origin_domain, str) or len(self.origin_domain) > 190
-                    or not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+",
-                                        self.origin_domain)):
-                raise ValueError("Invalid native Gateway Origin domain")
-            self.origin = f"https://{self.instance}.{self.origin_domain}"
-        else:
-            self.origin = profile["gatewayOrigin"]
-        self.gateway_url = profile.get("gatewayUrl", "ws://127.0.0.1:18789")
-        self.executable = profile.get("executable", "/app/openclaw.mjs")
-        self.gateway_socket = profile.get("gatewaySocket")
-        if (self.gateway_socket is not None and self.gateway_socket != "/native-gateway/openclaw.sock"
-                and (relay_root is None or self.gateway_socket != str(relay_root / self.generation / "openclaw.sock"))):
-            raise ValueError("Invalid private native gateway socket")
-        self.native_version = profile.get("nativeVersion")
-        if self.native_version is not None and (self.gateway_socket is None or not isinstance(self.native_version, str)
-                or not re.fullmatch(r"2026\.7\.[1-9][0-9]*(?:-[1-9][0-9]*)?", self.native_version)):
-            raise ValueError("Invalid native version for private relay")
-        gateway = urlsplit(self.gateway_url)
-        if (not re.fullmatch(r"[a-z0-9][a-z0-9-]{1,46}[a-z0-9]", self.instance)
-                or not re.fullmatch(r"[a-f0-9]{64}", self.generation)
-                or self.mount == Path(self.mount.anchor) or not isinstance(self.origin, str)
-                or gateway.scheme != "ws" or gateway.hostname != "127.0.0.1" or not gateway.port):
+        if (not isinstance(self.instance, str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]{1,46}[a-z0-9]", self.instance)
+                or not isinstance(self.generation, str) or not re.fullmatch(r"[a-f0-9]{64}", self.generation)
+                or self.mount == Path(self.mount.anchor)):
             raise ValueError("Invalid isolated platform profile")
+        self.host = factory(profile, self.mount, relay_root)
         self.root = root / "platform-runs"
         self.audience = audience
         self.binding_guard = binding_guard
@@ -80,32 +60,7 @@ class PlatformRuntimePool:
         return runtime == self.instance and generation == self.generation
 
     def registration(self, grant=None):
-        config_path = self.mount / "config/openclaw.json"
-        instance_chat = grant is None or grant.instance_chat
-        bindings = []
-        if not instance_chat:
-            workspace = self.granted_workspace(grant)
-            bindings.append({"agentIdentify": grant.agent_identify, "nativeAgentId": grant.native_agent_id,
-                             "installationId": grant.installation_id, "workspace": workspace})
-        return {"id": self.instance, "environmentId": self.instance, "engine": "openclaw",
-            "lifecycle": "external", "home": str(self.mount), "configPath": str(config_path),
-            "executable": self.executable, "gatewayUrl": self.gateway_url, "gatewayOrigin": self.origin,
-            **({"externalNativeVersion": self.native_version} if self.native_version else {}),
-            "hostBinding": {"bindingId": self.generation, "nativeConfigPath": "/home/node/.openclaw/openclaw.json",
-                "pathMappings": [{"native": "/home/node/.openclaw", "local": str(self.mount / "config")},
-                    {"native": "/home/node/.openclaw/workspace", "local": str(self.mount / "workspace")}],
-                "instanceChat": instance_chat, "agentBindings": bindings}}
-
-    def granted_workspace(self, grant):
-        config = json.loads(read_without_links(self.mount / "config/openclaw.json", 8 * 1024 * 1024))
-        agents = config.get("agents", {})
-        candidates = [agent for agent in agents.get("list", []) if agent.get("id") == grant.native_agent_id]
-        if len(candidates) != 1:
-            raise APIError("RUNTIME_MISMATCH", "Authorized native Agent is missing or ambiguous")
-        workspace = candidates[0].get("workspace") or agents.get("defaults", {}).get("workspace")
-        if not native_path(workspace).is_relative_to(native_path("/home/node/.openclaw")):
-            raise APIError("RUNTIME_MISMATCH", "Agent workspace is outside the trusted state mount")
-        return workspace
+        return {**self.host.registration(grant), "engine": self.engine}
 
     def ledger_directory(self, identity):
         # Adopt the first observed generation in place, never guess which
@@ -136,6 +91,9 @@ class PlatformRuntimePool:
 
     async def runtime_service(self, grant=None):
         identity = [self.instance, self.generation]
+        # Preserve existing OpenClaw receipts; never adopt a different engine's native IDs.
+        if self.engine != DEFAULT_ENGINE:
+            identity.append({"engine": self.engine})
         identity.extend(["instance-chat"] if grant is None or grant.instance_chat else
                         [grant.installation_id, grant.agent_identify, grant.native_agent_id])
         key = hashlib.sha256(canonical(identity).encode()).hexdigest()
@@ -156,10 +114,7 @@ class PlatformRuntimePool:
                                   session_directory=self.root / key)
                 try:
                     adapter = create_runtime_adapter(registration, current.store, current.read_workers, current.publish)
-                    if not getattr(adapter, "host_binding", None) or not adapter.gateway:
-                        raise APIError("UNSUPPORTED", "Native OpenClaw version is not supported")
-                    adapter.gateway.unix_socket = self.gateway_socket
-                    adapter.gateway.paused = self.binding_guard is not None and self.sessions == 0
+                    self.host.prepare(adapter, idle=self.binding_guard is not None and self.sessions == 0)
                     current.register(adapter, persist_registration=False)
                     await current.start()
                     current.store.bind_ledger(self.instance, self.generation)
@@ -169,29 +124,19 @@ class PlatformRuntimePool:
                 self.services[key] = current
         return current
 
-    def verify_native_origin(self):
-        if self.origin_domain is not None:
-            config = json.loads(read_without_links(self.mount / "config/openclaw.json", 8 * 1024 * 1024))
-            allowed = config.get("gateway", {}).get("controlUi", {}).get("allowedOrigins")
-            if not isinstance(allowed, list) or self.origin not in allowed:
-                raise APIError("ORIGIN_MISMATCH", "The generated Gateway Origin is not configured in OpenClaw")
-
     async def probe_ready(self):
-        await asyncio.to_thread(self.verify_native_origin)
+        await self.host.verify_readiness()
         current = await self.runtime_service()
-        await current.adapter(self.instance).gateway.connect()
+        await self.host.connect(current.adapter(self.instance))
 
     async def open(self, grant):
         if not self.admits(grant.runtime_id, grant.binding_id):
             raise APIError("RUNTIME_MISMATCH", "Host offer does not match this Manager sandbox")
-        await asyncio.to_thread(self.verify_native_origin)
-        if grant.instance_chat:
-            await asyncio.to_thread(self.granted_workspace, grant)
+        await self.host.verify_grant(grant)
         current = await self.runtime_service(grant)
         adapter = current.adapter(grant.runtime_id)
-        agent = (await current.read_workers(adapter.resolve_native_agent, grant.native_agent_id) if grant.instance_chat
-                 else await current.read_workers(adapter.resolve_agent, grant.agent_identify))
-        await adapter.gateway.connect()
+        agent = await self.host.resolve_grant_agent(adapter, current.read_workers, grant)
+        await self.host.connect(adapter)
         return current, current.auth.open_platform_lease(grant, agent), agent
 
     async def close(self):
@@ -207,16 +152,16 @@ class PlatformRuntimePool:
             self.sessions += 1
             if self.sessions == 1:
                 for service in self.services.values():
-                    service.adapter(self.instance).gateway.paused = False
+                    self.host.resume(service.adapter(self.instance))
 
     async def release(self):
         async with self.session_lock:
             self.sessions -= 1
             if self.sessions == 0:
-                gateways = [service.adapter(self.instance).gateway for service in self.services.values()]
-                for gateway in gateways:
-                    gateway.paused = True
-                await asyncio.gather(*(gateway.disconnect() for gateway in gateways))
+                adapters = [service.adapter(self.instance) for service in self.services.values()]
+                for adapter in adapters:
+                    self.host.pause(adapter)
+                await asyncio.gather(*(self.host.disconnect(adapter) for adapter in adapters))
 
 
 class SharedPlatformRuntimePool:
@@ -240,21 +185,7 @@ class SharedPlatformRuntimePool:
     def profile(self, runtime):
         if not isinstance(runtime, str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]{1,46}[a-z0-9]", runtime):
             return None
-        from .path_io import open_without_links
-        try:
-            with os.fdopen(open_without_links(self.bindings / (runtime + ".json")), "rb") as stream:
-                info = os.fstat(stream.fileno())
-                if info.st_uid != 0 or info.st_mode & 0o022:
-                    return None
-                raw = stream.read(16385)
-                value = json.loads(raw) if len(raw) <= 16384 else None
-        except (ValueError, OSError, RecursionError):
-            return None
-        if (not isinstance(value, dict) or value.get("instanceIdentify") != runtime
-                or not isinstance(value.get("bindingId"), str) or not re.fullmatch(r"[0-9a-f]{64}", value["bindingId"])
-                or value.keys() != {"instanceIdentify", "bindingId", "mountRoot", "gatewayOriginDomain", "nativeVersion"}):
-            return None
-        return value
+        return read_engine_binding(self.bindings / (runtime + ".json"), runtime)
 
     def admits(self, runtime, generation):
         value = self.profile(runtime)
@@ -285,9 +216,9 @@ class SharedPlatformRuntimePool:
         def require_current():
             if self.profile(runtime) != value:
                 raise APIError("RUNTIME_MISMATCH", "The Host binding is no longer current")
-        pool = PlatformRuntimePool(self.root, self.audience, {**value,
-            "gatewaySocket": str(self.relays / generation / "openclaw.sock")}, relay_root=self.relays,
-            binding_guard=require_current)
+        factory = platform_host_factory(value.get("engine", DEFAULT_ENGINE))
+        pool = PlatformRuntimePool(self.root, self.audience, factory.shared_profile(value, self.relays),
+                                   relay_root=self.relays, binding_guard=require_current)
         self.pools[runtime] = (value, pool)
         if current is not None:
             self.retire(current[1])
@@ -315,9 +246,7 @@ class SharedPlatformRuntimePool:
 
     async def probe_ready(self, runtime, generation):
         pool = self.select(runtime, generation)
-        await asyncio.to_thread(pool.verify_native_origin)
-        if not stat.S_ISSOCK(Path(pool.gateway_socket).lstat().st_mode):
-            raise APIError("NOT_READY", "The native relay is unavailable")
+        await pool.host.probe_shared_relay()
         if not self.admits(runtime, generation):
             raise APIError("RUNTIME_MISMATCH", "The Host binding changed during readiness")
 

@@ -18,7 +18,7 @@ from .runtime import CURRENT_WRITE_GUARD
 LOG = logging.getLogger("agent_manage.api")
 MAX_ATTACHMENT_REQUEST = 24 * 1024 * 1024
 MAX_INLINE_ATTACHMENT_BASE64 = 23 * 1024 * 1024
-MAX_INLINE_IMAGE_BYTES = 6 * 1024 * 1024
+
 MAX_INLINE_ATTACHMENT_COUNT = 5
 LARGE_ATTACHMENT_OPERATIONS = threading.BoundedSemaphore(2)
 
@@ -117,7 +117,7 @@ class Service:
                        for left in local_roots for right in previous_roots):
                     raise ValueError("Host-bound runtimes must not overlap local mounts")
             if binding and other:
-                if binding.token_digest == other.token_digest or adapter.gateway.url == existing.gateway.url:
+                if binding.token_digest == other.token_digest or adapter.host_endpoint == existing.host_endpoint:
                     raise ValueError("Host-bound runtimes require distinct Gateway tokens and endpoints")
             left, right = existing.context.state_dir, context.state_dir
             if left.is_relative_to(right) or right.is_relative_to(left):
@@ -163,8 +163,7 @@ class Service:
                 raise APIError("FORBIDDEN", "The Run has no matching Chat operation")
         return lease
 
-    @staticmethod
-    def validate(request):
+    def validate(self, request):
         if not isinstance(request, dict) or not isinstance(request.get("requestId"), str) or not 1 <= len(request["requestId"]) <= 128:
             raise APIError("INVALID_ARGUMENT", "A requestId of 1-128 characters is required")
         if set(request) - {"requestId", "method", "params", "type"}:
@@ -228,6 +227,8 @@ class Service:
             if not isinstance(attachments, list) or len(attachments) > MAX_INLINE_ATTACHMENT_COUNT:
                 raise APIError("INVALID_ARGUMENT", "At most five inline attachments are supported")
             total = 0
+            adapter = self.adapters.get(params["runtimeId"])
+            image_limit = getattr(adapter, "inline_image_limit", None)
             image_types = ("image/png", "image/jpeg", "image/webp", "image/gif")
             for item in attachments:
                 if not isinstance(item, dict) or item.keys() != {"type", "mimeType", "fileName", "content"}:
@@ -248,8 +249,8 @@ class Service:
                         raise ValueError("empty attachment")
                 except ValueError as exc:
                     raise APIError("INVALID_ARGUMENT", "Attachment content must be base64") from exc
-                if kind == "image" and decoded_bytes > MAX_INLINE_IMAGE_BYTES:
-                    raise APIError("REQUEST_TOO_LARGE", "An image exceeds OpenClaw's 6 MiB limit")
+                if kind == "image" and image_limit is not None and decoded_bytes > image_limit:
+                    raise APIError("REQUEST_TOO_LARGE", adapter.inline_image_limit_message)
         if "omitThinking" in params and type(params["omitThinking"]) is not bool:
             raise APIError("INVALID_ARGUMENT", "omitThinking must be a boolean")
         if "options" in params and not isinstance(params["options"], dict):
@@ -371,9 +372,11 @@ class Service:
                 if action in METHODS and METHODS[action].scope == "runtime" and "*" not in lease.context["agentIds"]:
                     value["authorized"] = False
             binding = getattr(adapter, "host_binding", None)
-            if binding and binding.instance_chat and "*" in lease.context["agentIds"] and result["methods"]["runs.create"]["authorized"]:
+            image_limit = getattr(adapter, "inline_image_limit", None)
+            if (image_limit is not None and binding and binding.instance_chat and "*" in lease.context["agentIds"]
+                    and result["methods"]["runs.create"]["authorized"]):
                 result["attachments"] = {"mode": "inline", "maxCount": MAX_INLINE_ATTACHMENT_COUNT,
-                    "maxBase64Bytes": MAX_INLINE_ATTACHMENT_BASE64, "maxImageBytes": MAX_INLINE_IMAGE_BYTES,
+                    "maxBase64Bytes": MAX_INLINE_ATTACHMENT_BASE64, "maxImageBytes": image_limit,
                     "maxRequestBytes": MAX_ATTACHMENT_REQUEST,
                     "mimeTypes": ["image/png", "image/jpeg", "image/webp", "image/gif", "application/pdf", "text/plain"]}
             return result

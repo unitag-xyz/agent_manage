@@ -263,10 +263,9 @@ def create_app(service, platform_pool=None, platform_release=None):
                                 break
                     if method == "chat.sidebar" and sidebar_installations and response.get("ok"):
                         adapter = service.adapter(params["runtimeId"])
-                        agents = await adapter.workers(adapter.agents)
                         targets = {native: platform for native, platform, _ in sidebar_installations}
-                        resolved = {agent["agentId"]: targets.get(agent["extensions"]["openclaw"]["agentId"])
-                                    for agent in agents}
+                        resolver = getattr(adapter, "resolve_installed_agents", None)
+                        resolved = await service.read_workers(resolver, targets) if resolver is not None else {}
                         for row in response["result"]["items"]:
                             if platform_identify := resolved.get(row["agentId"]):
                                 row["platformAgentIdentify"] = platform_identify
@@ -505,7 +504,7 @@ def main():
         from .platform_runtime import PlatformRuntimePool
         platform_pool = PlatformRuntimePool(service.store.path.parent, service.auth.audience, config["platformSandbox"])
         if "platformListenSocket" in config:
-            if config["platformListenSocket"] != "/manager-export/manager.sock" or not platform_pool.gateway_socket:
+            if config["platformListenSocket"] != "/manager-export/manager.sock" or not platform_pool.host.has_private_relay:
                 raise ValueError("An exported platform socket requires the private native relay")
             socket_path = Path(config["platformListenSocket"])
             # Resolve once, so a later update of "current" cannot relabel this process.

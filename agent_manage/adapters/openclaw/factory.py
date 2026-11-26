@@ -10,6 +10,11 @@ from ...core.runtime import RuntimeContext
 from ..base import RuntimeAdapter, UnsupportedRuntimeAdapter
 
 
+def create_local(options):
+    from .execution import open_local
+    return open_local(options)
+
+
 def detect_version(executable: str) -> str:
     binary = shutil.which(executable)
     if binary:

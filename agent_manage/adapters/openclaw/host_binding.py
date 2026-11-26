@@ -6,7 +6,7 @@ from pathlib import Path, PurePosixPath
 
 from ...core.errors import APIError
 from ...core.store import canonical
-from ...path_io import read_without_links
+from ...path_io import local_path, read_without_links
 
 
 def native_path(value):
@@ -14,16 +14,6 @@ def native_path(value):
             or "\\" in value or "\x00" in value or ".." in value.split("/")):
         raise ValueError("Host bindings require absolute, traversal-free native POSIX paths")
     return PurePosixPath(value)
-
-
-def local_path(value):
-    path = Path(value)
-    if not path.is_absolute() or ".." in path.parts:
-        raise ValueError("Host bindings require absolute local paths")
-    for ancestor in (path, *path.parents):
-        if ancestor.is_symlink():
-            raise ValueError("Host binding paths must not contain links")
-    return path.resolve()
 
 
 class HostBinding:
