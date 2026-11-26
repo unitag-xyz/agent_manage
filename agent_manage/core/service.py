@@ -152,6 +152,10 @@ class Service:
         binding = getattr(adapter, "host_binding", None)
         if method == "runs.cancel" and binding and binding.instance_chat:
             run = self.store.get(params["runId"], kind="run", runtime=runtime)
+            # Native Runs were admitted from an exact session snapshot. The instance
+            # grant already authorizes the resolved thread; there is no local Operation.
+            if run["data"].get("source") == "openclaw":
+                return lease
             operation_id = run["data"].get("operationId")
             if not operation_id:
                 raise APIError("FORBIDDEN", "The Run has no verifiable Chat operation owner")

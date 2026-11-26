@@ -185,7 +185,7 @@ class Store:
                     data = json.loads(row["data"])
                     target = activity.setdefault(row["thread"], {"activeRuns": [], "lastRun": None})
                     dto = {"runId": row["id"], **{key: data[key] for key in
-                           ("status", "observation", "resultSync", "createdAt", "completedAt", "resultBoundary", "error") if key in data}}
+                           ("status", "observation", "resultSync", "source", "startedAt", "createdAt", "completedAt", "resultBoundary", "error") if key in data}}
                     if row["active"]:
                         target["activeRuns"].append(dto)
                     else:

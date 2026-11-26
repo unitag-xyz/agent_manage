@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 1.0.008 - 2026-11-26
+
+- Observe active OpenClaw Runs started outside AgentManager in Host Chat2 thread detail and correlate their live events without resending the request. An authorized instance Chat2 connection can cancel the exact observed Run in the current session segment.
+
 ## 1.0.007 - 2026-11-26
 
 - Return an empty Chat2 title when OpenClaw only has a session-ID fallback; preserve named sessions and do not use the last message as the title.

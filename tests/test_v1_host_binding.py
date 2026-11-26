@@ -91,8 +91,10 @@ class HostBindingTest(unittest.IsolatedAsyncioTestCase):
         try:
             with (patch("agent_manage.adapters.openclaw.factory.detect_version", return_value="2026.7.1-2"),
                   patch("agent_manage.adapters.openclaw.v2026_7.gateway.Gateway.connect", new_callable=AsyncMock),
-                  patch("agent_manage.adapters.openclaw.v2026_7.gateway.Gateway.call", new_callable=AsyncMock) as native_call):
-                def scoped_titles(method, params):
+                  patch("agent_manage.adapters.openclaw.v2026_7.gateway.Gateway.call", new_callable=AsyncMock) as gateway_call):
+                def scoped_titles(method, params, **kwargs):
+                    if method == "chat.history":
+                        return {}
                     self.assertIn(method, ("sessions.list", "sessions.describe"))
                     self.assertTrue(params["includeDerivedTitles"])
                     self.assertNotIn("includeLastMessage", params)
@@ -101,7 +103,7 @@ class HostBindingTest(unittest.IsolatedAsyncioTestCase):
                     if method == "sessions.describe":
                         return {"session": row if params["key"] == row["key"] else None}
                     return {"sessions": [row] if params["agentId"] == "attached" else []}
-                native_call.side_effect = scoped_titles
+                gateway_call.side_effect = scoped_titles
                 async with ClientSession(connector=UnixConnector(path=socket_path)) as client:
                     async def open_chat(native, marker="chat.instance", template_identify=None, subject="owner"):
                         ws = await client.ws_connect("http://manager/v1/platform/ws")
@@ -496,6 +498,64 @@ class HostBindingTest(unittest.IsolatedAsyncioTestCase):
                             runId=run_id, clientRequestId="owner-cancel-completed"))
                         self.assertEqual("completed", already_complete["status"])
                         self.assertEqual("completed", already_complete["result"]["status"])
+                        key = "agent:attached:session"
+                        native_run = "chat1-request"
+                        started_at = int(time.time() * 1000) - 720_000
+                        for scoped_id in ("other-physical-session", physical):
+                            def native_activity(method, params, **kwargs):
+                                if method == "chat.history":
+                                    self.assertEqual({"sessionKey": key, "limit": 1, "maxChars": 1000}, params)
+                                    return {"sessionKey": key, "sessionId": scoped_id,
+                                            "sessionInfo": {"hasActiveRun": True, "activeRunIds": [native_run]},
+                                            "inFlightRun": {"runId": native_run, "startedAt": started_at}}
+                                if method in ("sessions.subscribe", "agent.wait"):
+                                    return {}
+                                if method == "chat.abort":
+                                    self.assertEqual({"sessionKey": key, "runId": native_run}, params)
+                                    return {"aborted": True, "runIds": [native_run]}
+                                return scoped_titles(method, params, **kwargs)
+                            gateway_call.side_effect = native_activity
+                            with patch.object(adapter.gateway, "retain_session", new_callable=AsyncMock) as retain:
+                                retain.return_value = (object(), (key, "attached"))
+                                detail = (await rpc(owner_again, "threads.get", threadId=thread_id))["result"]
+                            active = detail["runActivity"]
+                            if scoped_id != physical:
+                                self.assertEqual([], active["activeRuns"])
+                                retain.assert_not_awaited()
+                            else:
+                                retain.assert_awaited_once_with(key, "attached")
+                                self.assertEqual(started_at, active["activeRuns"][0]["startedAt"])
+                        external_id = active["activeRunId"]
+                        self.assertTrue(external_id.startswith("run_"))
+                        external = (await rpc(owner_again, "runs.get", runId=external_id))["result"]
+                        self.assertEqual(("openclaw", "running", started_at, thread_id),
+                            (external["source"], external["status"], external["createdAt"], external["threadId"]))
+                        self.assertNotIn(native_run, json.dumps(external))
+                        self.assertTrue((await rpc(owner_again, "events.subscribe", threadId=thread_id))["ok"])
+                        tool = {"event": "session.tool", "payload": {"sessionKey": key, "runId": native_run,
+                            "stream": "tool", "seq": 1, "data": {"toolCallId": "external-tool", "name": "exec", "phase": "start"}}}
+                        await adapter.native_event({**tool, "payload": {**tool["payload"], "sessionKey": "agent:main:recent"}})
+                        await adapter.native_event(tool)
+                        activity = await owner_again.receive_json(timeout=3)
+                        self.assertEqual(("run.activity", external_id, thread_id),
+                            (activity["type"], activity["runId"], activity["threadId"]))
+                        await adapter.native_event({"event": "chat", "payload": {"sessionKey": key, "runId": native_run,
+                            "state": "delta", "seq": 2, "message": {"role": "assistant", "content": "Working"}}})
+                        frame = await owner_again.receive_json(timeout=3)
+                        self.assertEqual(("message.snapshot", external_id), (frame["type"], frame["runId"]))
+                        self.assertEqual("running", (await owner_again.receive_json(timeout=3))["run"]["status"])
+                        self.assertEqual("FORBIDDEN", (await rpc(owner_again, "runs.cancel", runtime="two",
+                            runId=external_id, clientRequestId="cross-runtime"))["error"]["code"])
+                        cancelled = await wait_operation(owner_again, await rpc(owner_again, "runs.cancel",
+                            runId=external_id, clientRequestId="cancel-external"))
+                        self.assertEqual(("completed", "cancel_requested"),
+                            (cancelled["status"], cancelled["result"]["status"]))
+                        with patch.object(adapter.gateway, "release_session", new_callable=AsyncMock):
+                            await adapter.native_event({"event": "chat", "payload": {"sessionKey": key, "runId": native_run,
+                                "state": "aborted", "seq": 3}})
+                            await asyncio.gather(*adapter.observer_releases)
+                        finished = await owner_again.receive_json(timeout=3)
+                        self.assertEqual((external_id, "cancelled"), (finished["run"]["runId"], finished["run"]["status"]))
 
                     legacy, _ = await open_chat("main", "chat.session")
                     async with legacy:

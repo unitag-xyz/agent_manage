@@ -648,6 +648,8 @@ class OpenClawAdapter(RuntimeAdapter):
                     self.include_run_activity([row])
                     return row
                 summary = await self.workers(summarize)
+                if await self.discover_external_runs(thread, entry):
+                    await self.workers(self.include_run_activity, [summary])
                 await enrich_titles(self.gateway, targets, detail=True)
                 return {"threadId": thread["id"], "agentId": thread["data"]["agentId"], **summary,
                         **{key: entry[key] for key in ("totalTokens", "contextTokens")
@@ -891,10 +893,27 @@ class OpenClawAdapter(RuntimeAdapter):
             run = self.store.get(params["runId"], kind="run", runtime=self.runtime_id)
             if run["data"].get("executionDetached"):
                 raise APIError("NOT_READY", "Run belongs to a retired container binding")
-            thread, _ = await self.workers(self.thread, run["data"]["threadId"])
+            thread, entry = await self.workers(self.thread, run["data"]["threadId"])
             if run["data"]["status"] in ("completed", "failed", "cancelled"):
                 return run["data"]
-            await self.gateway.call("chat.abort", {"sessionKey": self.native_key(thread), "runId": run["data"].get("nativeRunId", run["native"])})
+            if run["data"].get("source") == "openclaw":
+                if not (self.host_binding and self.host_binding.instance_chat):
+                    raise APIError("FORBIDDEN", "An instance Chat grant is required to cancel this Run")
+                segment_id = self.segment_id(thread["id"], entry.get("sessionId"))
+                if not segment_id or segment_id != run["data"].get("segmentId"):
+                    raise APIError("SEGMENT_CHANGED", "The observed Run belongs to a different session segment")
+            if CURRENT_WRITE_GUARD.get():
+                CURRENT_WRITE_GUARD.get()()
+            native_run = run["data"].get("nativeRunId", run["native"])
+            outcome = await self.gateway.call("chat.abort", {"sessionKey": self.native_key(thread), "runId": native_run})
+            if run["data"].get("source") == "openclaw" and not (
+                isinstance(outcome, dict) and outcome.get("aborted") is True
+                and isinstance(outcome.get("runIds"), list) and native_run in outcome["runIds"]
+            ):
+                current = await self.refresh_run_outcome(run)
+                if current["status"] in ("completed", "failed", "cancelled"):
+                    return current
+                raise APIError("NOT_READY", "OpenClaw did not confirm cancellation of this Run", retryable=True)
             return self.store.transition_run(self.runtime_id, run["native"], status="cancel_requested")
         thread, entry = await self.workers(self.thread, params["threadId"])
         if method == "threads.models.update":
@@ -972,6 +991,70 @@ class OpenClawAdapter(RuntimeAdapter):
             native_params["deleteTranscript"] = True
         await self.gateway.call(NATIVE[method], native_params)
         return {"threadId": thread["id"], "applied": True}
+
+    async def discover_external_runs(self, thread, entry):
+        """Import only the live IDs returned for this exact Host thread and segment."""
+        physical = entry.get("sessionId")
+        if not (self.host_binding and self.host_binding.instance_chat and self.gateway
+                and isinstance(physical, str) and physical):
+            return False
+        key = self.native_key(thread)
+        try:
+            snapshot = await self.gateway.call("chat.history", {
+                "sessionKey": key, "limit": 1, "maxChars": 1000,
+            }, timeout=3)
+        except APIError:
+            return False
+        if not isinstance(snapshot, dict) or snapshot.get("sessionKey") != key or snapshot.get("sessionId") != physical:
+            return False
+        info = snapshot.get("sessionInfo")
+        live = snapshot.get("inFlightRun")
+        live = live if isinstance(live, dict) else {}
+        if isinstance(info, dict) and info.get("hasActiveRun") is False:
+            return False
+        native_ids = info.get("activeRunIds") if isinstance(info, dict) else None
+        native_ids = native_ids[:8] if isinstance(native_ids, list) else []
+        native_ids = list(dict.fromkeys(native for native in [live.get("runId"), *native_ids]
+                          if isinstance(native, str) and 0 < len(native) <= 256 and native.isprintable()))[:8]
+        if not native_ids:
+            return False
+        segment = await self.workers(self.segment_id, thread["id"], physical)
+        observed = False
+        external = False
+        for native in native_ids:
+            row = self.store.lookup("run", self.runtime_id, native)
+            if row is None:
+                mapped = self.store.lookup("run_binding", self.runtime_id, native)
+                if mapped:
+                    row = self.store.get(mapped["data"]["runId"], kind="run", runtime=self.runtime_id)
+            if row is not None:
+                data = row["data"]
+                if (data["threadId"] == thread["id"] and data.get("segmentId") == segment
+                        and not data.get("executionDetached") and data.get("source") == "openclaw"):
+                    external = True
+                continue
+            identifier = self.store.object_id("run", self.runtime_id, native)
+            started_at = live.get("startedAt") if live.get("runId") == native else None
+            if type(started_at) is not int or not 0 < started_at <= (1 << 53) - 1:
+                # This Gateway can omit startedAt on the in-flight snapshot. The session
+                # timestamp is usable only when its one active Run is unambiguous.
+                started_at = info.get("startedAt") if isinstance(info, dict) and len(native_ids) == 1 else None
+            data = {"runId": identifier, "threadId": thread["id"], "segmentId": segment,
+                    "clientRequestId": "observed:" + identifier, "source": "openclaw",
+                    "status": "running", "observation": "known", "resultSync": "pending",
+                    "usageStatus": "unknown"}
+            if type(started_at) is int and 0 < started_at <= (1 << 53) - 1:
+                data["createdAt"] = data["startedAt"] = started_at
+            self.store.object("run", self.runtime_id, native, data)
+            observed = external = True
+        if external:
+            try:
+                # Chat1 tool frames are published as session.tool to session event subscribers.
+                await self.gateway.call("sessions.subscribe", {}, timeout=3)
+                await self.restore_run_observers(thread)
+            except APIError:
+                pass
+        return observed
 
     async def restore_run_observers(self, thread):
         async with self.restore_lock:
@@ -1082,7 +1165,10 @@ class OpenClawAdapter(RuntimeAdapter):
         if event == "sessions.changed":
             await self.publish(self.runtime_id, None, {"type": "sessions.changed"})
             return
-        if event not in ("chat", "agent"):
+        if event not in ("chat", "agent", "session.tool"):
+            return
+        if event == "session.tool" and (payload.get("stream") != "tool"
+                                        or not isinstance(payload.get("sessionKey"), str)):
             return
         try:
             route = await asyncio.to_thread(self.event_route, payload)
@@ -1092,7 +1178,9 @@ class OpenClawAdapter(RuntimeAdapter):
             return
         run, thread = route
         native_run = payload.get("runId")
-        if event == "agent":
+        if event == "session.tool" and (not run or run["data"].get("source") != "openclaw"):
+            return
+        if event in ("agent", "session.tool"):
             data = payload.get("data") or {}
             stream = payload.get("stream")
             if stream not in ("tool", "thinking") or not isinstance(data, dict):
