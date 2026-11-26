@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 import time
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from agent_manage.core.errors import APIError
 from agent_manage.response import ProtocolError
@@ -28,6 +28,46 @@ if AVAILABLE:
 
 @unittest.skipUnless(AVAILABLE, "Install server extra and host binding implementation")
 class HostBindingTest(unittest.IsolatedAsyncioTestCase):
+    async def test_start_during_snapshot_and_last_unwatch_during_retain(self):
+        from agent_manage.adapters.openclaw.v2026_7.adapter import OpenClawAdapter
+        adapter = object.__new__(OpenClawAdapter)
+        adapter.runtime_id = "one"
+        adapter.host_binding = Mock(instance_chat=True)
+        adapter.store = Mock()
+        key = "agent:main:example"
+        adapter.store.get.return_value = {"data": {}, "native": key}
+        adapter.thread_watches, adapter.start_probes, adapter.pending_tools = {}, {}, {}
+        adapter.start_dirty = set()
+        adapter.start_probe_slots = asyncio.Semaphore(4)
+        adapter.workers = AsyncMock(return_value=({}, {}))
+        started, resumed = asyncio.Event(), asyncio.Event()
+        retaining, confirmed = asyncio.Event(), asyncio.Event()
+        snapshots, live = [], ["A"]
+        async def discover(*_):
+            snapshots.append(tuple(live))
+            if len(snapshots) == 1:
+                started.set()
+                await resumed.wait()
+            else:
+                retaining.set()
+                await confirmed.wait()
+            return True
+        adapter.discover_external_runs = discover
+        release = adapter.watch_thread("thread")
+        signal = {"sessionKey": key, "hasActiveRun": True}
+        adapter.observe_native_start(signal)
+        task = adapter.start_probes[key]
+        await asyncio.wait_for(started.wait(), 1)
+        live.append("B")
+        adapter.observe_native_start(signal)
+        resumed.set()
+        await asyncio.wait_for(retaining.wait(), 1)
+        release()
+        confirmed.set()
+        await asyncio.wait_for(task, 1)
+        self.assertEqual([("A",), ("A", "B")], snapshots)
+        self.assertFalse(adapter.start_probes or adapter.thread_watches or adapter.pending_tools)
+
     async def asyncSetUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name).resolve()
@@ -95,6 +135,8 @@ class HostBindingTest(unittest.IsolatedAsyncioTestCase):
                 def scoped_titles(method, params, **kwargs):
                     if method == "chat.history":
                         return {}
+                    if method == "sessions.subscribe":
+                        return {"subscribed": True}
                     self.assertIn(method, ("sessions.list", "sessions.describe"))
                     self.assertTrue(params["includeDerivedTitles"])
                     self.assertNotIn("includeLastMessage", params)
@@ -501,6 +543,9 @@ class HostBindingTest(unittest.IsolatedAsyncioTestCase):
                         key = "agent:attached:session"
                         native_run = "chat1-request"
                         started_at = int(time.time() * 1000) - 720_000
+                        self.assertTrue((await rpc(owner_again, "events.subscribe", threadId=thread_id))["ok"])
+                        observer_tab, _ = await open_chat("attached")
+                        self.assertTrue((await rpc(observer_tab, "events.subscribe", threadId=thread_id))["ok"])
                         for scoped_id in ("other-physical-session", physical):
                             def native_activity(method, params, **kwargs):
                                 if method == "chat.history":
@@ -517,6 +562,33 @@ class HostBindingTest(unittest.IsolatedAsyncioTestCase):
                             gateway_call.side_effect = native_activity
                             with patch.object(adapter.gateway, "retain_session", new_callable=AsyncMock) as retain:
                                 retain.return_value = (object(), (key, "attached"))
+                                if scoped_id == physical:
+                                    start = {"event": "sessions.changed", "payload": {
+                                        "sessionKey": key, "phase": "message", "hasActiveRun": True,
+                                        "activeRunIds": [native_run]}}
+                                    await adapter.native_event({**start, "payload": {
+                                        **start["payload"], "sessionKey": "agent:main:recent"}})
+                                    self.assertFalse(adapter.start_probes)
+                                    await adapter.native_event({"event": "session.tool", "payload": {
+                                        "sessionKey": key, "runId": native_run, "stream": "tool", "seq": 0,
+                                        "data": {"toolCallId": "first-tool", "name": "exec", "phase": "start"}}})
+                                    probe = adapter.start_probes[key]
+                                    await adapter.native_event(start)
+                                    self.assertIs(probe, adapter.start_probes[key])
+                                    pushed = await owner_again.receive_json(timeout=3)
+                                    self.assertEqual(("run.updated", thread_id, "running"),
+                                        (pushed["type"], pushed["threadId"], pushed["run"]["status"]))
+                                    self.assertNotIn(native_run, json.dumps(pushed))
+                                    mirror = await observer_tab.receive_json(timeout=3)
+                                    self.assertEqual(pushed["run"], mirror["run"])
+                                    for tab in (owner_again, observer_tab):
+                                        first = await tab.receive_json(timeout=3)
+                                        self.assertEqual(("run.activity", pushed["run"]["runId"], "first-tool"),
+                                            (first["type"], first["runId"], first["block"]["toolCallId"]))
+                                    self.assertTrue((await rpc(observer_tab, "events.unsubscribe", threadId=thread_id))["ok"])
+                                    self.assertIn(key, adapter.thread_watches)
+                                    await observer_tab.close()
+                                    await probe
                                 detail = (await rpc(owner_again, "threads.get", threadId=thread_id))["result"]
                             active = detail["runActivity"]
                             if scoped_id != physical:
@@ -527,11 +599,11 @@ class HostBindingTest(unittest.IsolatedAsyncioTestCase):
                                 self.assertEqual(started_at, active["activeRuns"][0]["startedAt"])
                         external_id = active["activeRunId"]
                         self.assertTrue(external_id.startswith("run_"))
+                        self.assertEqual(external_id, pushed["run"]["runId"])
                         external = (await rpc(owner_again, "runs.get", runId=external_id))["result"]
                         self.assertEqual(("openclaw", "running", started_at, thread_id),
                             (external["source"], external["status"], external["createdAt"], external["threadId"]))
                         self.assertNotIn(native_run, json.dumps(external))
-                        self.assertTrue((await rpc(owner_again, "events.subscribe", threadId=thread_id))["ok"])
                         tool = {"event": "session.tool", "payload": {"sessionKey": key, "runId": native_run,
                             "stream": "tool", "seq": 1, "data": {"toolCallId": "external-tool", "name": "exec", "phase": "start"}}}
                         await adapter.native_event({**tool, "payload": {**tool["payload"], "sessionKey": "agent:main:recent"}})
@@ -556,6 +628,8 @@ class HostBindingTest(unittest.IsolatedAsyncioTestCase):
                             await asyncio.gather(*adapter.observer_releases)
                         finished = await owner_again.receive_json(timeout=3)
                         self.assertEqual((external_id, "cancelled"), (finished["run"]["runId"], finished["run"]["status"]))
+                        self.assertTrue((await rpc(owner_again, "events.unsubscribe", threadId=thread_id))["ok"])
+                        self.assertNotIn(key, adapter.thread_watches)
 
                     legacy, _ = await open_chat("main", "chat.session")
                     async with legacy:

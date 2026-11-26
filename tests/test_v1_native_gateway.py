@@ -94,6 +94,10 @@ class NativeGatewayTest(unittest.IsolatedAsyncioTestCase):
                 events.append(frame)
             gateway = Gateway(f"ws://127.0.0.1:{port}", config_path, root / "manager/device.key", event,
                 expected_version=os.environ.get("AGENT_MANAGE_TEST_OPENCLAW_VERSION", "2026.7.1-2"))
+            async def ignore_sender_event(frame):
+                pass
+            sender = Gateway(gateway.url, config_path, root / "manager/sender.key", ignore_sender_event,
+                             expected_version=gateway.expected_version)
             try:
                 for _ in range(300):
                     if process.returncode is not None:
@@ -141,7 +145,8 @@ class NativeGatewayTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(config_before, config_path.read_bytes())
                 png = self.fixture_png()
                 self.assertGreater(len(png), 256 * 1024)
-                sent = await gateway.call("chat.send", {"sessionKey": key, "message": "Say fixture reply", "deliver": False,
+                self.assertTrue((await gateway.call("sessions.subscribe", {}))["subscribed"])
+                sent = await sender.call("chat.send", {"sessionKey": key, "message": "Say fixture reply", "deliver": False,
                     "idempotencyKey": "fixture-v1-native-run", "attachments": [
                         {"type": "image", "mimeType": "image/png", "fileName": "fixture.png",
                          "content": base64.b64encode(png).decode()},
@@ -154,6 +159,21 @@ class NativeGatewayTest(unittest.IsolatedAsyncioTestCase):
                 active = await gateway.call("chat.history", {"sessionKey": key, "limit": 1, "maxChars": 1000})
                 self.assertEqual(key, active["sessionKey"])
                 self.assertIn(sent["runId"], active["sessionInfo"]["activeRunIds"])
+                def notices():
+                    return [frame["payload"] for frame in events
+                        if frame.get("event") in ("sessions.changed", "session.message")
+                        and frame["payload"].get("sessionKey") == key
+                        and (frame["payload"].get("phase") == "start" or frame["payload"].get("hasActiveRun") is True)]
+                for _ in range(20):
+                    if notices():
+                        break
+                    await asyncio.sleep(.05)
+                self.assertTrue(notices(), [(frame.get("event"), frame.get("payload", {}).get("phase"),
+                    frame.get("payload", {}).get("hasActiveRun")) for frame in events])
+                self.assertTrue(any(
+                    sent["runId"] in notice.get("activeRunIds", [])
+                    or sent["runId"] == notice.get("clientRunId", notice.get("runId"))
+                    for notice in notices()))
                 release_model.set()
                 for _ in range(300):
                     if any(frame.get("event") == "chat" and frame.get("payload", {}).get("state") in ("final", "error") for frame in events):
@@ -223,6 +243,7 @@ class NativeGatewayTest(unittest.IsolatedAsyncioTestCase):
             finally:
                 release_model.set()
                 await gateway.close()
+                await sender.close()
                 if process.returncode is None:
                     process.terminate()
                     try:

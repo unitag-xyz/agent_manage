@@ -59,6 +59,11 @@ class OpenClawAdapter(RuntimeAdapter):
         self.chat_streams = OrderedDict()
         self.native_writes = asyncio.Lock()
         self.run_observers = {}
+        self.thread_watches = {}
+        self.start_probes = {}
+        self.start_dirty = set()
+        self.pending_tools = {}
+        self.start_probe_slots = asyncio.Semaphore(4)
         self.restore_lock = asyncio.Lock()
         self.reconcile_tasks = set()
         self.reconcile_slots = asyncio.Semaphore(4)
@@ -937,6 +942,11 @@ class OpenClawAdapter(RuntimeAdapter):
         if method == "events.subscribe":
             if self.host_binding:
                 await self.restore_run_observers(thread)
+                if self.host_binding.instance_chat:
+                    try:
+                        await self.gateway.call("sessions.subscribe", {}, timeout=3)
+                    except APIError:
+                        pass  # Existing run streaming does not depend on this optional signal.
             return {"threadId": thread["id"], "replay": False, "resyncRequired": True}
         if method == "runs.create":
             current_segment = self.segment_id(thread["id"], entry.get("sessionId"))
@@ -993,7 +1003,10 @@ class OpenClawAdapter(RuntimeAdapter):
                 # Preserve our stable ID; native correlation remains explicit.
                 changes["nativeRunId"] = response["runId"]
                 self.store.object("run_binding", self.runtime_id, response["runId"], {"runId": identifier})
-            return self.store.transition_run(self.runtime_id, native_id, **changes)
+            current = self.store.transition_run(self.runtime_id, native_id, **changes)
+            if current["status"] == "running" and native_key in self.thread_watches:
+                await self.publish(self.runtime_id, thread["id"], {"type": "run.updated", "run": current})
+            return current
         native_params = {"key": self.native_key(thread)}
         if method == "threads.update":
             native_params["label"] = params["title"]
@@ -1005,6 +1018,105 @@ class OpenClawAdapter(RuntimeAdapter):
             native_params["deleteTranscript"] = True
         await self.gateway.call(NATIVE[method], native_params)
         return {"threadId": thread["id"], "applied": True}
+
+    def watch_thread(self, thread_id):
+        if not (self.host_binding and self.host_binding.instance_chat):
+            return lambda: None
+        thread = self.store.get(thread_id, kind="thread", runtime=self.runtime_id)
+        key = self.native_key(thread)
+        watch = self.thread_watches.get(key)
+        if watch is None:
+            if key not in self.start_probes and len(self.thread_watches.keys() | self.start_probes.keys()) >= 128:
+                raise APIError("BUSY", "Native thread watch limit reached", retryable=True)
+            watch = [thread_id, 0]
+            self.thread_watches[key] = watch
+        watch[1] += 1
+
+        def release():
+            watch[1] -= 1
+            if not watch[1]:
+                self.thread_watches.pop(key, None)
+                self.pending_tools.pop(key, None)
+                self.start_dirty.discard(key)
+                # An in-flight native retain belongs to the Run, not the last tab.
+                # Let it settle so the terminal event can release its observer.
+
+        return release
+
+    def observe_native_start(self, payload, *, activity=False):
+        key = payload.get("sessionKey")
+        if not isinstance(key, str) or not (
+            activity or payload.get("phase") == "start" or payload.get("hasActiveRun") is True
+        ):
+            return
+        if (watch := self.thread_watches.get(key)) is None:
+            return
+        if key in self.start_probes:
+            self.start_dirty.add(key)
+            return
+        native_run = payload.get("clientRunId") or payload.get("runId")
+
+        async def probe():
+            try:
+                async with self.start_probe_slots:
+                    if isinstance(native_run, str):
+                        route = await self.workers(self.event_route, {"sessionKey": key, "runId": native_run})
+                        if route and route[0] is not None:
+                            return  # The known Run already has a unified event path.
+                    for attempt in range(2):
+                        if self.thread_watches.get(key) is not watch:
+                            return
+                        try:
+                            thread, entry = await self.workers(self.thread, watch[0])
+                            if await self.discover_external_runs(thread, entry):
+                                return
+                        except APIError as exc:
+                            if exc.code != "NOT_FOUND":
+                                raise
+                        if not attempt:
+                            # OpenClaw may still be writing the new session index.
+                            await asyncio.sleep(.2)
+            except APIError:
+                return
+
+        async def drain():
+            nonlocal native_run, watch
+            while True:
+                batch = self.pending_tools.pop(key, [])
+                if batch:
+                    self.pending_tools[key] = []
+                await probe()
+                for frame in batch:
+                    if self.thread_watches.get(key) is not watch:
+                        break
+                    if frame is not None:
+                        await self.native_event(frame, replay=True)
+                if key not in self.start_dirty or key not in self.thread_watches:
+                    break
+                self.start_dirty.discard(key)
+                watch = self.thread_watches[key]
+                native_run = None
+
+        async def owned():
+            try:
+                await drain()
+            finally:
+                self.start_probes.pop(key, None)
+                self.pending_tools.pop(key, None)
+                self.start_dirty.discard(key)
+
+        task = asyncio.create_task(owned())
+        self.start_probes[key] = task
+        def forget(done):
+            if self.start_probes.get(key) is done:
+                self.start_probes.pop(key, None)
+            if not done.cancelled():
+                error = done.exception()
+                if error is not None:
+                    asyncio.get_running_loop().call_exception_handler({
+                        "message": "Native start observation failed", "exception": error,
+                    })
+        task.add_done_callback(forget)
 
     async def discover_external_runs(self, thread, entry):
         """Import only the live IDs returned for this exact Host thread and segment."""
@@ -1061,6 +1173,8 @@ class OpenClawAdapter(RuntimeAdapter):
                 data["createdAt"] = data["startedAt"] = started_at
             self.store.object("run", self.runtime_id, native, data)
             observed = external = True
+            if key in self.thread_watches:
+                await self.publish(self.runtime_id, thread["id"], {"type": "run.updated", "run": data})
         if external:
             try:
                 # Chat1 tool frames are published as session.tool to session event subscribers.
@@ -1167,17 +1281,21 @@ class OpenClawAdapter(RuntimeAdapter):
             return None
         return run, thread
 
-    async def native_event(self, frame):
+    async def native_event(self, frame, *, replay=False):
         event, payload = frame.get("event"), frame.get("payload") or {}
+        if not isinstance(payload, dict):
+            return
         if event == "manager.disconnected":
             self.run_observers.clear()
-            for task in self.reconcile_tasks:
+            for task in (*self.reconcile_tasks, *self.start_probes.values()):
                 task.cancel()
             self.store.lose_run_observation(self.runtime_id)
             await self.publish(self.runtime_id, None, {"type": "resync_required", "reason": "native_disconnected"})
             return
-        if event == "sessions.changed":
-            await self.publish(self.runtime_id, None, {"type": "sessions.changed"})
+        if event in ("sessions.changed", "session.message"):
+            self.observe_native_start(payload)
+            if event == "sessions.changed":
+                await self.publish(self.runtime_id, None, {"type": "sessions.changed"})
             return
         if event not in ("chat", "agent", "session.tool"):
             return
@@ -1192,6 +1310,31 @@ class OpenClawAdapter(RuntimeAdapter):
             return
         run, thread = route
         native_run = payload.get("runId")
+        data = payload.get("data")
+        if event == "session.tool" and not replay:
+            key = payload["sessionKey"]
+            if key in self.thread_watches and (run is None or key in self.pending_tools):
+                self.observe_native_start(payload, activity=True)
+                if key in self.start_probes and isinstance(data, dict) and isinstance(native_run, str) and len(native_run) <= 256:
+                    pending = self.pending_tools.setdefault(key, [])
+                    tool_id = data.get("toolCallId")
+                    if len(pending) < 16 and (tool_id is None or isinstance(tool_id, str) and len(tool_id) <= 256):
+                        clean = {k: data[k] for k in ("toolCallId", "name", "meta", "phase", "isError")
+                                 if isinstance(data.get(k), (bool, str))}
+                        clean = {k: v[:256] if isinstance(v, str) else v for k, v in clean.items()}
+                        pending.append({"event": event, "payload": {"sessionKey": key, "runId": native_run,
+                            "seq": payload.get("seq"), "stream": "tool", "data": clean}})
+                    elif len(pending) == 16:
+                        pending.append(None)
+                        await self.publish(self.runtime_id, thread["id"], {"type": "resync_required", "reason": "activity_budget"})
+                    return
+        if not replay and run is None and isinstance(native_run, str) and (
+            event == "chat" and payload.get("state") == "delta"
+            or event in ("agent", "session.tool") and payload.get("stream") in ("tool", "thinking")
+            or event == "agent" and payload.get("stream") == "lifecycle"
+            and isinstance(data, dict) and data.get("phase") == "start"
+        ):
+            self.observe_native_start(payload, activity=True)
         if event == "session.tool" and (not run or not self.is_observed_native_run(run["data"])):
             return
         if event in ("agent", "session.tool"):
@@ -1289,7 +1432,7 @@ class OpenClawAdapter(RuntimeAdapter):
         return await getattr(self, "media_workers", self.workers)(self.history, params, "media")
 
     async def close(self):
-        tasks = list(self.reconcile_tasks)
+        tasks = [*self.reconcile_tasks, *self.start_probes.values()]
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)

@@ -130,6 +130,11 @@ All calls include `runtimeId`. The following methods are enabled by the instance
 | `runs.create` attachments | Up to five inline `{type,mimeType,fileName,content}` objects. Host instance Chat allows 23 MiB of combined base64 (about 17.25 MiB of raw files) within a 24 MiB total request. OpenClaw limits each image to 6 MiB. No chunk upload; ordinary limits are unchanged. |
 | `resources.get` | Obtain `resourceId` from message history. History and resource metadata include purpose, filename, MIME and size when known. `offset` and `length` (up to 128 KiB) read a base64 chunk including total size and SHA-256. Check the hash remains constant across chunks. No public Host media URL is created. |
 
+An already subscribed Host instance Chat thread receives `run.updated` when a Manager
+send is accepted or a native OpenClaw start is verified. The event carries the existing
+opaque `threadId`, `run.runId` and `run.status`; it may arrive before the receiving
+client has a local turn. Native session keys and raw start payloads are not forwarded.
+
 `options` 使用 camelCase，映射到保留的请求模型。例如：
 
 ```json

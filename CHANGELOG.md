@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 1.0.009 - 2026-11-26
+
+- Notify subscribed Host Chat2 windows when a Run is accepted or observed. Preserve early tool events during discovery, recheck overlapping notifications, and finish native observer registration when a tab leaves.
+
 - Route offline CLI operations and service runtimes through one trusted engine registry without changing legacy OpenClaw command lines; optional container binding pins the CLI to an assigned engine and generation.
 - Separate shared Host Chat runtime setup by engine, retaining OpenClaw as the only registered engine and the default for existing profiles. Existing CLI and API calls are unchanged.
 

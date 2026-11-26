@@ -160,6 +160,7 @@ def create_app(service, platform_pool=None, platform_release=None):
         await ws.prepare(request)
         lease = None
         subscriptions = set()
+        thread_watches = {}
         queue = asyncio.Queue(maxsize=64)
         queued_bytes = 0
         generation = 0
@@ -199,6 +200,15 @@ def create_app(service, platform_pool=None, platform_release=None):
                 queue.get_nowait()
             queued_bytes = 0
 
+        def remove_subscription(scope):
+            subscriptions.discard(scope)
+            if release := thread_watches.pop(scope, None):
+                release()
+
+        def clear_subscriptions():
+            for scope in tuple(subscriptions):
+                remove_subscription(scope)
+
         def listen(event):
             nonlocal queued_bytes
             scope = (event["runtimeId"], event["threadId"])
@@ -210,7 +220,7 @@ def create_app(service, platform_pool=None, platform_release=None):
             size = len(canonical(event).encode())
             if queue.full() or queued_bytes + size > 1024 * 1024:
                 clear_queue()
-                subscriptions.clear()
+                clear_subscriptions()
                 event = {"type": "resync_required", "reason": "slow_consumer", "epoch": service.epoch}
                 size = len(canonical(event).encode())
             queue.put_nowait((generation, event, size))
@@ -234,6 +244,8 @@ def create_app(service, platform_pool=None, platform_release=None):
                         continue
                     service.authorize(current, "sessions.subscribe", {"runtimeId": event["runtimeId"]})
                 elif event.get("threadId"):
+                    if (event["runtimeId"], event["threadId"]) not in subscriptions:
+                        continue
                     service.authorize(current, "events.subscribe", {"runtimeId": event["runtimeId"], "threadId": event["threadId"]})
                 await send({**event, "authContext": current.public()}, item_generation, current)
 
@@ -243,15 +255,21 @@ def create_app(service, platform_pool=None, platform_release=None):
                 service.authorize(captured_lease, method, params)
                 scope = (params.get("runtimeId"), params.get("threadId"))
                 if method in ("events.subscribe", "sessions.subscribe"):
-                    if len(subscriptions) >= 32:
+                    if scope not in subscriptions and len(subscriptions) >= 32:
                         raise APIError("BUSY", "Subscription limit reached")
-                    result = await service.adapter(scope[0]).invoke(method, params)
+                    adapter = service.adapter(scope[0])
+                    result = await adapter.invoke(method, params)
                     service.authorize(captured_lease, method, params)
-                    if captured_generation == generation:
+                    if forwarding and captured_generation == generation and scope not in subscriptions:
+                        if len(subscriptions) >= 32:
+                            raise APIError("BUSY", "Subscription limit reached")
+                        watch = getattr(adapter, "watch_thread", None)
+                        if method == "events.subscribe" and watch is not None:
+                            thread_watches[scope] = watch(scope[1])
                         subscriptions.add(scope)
                     response = {"requestId": frame["requestId"], "ok": True, "result": result, "authContext": captured_lease.public()}
                 elif method in ("events.unsubscribe", "sessions.unsubscribe"):
-                    subscriptions.discard(scope)
+                    remove_subscription(scope)
                     response = {"requestId": frame["requestId"], "ok": True, "result": {"unsubscribed": True}, "authContext": captured_lease.public()}
                 else:
                     response = await service.dispatch(captured_lease, frame)
@@ -348,7 +366,7 @@ def create_app(service, platform_pool=None, platform_release=None):
                     lease = new_lease
                     generation += 1
                     clear_queue()
-                    subscriptions.clear()
+                    clear_subscriptions()
                     await send({"type": "auth.refreshed", "authContext": lease.public(), "leaseToken": lease.token,
                                 "resyncRequired": True})
                 elif frame.get("type") == "ping":
@@ -370,6 +388,7 @@ def create_app(service, platform_pool=None, platform_release=None):
                 await send({"type": "error", "error": error.payload()})
         finally:
             forwarding = False
+            clear_subscriptions()
             if platform and lease is not None and native_session is None:
                 service.auth.revoke(lease.context["leaseId"])
             service.listeners.discard(listen)
