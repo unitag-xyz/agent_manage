@@ -9,16 +9,18 @@ from collections import OrderedDict
 from pathlib import Path, PurePosixPath
 from urllib.parse import urlsplit
 
-from .... import __version__, models
+from .... import __version__
 from ....core.contracts import METHODS, FUTURE_METHODS
 from ....core.errors import APIError
 from ....core.store import canonical, now_ms
 from ..local import LocalRunner
 from ..execution import open_registered
+from ..local_management_api import invoke_local_management, register_secrets
+from ..version import history_reader, implementation
 from ....path_io import read_without_links
-from .segment_reader import SegmentReader, read_segment, safe_file
+from .segment_reader import safe_file
 from ....segment_timing import measured_read
-from ...base import HostIsolation, InlineAttachments, RuntimeAdapter
+from ...base import HostIsolation, InlineAttachments, ResolvedAgentBinding, RuntimeAdapter
 from .gateway import Gateway
 from .input_triggers import InputTriggers, event_evidence, evidence
 from .projection import message_dto
@@ -35,6 +37,8 @@ HOST_CHAT_METHODS = {"agents.list", "chat.sidebar", "threads.list", "threads.get
     "runs.create", "runs.get", "runs.lookup", "runs.cancel", "events.subscribe", "events.unsubscribe", "usage.status"}
 HOST_CORE_METHODS = {"system.info", "capabilities.get", "targets.list", "environments.list",
     "runtimes.list", "runtimes.get", "operations.get", "operations.list", "operations.lookup"}
+TRANSCRIPT_METHODS = frozenset({"messages.list", "messages.get", "resources.get", "sessions.usage.logs"})
+CODEX_METHODS = frozenset({"connections.get", "connections.login", "connections.logout"})
 SCOPED_NATIVE_READS = {"commands.list", "tasks.list", "tasks.get", "sessions.usage",
                        "sessions.usage.timeseries", "sessions.usage.logs", "usage.cost"}
 HOST_INSTANCE_ONLY = SCOPED_NATIVE_READS | {"chat.sidebar", "tasks.cancel", "sessions.subscribe", "sessions.unsubscribe",
@@ -52,6 +56,8 @@ class OpenClawAdapter(RuntimeAdapter):
     def __init__(self, registration, store, workers, publish, *, context, version, host_binding=None):
         self.registration, self.store, self.workers, self.publish = registration, store, workers, publish
         self.context, self.version = context, version
+        self.history_reader = history_reader(version)
+        self.codex_supported = implementation(version, "codex_auth") is not None
         self.runtime_id = context.runtime_id
         self.host_binding = host_binding
         config_path = context.config_path
@@ -81,20 +87,8 @@ class OpenClawAdapter(RuntimeAdapter):
         if self.host_binding:
             raise APIError("UNSUPPORTED", "Host-bound Chat does not execute local management commands")
         manager = open_registered(self.context, self.template_root, self.registration)
-        self.redact(manager, self.config())
+        register_secrets(manager, self.config())
         return manager
-
-    @staticmethod
-    def redact(manager, value):
-        if isinstance(value, dict):
-            for key, child in value.items():
-                if re.search(r"key|token|secret|password", key, re.I) and isinstance(child, str):
-                    manager.register_secret(child)
-                else:
-                    OpenClawAdapter.redact(manager, child)
-        elif isinstance(value, list):
-            for child in value:
-                OpenClawAdapter.redact(manager, child)
 
     def config(self):
         config = self.host_binding.read_config() if self.host_binding else json.loads(self.context.config_path.read_text())
@@ -115,7 +109,9 @@ class OpenClawAdapter(RuntimeAdapter):
             support = "adapted" if method in METHODS else "unsupported"
             if ((self.host_binding and (method not in HOST_CHAT_METHODS | HOST_CORE_METHODS
                                         or method in HOST_INSTANCE_ONLY and not self.host_binding.instance_chat))
-                    or (method == "chat.sidebar" and not self.host_binding)):
+                    or (method == "chat.sidebar" and not self.host_binding)
+                    or (method in TRANSCRIPT_METHODS and self.history_reader is None)
+                    or (method in CODEX_METHODS and not self.codex_supported)):
                 support = "unsupported"
             readiness = "ready" if support == "adapted" else "unavailable"
             if method in NATIVE_CAPABILITIES and support == "adapted":
@@ -200,13 +196,13 @@ class OpenClawAdapter(RuntimeAdapter):
                 return agent["agentId"]
         raise APIError("NOT_FOUND", "Default Agent is not installed in this runtime")
 
-    def resolve_agent(self, identify):
+    def resolve_agent_binding(self, identify) -> ResolvedAgentBinding:
         if not self.host_binding:
             raise APIError("UNSUPPORTED", "Runtime has no trusted business Agent bindings")
         for agent in self.agents():
             row = self.store.get(agent["agentId"], kind="agent", runtime=self.runtime_id)
             if row["data"].get("agentIdentify") == identify:
-                return row["id"]
+                return ResolvedAgentBinding(row["id"], row["data"]["installationId"])
         raise APIError("NOT_FOUND", "Installed Agent is not registered in this runtime")
 
     @staticmethod
@@ -420,6 +416,7 @@ class OpenClawAdapter(RuntimeAdapter):
         return data.get("source") == "openclaw"
 
     def resolve_scope(self, method, params):
+        self.require_version_method(method)
         if "agentId" in params:
             self.store.get(params["agentId"], kind="agent", runtime=self.runtime_id)
             if self.host_binding and params["agentId"] not in {item["agentId"] for item in self.agents(persist=False)}:
@@ -436,6 +433,7 @@ class OpenClawAdapter(RuntimeAdapter):
 
     @measured_read
     def history(self, params, action="history"):
+        reader = self.require_history_reader()
         thread, _ = self.thread(params["threadId"])
         segment = self.store.get(params["segmentId"], kind="segment", runtime=self.runtime_id)
         if segment["data"]["threadId"] != params["threadId"]:
@@ -454,8 +452,19 @@ class OpenClawAdapter(RuntimeAdapter):
         if "cursor" not in payload and "ref" not in payload:
             payload.setdefault("view", "compact")
         with self.context.activate():
-            result = read_segment(payload, LocalRunner()._command_env(), manager_read=True)
+            result = reader.read_segment(payload, LocalRunner()._command_env(), manager_read=True)
         return result
+
+    def require_history_reader(self):
+        if self.history_reader is None:
+            raise APIError("UNSUPPORTED_VERSION", "No compatible transcript reader for this OpenClaw version")
+        return self.history_reader
+
+    def require_version_method(self, method):
+        if method in TRANSCRIPT_METHODS:
+            self.require_history_reader()
+        if method in CODEX_METHODS and not self.codex_supported:
+            raise APIError("UNSUPPORTED_VERSION", "No compatible Codex SDK for this OpenClaw version")
 
     def project(self, message, params, projection, revision, mappings):
         def register(reference):
@@ -618,6 +627,7 @@ class OpenClawAdapter(RuntimeAdapter):
                 and type(value) in (str, int)}
 
     async def invoke(self, method, params):
+        self.require_version_method(method)
         if self.host_binding:
             if (method not in HOST_CHAT_METHODS
                     or not self.host_binding.instance_chat and (method in HOST_INSTANCE_ONLY
@@ -725,7 +735,8 @@ class OpenClawAdapter(RuntimeAdapter):
     def manage(self, method, params):
         manager = self.manager()
         try:
-            result = self._manage(manager, method, params)
+            result = invoke_local_management(manager, method, params, context=self.context,
+                agent_name=lambda identifier: self.store.get(identifier, kind="agent", runtime=self.runtime_id)["native"])
             return {**result, "restartRequired": manager.restart_required,
                     "activationRequired": bool(result.get("activationRequired", False))}
         except APIError:
@@ -739,56 +750,6 @@ class OpenClawAdapter(RuntimeAdapter):
             safe.update(legacyCode=legacy["code"], restartRequired=manager.restart_required,
                         partialEffects=not isinstance(exc, (ValueError, TypeError, FileNotFoundError)) and details.get("rollback_ok") is not True)
             raise APIError("NATIVE_ERROR", "Management operation failed; inspect its rollback and protected host diagnostics", details=safe) from exc
-
-    def _manage(self, manager, method, params):
-        options = params.get("options", {})
-        # CamelCase belongs to v1; snake_case stays private to retained dataclasses.
-        options = {re.sub(r"(?<!^)(?=[A-Z])", "_", key).lower(): value for key, value in options.items()}
-        for field in ("workspace_root", "template_dir", "agent_zip", "skill_dir", "skill_zip"):
-            value = options.get(field)
-            if isinstance(value, str):
-                if value == "~" or value.startswith("~/"):
-                    value = str(self.context.home) + value[1:]
-                    options[field] = value
-                if not Path(value).is_absolute():
-                    raise APIError("INVALID_ARGUMENT", f"{field} must be an absolute path in the selected environment")
-        self.redact(manager, options)
-        if method == "agents.create":
-            options.setdefault("workspace_root", str(self.context.state_dir / "data"))
-            return manager.operation("add_agent")(**options)
-        if method == "dola.runtime.configure":
-            return manager.operation("configure_instance")(models.CreateInstanceRequest(**options))
-        if method in ("agents.refresh", "dola.agents.refresh", "agents.install"):
-            name = self.store.get(params["agentId"], kind="agent", runtime=self.runtime_id)["native"]
-            if method == "agents.refresh":
-                if options.get("models_only") or options.get("template_only") is False:
-                    raise APIError("INVALID_ARGUMENT", "Model catalog refresh belongs to dola.agents.refresh")
-                options["template_only"] = True
-            if method == "agents.install":
-                return manager.operation("install_agent_service")(name)
-            return manager.operation("refresh_agent")(models.RefreshAgentRequest(agent_name=name, **options))
-        if method == "skills.install":
-            return manager.operation("add_skill")(models.AddSkillRequest(**options))
-        simple = {"models.list": "get_supported_models", "models.get": "get_current_model", "dola.models.refresh": "update_model_catalog",
-                  "connections.get": "codex_status", "connections.login": "codex_login", "connections.logout": "codex_logout",
-                  "services.start": "start_agent_services"}
-        if method in simple:
-            return manager.operation(simple[method])()
-        if method == "models.select":
-            return manager.operation("set_model")(models.SetModelRequest(params["modelId"]))
-        channels = {"telegram": ("tg", models.AddTelegramBotRequest, models.DeleteTelegramBotRequest),
-                    "feishu": ("feishu", models.AddFeishuBotRequest, models.DeleteFeishuBotRequest),
-                    "weixin": ("weixin", models.AddWeixinBotRequest, models.DeleteWeixinBotRequest)}
-        if method == "channels.list":
-            return {"items": [{"channel": name, "status": manager.operation(f"get_{entry[0]}_bot_status")()}
-                               for name, entry in channels.items() if not params.get("channel") or name == params["channel"]]}
-        if method in ("channels.configure", "channels.remove"):
-            if params["channel"] not in channels:
-                raise APIError("INVALID_ARGUMENT", "Unknown channel")
-            name, add, remove = channels[params["channel"]]
-            return manager.operation(f"add_{name}_bot" if method.endswith("configure") else f"delete_{name}_bot")(
-                (add if method.endswith("configure") else remove)(**options))
-        raise APIError("UNSUPPORTED", "Method is not implemented by this adapter")
 
     @staticmethod
     def model_reference(model_info):
@@ -1440,6 +1401,7 @@ class OpenClawAdapter(RuntimeAdapter):
                 await self.publish(self.runtime_id, thread["id"], {"type": "run.updated", "run": current_run})
 
     async def resource_chunk(self, identifier, cursor=None, *, offset=None, length=None, host_ws=False):
+        self.require_history_reader()
         if self.host_binding and not host_ws:
             raise APIError("UNSUPPORTED", "Host-bound media is available only through the Chat resource RPC")
         row = self.store.get(identifier, kind="resource", runtime=self.runtime_id)

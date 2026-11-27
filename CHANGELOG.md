@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Use the workload's actual executable search path and working directory when checking the Host hot-reload package.
+- Honor transcript and Codex SDK compatibility separately in supported OpenClaw runtimes.
+- Decouple trusted Agent resolution from adapter storage and separate OpenClaw local management mapping and Dola template metadata lookup from native protocol handling.
 - Isolate OpenClaw management, container and version-specific SDK, history and Gateway code behind the engine boundary while preserving legacy CLI and image entry points.
 - Share explicit version compatibility rules without retrying native operations through a different version family.
 - Reject static runtime registrations that would reuse a different engine's durable IDs and operation receipts.

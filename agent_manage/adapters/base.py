@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Callable, Protocol, runtime_checkable
 
 from ..core.contracts import FUTURE_METHODS, METHODS
 from ..core.errors import APIError
@@ -12,6 +12,7 @@ from ..core.runtime import RuntimeContext
 
 if TYPE_CHECKING:
     from ..core.service import Workers
+    from ..platform_exchange import PlatformChatGrant
 
 
 @runtime_checkable
@@ -37,17 +38,28 @@ class InlineAttachments:
     image_limit_message: str
 
 
+@dataclass(frozen=True)
+class ResolvedAgentBinding:
+    agent_id: str
+    installation_id: str
+
+
 class HostBoundRuntime(Protocol):
     @property
     def host_isolation(self) -> HostIsolation | None: ...
     @property
     def instance_chat(self) -> bool: ...
-    def resolve_agent(self, identify: str) -> str: ...
+    def resolve_agent_binding(self, identify: str) -> ResolvedAgentBinding: ...
     def resolve_installed_agents(self, targets: dict[str, str]) -> dict[str, str]: ...
 
 
 class InlineAttachmentRuntime(Protocol):
     inline_attachments: InlineAttachments
+
+
+@runtime_checkable
+class ThreadWatchRuntime(Protocol):
+    def watch_thread(self, thread_id: str) -> Callable[[], None]: ...
 
 
 class RuntimeAdapter(Protocol):
@@ -68,6 +80,27 @@ class RuntimeAdapter(Protocol):
         offset: int | None = None, length: int | None = None,
     ) -> dict: ...
     async def close(self) -> None: ...
+
+
+class PlatformHost(Protocol):
+    profile_fields: set[str]
+    shared_profile_fields: set[str]
+
+    def __init__(self, profile: dict, mount: Path, relay_root: Path | None): ...
+    @staticmethod
+    def shared_profile(profile: dict, relay_root: Path) -> dict: ...
+    @property
+    def has_private_relay(self) -> bool: ...
+    def registration(self, grant: PlatformChatGrant | None = None) -> dict: ...
+    def prepare(self, adapter: RuntimeAdapter, *, idle: bool) -> None: ...
+    async def verify_readiness(self) -> None: ...
+    async def probe_shared_relay(self) -> None: ...
+    async def verify_grant(self, grant: PlatformChatGrant) -> None: ...
+    async def resolve_grant_agent(self, adapter: RuntimeAdapter, workers: Workers, grant: PlatformChatGrant) -> str: ...
+    async def connect(self, adapter: RuntimeAdapter) -> None: ...
+    def resume(self, adapter: RuntimeAdapter) -> None: ...
+    def pause(self, adapter: RuntimeAdapter) -> None: ...
+    async def disconnect(self, adapter: RuntimeAdapter) -> None: ...
 
 
 class UnsupportedRuntimeAdapter(RuntimeAdapter):

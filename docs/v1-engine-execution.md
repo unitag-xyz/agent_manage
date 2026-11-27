@@ -83,5 +83,20 @@ OpenClaw's `execution.py` delegates offline management to the engine's applicati
 modules. Its `v2026_7/` contains the native Gateway, transcript reader, Codex SDK
 bridge, and July 1 Host reload policy. July compatibility alone never opts a
 package into reload; the existing release location and source fingerprints must
-also match. The old seed, container runtime and detached worker module entry
+also match the executable selected by the actual command environment.
+
+The CLI selects its transcript reader using the `history` rule. The unified
+service requires a matching `runtime` implementation; its transcript reads and
+Codex SDK operations also require `history` and `codex_auth`, respectively.
+
+The private Host driver implements `PlatformHost`. Agent resolution returns
+`ResolvedAgentBinding` from the adapter without exposing its storage layout.
+Thread watches are optional: adapters that need per-thread native observation
+implement `ThreadWatchRuntime` and return a release callback for each watch.
+OpenClaw's version-independent unified management mapping lives in
+`local_management_api.py`. The shared Dola template catalog client only fetches
+metadata; choosing the trusted platform origin and installing releases remain
+engine responsibilities.
+
+The old seed, container runtime and detached worker module entry
 points remain compatibility wrappers for existing images and launchers.

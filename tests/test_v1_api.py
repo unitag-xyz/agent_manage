@@ -77,6 +77,30 @@ class StoreTest(unittest.TestCase):
 
 @unittest.skipUnless(SERVER_AVAILABLE, "Install the server extra to test adapter selection")
 class AdapterSelectionTest(unittest.IsolatedAsyncioTestCase):
+    async def test_runtime_protocol_match_does_not_grant_transcript_or_codex_compatibility(self):
+        from agent_manage.adapters.openclaw import version
+        from agent_manage.adapters.versions import VersionFamily
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            rule = VersionFamily("v2026_7", lambda v: v == "2026.8.1", frozenset({"runtime"}))
+            with (patch.object(version, "FAMILIES", (*version.FAMILIES, rule)),
+                  patch("agent_manage.adapters.openclaw.factory.detect_version", return_value="2026.8.1")):
+                service = build_service({"stateDirectory": str(root / "manager"), "runtimes": [{
+                    "id": "one", "environmentId": "one", "configPath": str(root / "unread-config"),
+                }]})
+                try:
+                    adapter = service.adapter("one")
+                    self.assertTrue(adapter.supported)
+                    for method in ("messages.list", "resources.get", "sessions.usage.logs", "connections.login"):
+                        with self.subTest(method=method):
+                            self.assertEqual(adapter.capabilities()["methods"][method]["support"], "unsupported")
+                            with self.assertRaises(APIError) as denied:
+                                await adapter.invoke(method, {})
+                            self.assertEqual(denied.exception.code, "UNSUPPORTED_VERSION")
+                finally:
+                    await service.close()
+
     async def test_openclaw_uses_the_installed_version_of_each_runtime(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()

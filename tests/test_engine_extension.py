@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 from aiohttp import ClientSession, UnixConnector, web
 
-from agent_manage.adapters.base import HostIsolation
+from agent_manage.adapters.base import HostIsolation, ResolvedAgentBinding
 from agent_manage.adapters.registry import ENGINES, EngineDriver
 from agent_manage.adapters.versions import VersionFamily, select_family
 from agent_manage.core.errors import APIError
@@ -43,6 +43,19 @@ class FixtureExecution:
                                       executable="fixture", home=root)
         self.instance_chat = "bindingId" in registration
         self.host_isolation = (HostIsolation(registration["bindingId"], (root,)) if self.instance_chat else None)
+        self.watches = set()
+
+    def capabilities(self):
+        return {"adapter": "fixture", "methods": {"threads.list": {"support": "adapted"}}}
+
+    def resolve_agent_binding(self, identify):
+        if identify != "purchase":
+            raise APIError("NOT_FOUND", "Fixture installation not found")
+        return ResolvedAgentBinding("fixture-agent", "fixture-installation")
+
+    def watch_thread(self, thread_id):
+        self.watches.add(thread_id)
+        return lambda: self.watches.remove(thread_id)
 
     def operation(self, name):
         capability = {"get_current_model": "read", "list_threads": "read", "set_model": "write"}[name]
@@ -58,9 +71,15 @@ class FixtureExecution:
         return execute
 
     def resolve_scope(self, method, params):
+        if method == "events.subscribe":
+            if params["threadId"] != "fixture-thread":
+                raise APIError("NOT_FOUND", "Fixture thread not found")
+            return "fixture-agent"
         return params.get("agentId")
 
     async def invoke(self, method, params):
+        if method == "events.subscribe":
+            return {"subscribed": True}
         operation = {"models.get": "get_current_model", "threads.list": "list_threads", "models.select": "set_model"}[method]
         return self.operation(operation)()
 
@@ -70,6 +89,7 @@ class FixtureExecution:
 
 class FixtureHost:
     profile_fields = shared_profile_fields = {"nativeVersion"}
+    has_private_relay = True
 
     @staticmethod
     def shared_profile(profile, relay_root):
@@ -78,7 +98,7 @@ class FixtureHost:
     def __init__(self, profile, mount, relay_root):
         self.profile, self.mount = profile, mount
 
-    def registration(self, grant):
+    def registration(self, grant=None):
         return {"id": self.profile["instanceIdentify"], "bindingId": self.profile["bindingId"],
                 "nativeVersion": self.profile["nativeVersion"], "configPath": str(self.mount / "config")}
 
@@ -95,7 +115,10 @@ class FixtureHost:
         pass
 
     async def probe_shared_relay(self):
-        pass
+        await self.verify_readiness()
+
+    async def verify_readiness(self):
+        assert self.mount == Path(self.profile["mountRoot"])
 
     def resume(self, adapter):
         pass
@@ -120,9 +143,12 @@ class EngineExtensionTests(unittest.IsolatedAsyncioTestCase):
                 "instanceIdentify": "host", "bindingId": generation, "mountRoot": str(root / "host"),
                 "engine": "fixture", "nativeVersion": "2",
             }))
+            generation_fields = {"bindingId": generation, "nativeVersion": "2", "engine": "fixture"}
             registrations = [{"id": f"fixture{version}", "engine": "fixture", "nativeVersion": version,
                               "configPath": str(root / f"version{version}" / "config")}
                              for version in ("1", "2", "unknown")]
+            registrations.append({"id": "static-host", "configPath": str(root / "static-host/config"),
+                                  **generation_fields})
             driver = EngineDriver(lambda _: FixtureExecution(registrations[1], calls),
                                   lambda registration, *_: FixtureExecution(registration, calls), FixtureHost)
             with patch.dict(ENGINES, fixture=driver), patch.dict(os.environ, {"UNITAG_AGENT_MANAGER_ENGINE": "fixture"}):
@@ -139,8 +165,13 @@ class EngineExtensionTests(unittest.IsolatedAsyncioTestCase):
                     socket_path = str(root / "manager.sock")
                     await web.UnixSite(runner, socket_path).start()
                     async with ClientSession(connector=UnixConnector(path=socket_path)) as client:
+                        async with client.post("http://manager/v1/agents/resolve",
+                                               json={"runtimeId": "static-host", "agentIdentify": "purchase"}) as response:
+                            self.assertEqual(await response.json(), {"ok": True, "result": {
+                                "runtimeId": "static-host", "agentIdentify": "purchase", "agentId": "fixture-agent",
+                                "bindingId": generation, "installationId": "fixture-installation"}})
                         ticket = service.auth.issue_ticket(issuer="test", subject="user", runtime_ids=["*"],
-                                                           actions=["models.get", "models.select", "operations.get"])
+                            actions=["models.get", "models.select", "operations.get", "capabilities.get"])
 
                         def rpc(method, runtime, **params):
                             return {"type": "request", "requestId": method, "method": method,
@@ -159,6 +190,8 @@ class EngineExtensionTests(unittest.IsolatedAsyncioTestCase):
                             self.assertEqual((await http(rpc("models.get", "fixture1")))["result"],
                                              {"version": "1", "implementation": "v1"})
                             self.assertEqual((await http(rpc("models.get", "fixture2")))["result"], local["result"])
+                            caps = (await http(rpc("capabilities.get", "fixture2")))["result"]
+                            self.assertEqual(caps["adapter"], "fixture")
                             await ws.send_json(rpc("models.get", "fixture2"))
                             self.assertEqual((await ws.receive_json(timeout=5))["result"], local["result"])
                             denied = await http(rpc("models.get", "fixtureunknown"))
@@ -188,6 +221,18 @@ class EngineExtensionTests(unittest.IsolatedAsyncioTestCase):
                             self.assertEqual(hello["type"], "hello", hello)
                             await ws.send_json(rpc("threads.list", "host", agentId="fixture-agent"))
                             self.assertEqual((await ws.receive_json(timeout=5))["result"], local["result"])
+                            await ws.send_json(rpc("events.subscribe", "host", threadId="fixture-thread"))
+                            self.assertTrue((await ws.receive_json(timeout=5))["result"]["subscribed"])
+                            hosted = await pool.select("host", generation).runtime_service()
+                            adapter = hosted.adapter("host")
+                            self.assertEqual(adapter.watches, {"fixture-thread"})
+                            await hosted.publish("host", "fixture-thread", {"type": "run.updated"})
+                            event = await ws.receive_json(timeout=5)
+                            self.assertEqual((event["type"], event["threadId"]), ("run.updated", "fixture-thread"))
+                        async def wait_for_release():
+                            while adapter.watches:
+                                await asyncio.sleep(.01)
+                        await asyncio.wait_for(wait_for_release(), 5)
                     self.assertFalse((root / "host/.openclaw").exists())
                 finally:
                     await runner.cleanup()

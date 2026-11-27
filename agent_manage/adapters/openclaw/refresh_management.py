@@ -15,10 +15,8 @@ import zipfile
 from contextlib import contextmanager, ExitStack
 from copy import deepcopy
 from datetime import datetime, timezone
-from http.client import HTTPException
 from pathlib import Path
-from urllib.parse import quote, urlsplit
-from urllib.request import Request, urlopen
+from urllib.parse import urlsplit
 
 from ...settings import DEFAULT_MODEL_ENV, MODEL_GATEWAY_CONFIGS
 
@@ -27,6 +25,7 @@ from ...skill_permissions import prepare_shared_skill_path
 from ...models import RefreshAgentRequest
 from ...file_io import atomic_write_bytes as _atomic_bytes, fingerprint, write_private_json as _private_json
 from ...template_download import download_template_archive, replace_template_archive, validate_template_url
+from ...template_catalog import fetch_template_release
 from ...template_safety import validate_safe_name, validate_template_archive
 
 
@@ -75,18 +74,7 @@ class RefreshManagementMixin:
             if host in origins:
                 origin = origins[host]
                 break
-        endpoint = f"{origin}/vpsmanagement/api/frontend/Template/{quote(name, safe='')}"
-        try:
-            with urlopen(Request(endpoint, headers={"Accept": "application/json"}), timeout=15) as response:
-                metadata = json.load(response)
-        except (OSError, HTTPException, ValueError):
-            return None
-        release = metadata.get("content") if isinstance(metadata, dict) else None
-        if (not isinstance(release, dict) or metadata.get("typeCode") != 1
-                or release.get("identify") != name or not isinstance(release.get("version"), str)
-                or not release["version"].strip()):
-            return None
-        return release
+        return fetch_template_release(origin, name)
 
     def _cached_template_version(self, path: Path) -> str | None:
         if path.is_symlink() or not path.is_file():

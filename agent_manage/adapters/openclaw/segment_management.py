@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import re
 
-from .version import implementation, load_implementation, package_directory, package_version
+from .version import history_reader, package_directory, package_version
 from ...segment_timing import CURRENT, measured_read
 
 
@@ -48,14 +48,14 @@ class SegmentManagementMixin:
                 raise ValueError(f"Invalid {key}")
         with CURRENT.get().span("environmentAndVersionMs"):
             env = self.runner._command_env()
-            package = package_directory(self.bin, path=env.get("PATH"))
+            package = package_directory(self.bin, path=env.get("PATH"), cwd=self.runner.project_dir)
             if package is None:
                 raise FileNotFoundError("OpenClaw is required for segment history")
-            family = implementation(package_version(package), "history")
-            if family is None:
+            reader = history_reader(package_version(package))
+            if reader is None:
                 raise ValueError("Segment history currently supports server OpenClaw 2026.7.x only")
         with CURRENT.get().span("configReadMs"):
             config = self._load_config()
         payload = {"action": action, "sessionKey": session_key, "sessionId": session_id,
                    "config": config, "root": str(self.config_path.parent), **params}
-        return load_implementation(family, "segment_reader").read_segment(payload, env)
+        return reader.read_segment(payload, env)

@@ -17,6 +17,7 @@ from . import __version__
 from .core.errors import APIError
 from .core.service import MAX_ATTACHMENT_REQUEST, Service
 from .core.store import canonical
+from .adapters.base import ThreadWatchRuntime
 from .adapters.registry import create_runtime_adapter
 
 MAX_REQUEST = 1024 * 1024
@@ -90,16 +91,15 @@ def create_app(service, platform_pool=None, platform_release=None):
                     not isinstance(body[key], str) or not body[key] for key in body):
                 raise APIError("INVALID_ARGUMENT", "runtimeId and agentIdentify are required")
             adapter = service.adapter(body["runtimeId"])
-            resolver = getattr(adapter, "resolve_agent", None)
+            resolver = getattr(adapter, "resolve_agent_binding", None)
             isolation = getattr(adapter, "host_isolation", None)
             if resolver is None or isolation is None:
                 raise APIError("UNSUPPORTED", "Runtime does not expose trusted Agent bindings")
-            identifier = await service.read_workers(resolver, body["agentIdentify"])
-            row = service.store.get(identifier, kind="agent", runtime=adapter.runtime_id)
+            binding = await service.read_workers(resolver, body["agentIdentify"])
             return web.json_response({"ok": True, "result": {"runtimeId": adapter.runtime_id,
-                "agentIdentify": body["agentIdentify"], "agentId": identifier,
+                "agentIdentify": body["agentIdentify"], "agentId": binding.agent_id,
                 "bindingId": isolation.binding_id,
-                "installationId": row["data"]["installationId"]}})
+                "installationId": binding.installation_id}})
 
     async def redeem(request):
         body = await request.json()
@@ -264,9 +264,8 @@ def create_app(service, platform_pool=None, platform_release=None):
                     if forwarding and captured_generation == generation and scope not in subscriptions:
                         if len(subscriptions) >= 32:
                             raise APIError("BUSY", "Subscription limit reached")
-                        watch = getattr(adapter, "watch_thread", None)
-                        if method == "events.subscribe" and watch is not None:
-                            thread_watches[scope] = watch(scope[1])
+                        if method == "events.subscribe" and isinstance(adapter, ThreadWatchRuntime):
+                            thread_watches[scope] = adapter.watch_thread(scope[1])
                         subscriptions.add(scope)
                     response = {"requestId": frame["requestId"], "ok": True, "result": result, "authContext": captured_lease.public()}
                 elif method in ("events.unsubscribe", "sessions.unsubscribe"):

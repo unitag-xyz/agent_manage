@@ -492,7 +492,7 @@ class CodexManagementTest(unittest.TestCase):
         models = {"models": [{"id": "gpt-6.2-sol", "input": ["text"]}]}
         for config_changes in (True, False):
             with self.subTest(config_changes=config_changes), \
-                 patch("agent_manage.adapters.openclaw.refresh_management.urlopen", return_value=io.BytesIO(json.dumps(release).encode())) as lookup, \
+                 patch("agent_manage.template_catalog.urlopen", return_value=io.BytesIO(json.dumps(release).encode())) as lookup, \
                  patch.object(self.manager, "_codex_bridge", return_value=models):
                 result = self.manager.refresh_agent(RefreshAgentRequest("demo"))
                 self.assertEqual(lookup.call_args.args[0].full_url,
@@ -518,7 +518,7 @@ class CodexManagementTest(unittest.TestCase):
         self.login()
         config = json.loads(self.path.read_text())
         release = {"typeCode": 1, "content": {"identify": "demo", "version": "0.1.3"}}
-        with patch("agent_manage.adapters.openclaw.refresh_management.urlopen", return_value=io.BytesIO(json.dumps(release).encode())) as lookup:
+        with patch("agent_manage.template_catalog.urlopen", return_value=io.BytesIO(json.dumps(release).encode())) as lookup:
             self.assertEqual(self.manager._latest_template_release("demo", config), release["content"])
         self.assertEqual(lookup.call_args.args[0].host, "api.dolaio.cn")
 

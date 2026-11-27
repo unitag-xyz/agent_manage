@@ -159,7 +159,7 @@ class RefreshManagementTest(unittest.TestCase):
     def test_default_refresh_uses_local_template_when_release_lookup_is_unavailable(self):
         self.manager.template_root.mkdir()
         shutil.copytree(self.source, self.manager.template_root / "demo")
-        with patch("agent_manage.adapters.openclaw.refresh_management.urlopen", side_effect=TimeoutError("unavailable")):
+        with patch("agent_manage.template_catalog.urlopen", side_effect=TimeoutError("unavailable")):
             result = self.manager.refresh_agent(RefreshAgentRequest("demo"))
             self.assertEqual(result["template"]["version_after"], "1.0.0")
             self.assertEqual(result["template"]["release_lookup"], "unavailable")

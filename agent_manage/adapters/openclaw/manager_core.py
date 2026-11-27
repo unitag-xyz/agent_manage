@@ -229,7 +229,7 @@ class ManagerCore:
         return token.strip() if isinstance(token, str) and token.strip() else None
 
     def _host_reload_available(self) -> bool:
-        return standard_host_reload_available(self.bin, container_runtime=self.container_runtime)
+        return standard_host_reload_available(self.bin, container_runtime=self.container_runtime, runner=self.runner)
 
     def _instance_restart_required(self, snapshot, *, legacy_required: bool = True) -> bool:
         if self.restart_required:

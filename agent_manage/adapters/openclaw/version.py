@@ -1,6 +1,7 @@
 """OpenClaw installation identity and compatibility by capability."""
 
 import json
+import os
 import re
 import shutil
 from pathlib import Path
@@ -26,7 +27,18 @@ def load_implementation(family: str, module: str):
     return import_module(f".{family}.{module}", __package__)
 
 
-def package_directory(executable: str, *, path: str | None = None) -> Path | None:
+def history_reader(version: str):
+    family = implementation(version, "history")
+    return load_implementation(family, "segment_reader") if family else None
+
+
+def package_directory(executable: str, *, path: str | None = None, cwd: Path | None = None) -> Path | None:
+    if cwd is not None:
+        if os.path.dirname(executable):
+            executable = str(cwd / executable)
+        else:
+            search = path if path is not None else os.environ.get("PATH", os.defpath)
+            path = os.pathsep.join(str(cwd / entry) for entry in search.split(os.pathsep))
     binary = shutil.which(executable, path=path)
     return Path(binary).resolve().parent if binary else None
 

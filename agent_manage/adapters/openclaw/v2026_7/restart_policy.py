@@ -9,10 +9,10 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import shutil
 from pathlib import Path
 
-from ..version import implementation
+from ..local import LocalRunner
+from ..version import implementation, package_directory, package_version
 
 HOST_INSTALL_ROOT = Path("/opt/unitag-agent-manager")
 RELOAD_SOURCE_HASHES = {
@@ -23,18 +23,16 @@ RELOAD_SOURCE_HASHES = {
 _MISSING = object()
 
 
-def standard_host_reload_available(binary: str, *, container_runtime: bool) -> bool:
+def standard_host_reload_available(binary: str, *, container_runtime: bool, runner: LocalRunner | None = None) -> bool:
     if not container_runtime or os.environ.get("UNITAG_AGENT_MANAGER_ACTIVATION_MODE"):
         return False
     # Host uses a separate release mount. Fly's /opt/unitag/agent-manager must not opt in.
     if not Path(__file__).resolve().is_relative_to(HOST_INSTALL_ROOT):
         return False
     try:
-        executable = shutil.which(binary)
-        if executable is None:
-            return False
-        package = Path(executable).resolve().parent
-        if implementation(str(json.loads((package / "package.json").read_text())["version"]), "host_reload") != "v2026_7":
+        runner = runner if runner is not None else LocalRunner(binary)
+        package = package_directory(binary, path=runner._command_env().get("PATH"), cwd=runner.project_dir)
+        if package is None or implementation(package_version(package), "host_reload") != "v2026_7":
             return False
         return all(hashlib.sha256((package / "dist" / name).read_bytes()).hexdigest() == digest
                    for name, digest in RELOAD_SOURCE_HASHES.items())

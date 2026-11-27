@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from typing import Callable
 
+from .base import PlatformHost
 from .execution import LocalExecution, LocalOptions
 from .openclaw.factory import create_adapter as create_openclaw_adapter, create_local as open_local, validate_cli
 from .openclaw.platform_host import OpenClawPlatformHost
@@ -12,7 +13,7 @@ from .openclaw.platform_host import OpenClawPlatformHost
 class EngineDriver:
     open_local: Callable[[LocalOptions], LocalExecution] | None
     create_runtime: Callable | None
-    platform_host: type | None = None
+    platform_host: type[PlatformHost] | None = None
     validate_cli: Callable | None = None
 
 
@@ -27,7 +28,7 @@ def resolve_engine(engine):
     return driver
 
 
-def platform_host_factory(engine):
+def platform_host_factory(engine) -> type[PlatformHost]:
     factory = resolve_engine(engine).platform_host
     if factory is None:
         raise ValueError("Runtime engine does not support platform Host binding")

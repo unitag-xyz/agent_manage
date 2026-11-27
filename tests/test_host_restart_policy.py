@@ -10,6 +10,7 @@ from unittest.mock import Mock, patch
 
 from agent_manage.cli import _success_response
 from agent_manage.models import AddAgentRequest, AddAgentsRequest, CreateInstanceRequest
+from agent_manage.adapters.openclaw.local import LocalRunner
 from agent_manage.adapters.openclaw.orchestrator import InstanceManagerV2
 from test_create_instance_v2 import FakeRunner
 
@@ -159,6 +160,37 @@ class StaticReloadDecisionTest(unittest.TestCase):
 
 
 class RuntimeIsolationTest(unittest.TestCase):
+    def test_reload_resolves_the_executable_in_the_command_environment(self):
+        from agent_manage.adapters.openclaw.v2026_7 import restart_policy
+        from agent_manage.core.runtime import RuntimeContext
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = root / "project"
+            pinned = root / "ambient"
+            actual = project / "bin"
+            for package, version in ((pinned, "2026.7.1"), (actual, "2026.7.1-2")):
+                (package / "dist").mkdir(parents=True)
+                executable = package / "openclaw"
+                executable.write_text("#!/bin/sh\necho " + version + "\n")
+                executable.chmod(0o755)
+                (package / "package.json").write_text(json.dumps({"name": "openclaw", "version": version}))
+            (pinned / "dist" / "reload.js").write_bytes(b"pinned")
+            hashes = {"reload.js": hashlib.sha256(b"pinned").hexdigest()}
+            config = root / "openclaw.json"
+            manager = InstanceManagerV2(LocalRunner("openclaw", str(project)), config_path=str(config))
+            manager.container_runtime = True
+            context = RuntimeContext("one", "one", config, root, home=root, extra_env=(("PATH", "bin"),))
+            with (patch.dict(os.environ, PATH=str(pinned), UNITAG_AGENT_MANAGER_ACTIVATION_MODE=""),
+                  patch.object(restart_policy, "__file__", "/opt/unitag-agent-manager/current/restart_policy.py"),
+                  patch.object(restart_policy, "RELOAD_SOURCE_HASHES", hashes), context.activate()):
+                self.assertEqual(manager.runner.run(["openclaw"]).stdout.strip(), "2026.7.1-2")
+                self.assertFalse(manager._host_reload_available())
+                (actual / "openclaw").write_text("#!/bin/sh\necho 2026.7.1\n")
+                (actual / "package.json").write_text('{"name":"openclaw","version":"2026.7.1"}')
+                self.assertFalse(manager._host_reload_available())
+                (actual / "dist/reload.js").write_bytes(b"pinned")
+                self.assertTrue(manager._host_reload_available())
+
     def test_only_standard_host_installation_with_the_pinned_engine_can_opt_in(self):
         from agent_manage.adapters.openclaw.v2026_7 import restart_policy
         with tempfile.TemporaryDirectory() as directory:
@@ -166,11 +198,11 @@ class RuntimeIsolationTest(unittest.TestCase):
             (package / "dist").mkdir()
             binary = package / "openclaw.mjs"
             binary.write_text("fixture")
-            (package / "package.json").write_text('{"version":"2026.7.1"}')
+            (package / "package.json").write_text('{"name":"openclaw","version":"2026.7.1"}')
             (package / "dist" / "reload.js").write_bytes(b"pinned")
             hashes = {"reload.js": hashlib.sha256(b"pinned").hexdigest()}
             with patch.object(restart_policy, "RELOAD_SOURCE_HASHES", hashes), \
-                    patch.object(restart_policy.shutil, "which", return_value=str(binary)), \
+                    patch("agent_manage.adapters.openclaw.version.shutil.which", return_value=str(binary)), \
                     patch.dict(os.environ, {"UNITAG_AGENT_MANAGER_ACTIVATION_MODE": ""}):
                 for path, container, expected in (
                     ("/opt/unitag-agent-manager/current/agent_manage/restart_policy.py", True, True),
@@ -187,7 +219,7 @@ class RuntimeIsolationTest(unittest.TestCase):
                     (package / "dist" / "reload.js").write_bytes(b"changed")
                     self.assertFalse(restart_policy.standard_host_reload_available(str(binary), container_runtime=True))
                     (package / "dist" / "reload.js").write_bytes(b"pinned")
-                    (package / "package.json").write_text('{"version":"future"}')
+                    (package / "package.json").write_text('{"name":"openclaw","version":"future"}')
                     self.assertFalse(restart_policy.standard_host_reload_available(str(binary), container_runtime=True))
 
     def test_bad_or_missing_snapshot_and_pending_restart_keep_the_fallback(self):

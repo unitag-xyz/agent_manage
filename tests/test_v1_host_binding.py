@@ -716,7 +716,7 @@ class HostBindingTest(unittest.IsolatedAsyncioTestCase):
     async def test_run_keeps_a_native_session_observer_until_terminal(self):
         registration = self.registration()
         adapter = self.service(registration).adapter("one")
-        agent = adapter.resolve_agent("purchase-A")
+        agent = adapter.resolve_agent_binding("purchase-A").agent_id
         sessions = self.root / "one/config/agents/main/sessions"
         sessions.mkdir(parents=True)
         key = "agent:main:dashboard:one"
@@ -747,7 +747,7 @@ class HostBindingTest(unittest.IsolatedAsyncioTestCase):
     async def test_native_error_does_not_publish_or_persist_provider_diagnostic(self):
         adapter = self.service(self.registration()).adapter("one")
         key = "agent:main:fixture"
-        agent = adapter.resolve_agent("purchase-A")
+        agent = adapter.resolve_agent_binding("purchase-A").agent_id
         thread_id = adapter.register_thread(agent, key)
         run_id = adapter.store.object("run", "one", "native-error-run",
                                       {"status": "running", "threadId": thread_id})
@@ -802,7 +802,7 @@ class HostBindingTest(unittest.IsolatedAsyncioTestCase):
         first, second = self.registration(), self.registration("two", 18002)
         service = self.service(first, second)
         a, b = service.adapter("one"), service.adapter("two")
-        self.assertNotEqual(a.resolve_agent("purchase-A"), b.resolve_agent("purchase-A"))
+        self.assertNotEqual(a.resolve_agent_binding("purchase-A").agent_id, b.resolve_agent_binding("purchase-A").agent_id)
         self.assertNotEqual(a.gateway.device_path, b.gateway.device_path)
         self.assertEqual(str(a.host_binding.local_path("/home/node/.openclaw/workspace/result.txt")),
                          str(self.root / "one/workspace/result.txt"))
@@ -815,7 +815,7 @@ class HostBindingTest(unittest.IsolatedAsyncioTestCase):
         reg = self.registration()
         service = self.service(reg)
         adapter = service.adapter("one")
-        agent = adapter.resolve_agent("purchase-A")
+        agent = adapter.resolve_agent_binding("purchase-A").agent_id
         sessions = self.root / "one/config/agents/main/sessions"
         sessions.mkdir(parents=True)
         key = "agent:main:dashboard:one"
@@ -824,19 +824,19 @@ class HostBindingTest(unittest.IsolatedAsyncioTestCase):
         changed = copy.deepcopy(reg)
         changed["hostBinding"]["bindingId"] = "generation-2"
         other = self.service(changed).adapter("one")
-        self.assertEqual(agent, other.resolve_agent("purchase-A"))
+        self.assertEqual(agent, other.resolve_agent_binding("purchase-A").agent_id)
         self.assertEqual(thread, other.threads(agent)[0]["threadId"])
         self.assertNotEqual(adapter.gateway.device_path, other.gateway.device_path)
         changed["hostBinding"]["agentBindings"][0]["installationId"] = "new-install"
         # Keep the same database: old mappings must not grant the replacement access.
         adapter.registration["hostBinding"] = changed["hostBinding"]
         adapter.host_binding = HostBinding(changed, adapter.context.config_path)
-        self.assertNotEqual(agent, adapter.resolve_agent("purchase-A"))
+        self.assertNotEqual(agent, adapter.resolve_agent_binding("purchase-A").agent_id)
         with self.assertRaises(APIError):
             adapter.resolve_scope("threads.list", {"agentId": agent})
         with self.assertRaises(APIError):
             adapter.resolve_scope("messages.list", {"threadId": thread})
-        self.assertNotEqual(thread, adapter.threads(adapter.resolve_agent("purchase-A"))[0]["threadId"])
+        self.assertNotEqual(thread, adapter.threads(adapter.resolve_agent_binding("purchase-A").agent_id)[0]["threadId"])
 
     async def test_reject_wrong_workspace_duplicate_binding_and_symlink(self):
         reg = self.registration()

@@ -104,7 +104,8 @@ class OpenClawPlatformHost:
     async def resolve_grant_agent(self, adapter, workers, grant):
         if grant.instance_chat:
             return await workers(adapter.resolve_native_agent, grant.native_agent_id)
-        return await workers(adapter.resolve_agent, grant.agent_identify)
+        binding = await workers(adapter.resolve_agent_binding, grant.agent_identify)
+        return binding.agent_id
 
     async def verify_readiness(self):
         await asyncio.to_thread(self.verify_native_origin)

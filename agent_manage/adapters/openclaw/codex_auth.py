@@ -46,7 +46,8 @@ class CodexAuthMixin:
         return agents
 
     def _codex_bridge_input(self, action, **extra):
-        package = package_directory(self.bin, path=self.runner._command_env().get("PATH"))
+        package = package_directory(self.bin, path=self.runner._command_env().get("PATH"),
+                                    cwd=self.runner.project_dir)
         if package is None:
             raise FileNotFoundError("OpenClaw executable was not found")
         metadata = package / "package.json"
