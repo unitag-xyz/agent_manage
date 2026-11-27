@@ -77,6 +77,27 @@ class StoreTest(unittest.TestCase):
 
 @unittest.skipUnless(SERVER_AVAILABLE, "Install the server extra to test adapter selection")
 class AdapterSelectionTest(unittest.IsolatedAsyncioTestCase):
+    async def test_thread_model_capabilities_require_all_native_methods(self):
+        from types import SimpleNamespace
+        from agent_manage.adapters.openclaw.v2026_7.adapter import OpenClawAdapter
+
+        adapter = OpenClawAdapter.__new__(OpenClawAdapter)
+        adapter.runtime_id, adapter.version = "one", "2026.7.1"
+        adapter.context = SimpleNamespace(lifecycle="external")
+        adapter.host_binding, adapter.history_reader, adapter.codex_supported = None, object(), True
+        for methods, expected_readiness in (
+            (None, "not_configured"),
+            ([], "unavailable"),
+            (["sessions.describe"], "unavailable"),
+            (["models.list"], "unavailable"),
+            (["sessions.describe", "models.list"], "ready"),
+        ):
+            with self.subTest(methods=methods):
+                adapter.gateway = None if methods is None else SimpleNamespace(hello={"features": {"methods": methods}})
+                capability = adapter.capabilities()["methods"]["threads.models.list"]
+                self.assertEqual(capability["readiness"], expected_readiness)
+                self.assertEqual(capability["support"], "unsupported" if expected_readiness == "unavailable" else "adapted")
+
     async def test_runtime_protocol_match_does_not_grant_transcript_or_codex_compatibility(self):
         from agent_manage.adapters.openclaw import version
         from agent_manage.adapters.versions import VersionFamily

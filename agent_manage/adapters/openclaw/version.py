@@ -32,7 +32,7 @@ def history_reader(version: str):
     return load_implementation(family, "segment_reader") if family else None
 
 
-def package_directory(executable: str, *, path: str | None = None, cwd: Path | None = None) -> Path | None:
+def executable_path(executable: str, *, path: str | None = None, cwd: Path | None = None) -> Path | None:
     if cwd is not None:
         if os.path.dirname(executable):
             executable = str(cwd / executable)
@@ -40,7 +40,12 @@ def package_directory(executable: str, *, path: str | None = None, cwd: Path | N
             search = path if path is not None else os.environ.get("PATH", os.defpath)
             path = os.pathsep.join(str(cwd / entry) for entry in search.split(os.pathsep))
     binary = shutil.which(executable, path=path)
-    return Path(binary).resolve().parent if binary else None
+    return Path(binary).resolve() if binary else None
+
+
+def package_directory(executable: str, *, path: str | None = None, cwd: Path | None = None) -> Path | None:
+    binary = executable_path(executable, path=path, cwd=cwd)
+    return binary.parent if binary else None
 
 
 def package_metadata(package: Path) -> dict:

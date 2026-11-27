@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.0.011 - 2026-11-28
+
+- Report thread model selection readiness only when its required native Gateway methods are available.
+- Keep detached Codex login on the OpenClaw executable selected by the initiating command and resolve Node in the command environment.
+- Avoid a redundant lease lookup when forwarding scoped WebSocket events; retain the send-time authorization checks.
+
 - Use the workload's actual executable search path and working directory when checking the Host hot-reload package.
 - Honor transcript and Codex SDK compatibility separately in supported OpenClaw runtimes.
 - Decouple trusted Agent resolution from adapter storage and separate OpenClaw local management mapping and Dola template metadata lookup from native protocol handling.

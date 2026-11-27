@@ -7,7 +7,7 @@ import time
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from agent_manage.adapters.openclaw.codex_auth import GLOBAL_PROFILE, run_login_worker
 from agent_manage.cli import main
@@ -83,16 +83,52 @@ class GlobalCodexTest(unittest.TestCase):
         self.assertEqual(self.path.read_bytes(), self.original)
 
     def test_start_returns_verification_from_worker_and_preserves_config(self):
-        def ready(job):
+        def ready(job, binary):
             self.job(user_code="TEST-CODE", verification_url="https://auth.openai.com/codex/device", id=job["id"])
         with patch.object(self.manager, "_codex_bridge", return_value=self.auth()), \
-             patch.object(self.manager, "_codex_bridge_input", return_value={}), \
+             patch.object(self.manager, "_codex_bridge_input", return_value={"_binary": "/pinned/openclaw"}), \
              patch.object(self.manager, "_codex_launch_worker", side_effect=ready) as launch:
             result = self.manager.codex_login()
         self.assertEqual(result["status"], "pending")
-        launch.assert_called_once()
+        self.assertEqual(launch.call_args.args[1], "/pinned/openclaw")
         self.assertEqual(self.path.read_bytes(), self.original)
         self.assertEqual(stat.S_IMODE(self.manager._codex_auth_path("job").stat().st_mode), 0o600)
+
+    def test_relative_openclaw_is_resolved_before_starting_detached_worker(self):
+        package = self.path.parent / "project"
+        package.mkdir()
+        binary = package / "openclaw"
+        binary.touch(mode=0o755)
+        (package / "package.json").write_text('{"name":"openclaw","version":"2026.7.1"}')
+        for relative in ("dist/plugin-sdk/provider-auth.js", "dist/extensions/openai/openai-chatgpt-device-code.js"):
+            module = package / relative
+            module.parent.mkdir(parents=True, exist_ok=True)
+            module.touch()
+        self.manager.runner = LocalRunner("./openclaw", project_dir=str(package))
+        self.manager.bin = "./openclaw"
+        with patch.object(self.manager, "_codex_bridge", return_value=self.auth()), \
+             patch("agent_manage.adapters.openclaw.codex_auth.subprocess.Popen") as spawn:
+            def ready(*args, **kwargs):
+                job = self.manager._codex_auth_read("job")
+                self.job(id=job["id"], user_code="TEST-CODE")
+                return Mock()
+            spawn.side_effect = ready
+            self.assertEqual(self.manager.codex_login()["status"], "pending")
+        self.assertEqual(spawn.call_args.args[0][-3], str(binary))
+        self.assertEqual(spawn.call_args.args[0][-1], str(package))
+        self.assertNotIn("cwd", spawn.call_args.kwargs)
+
+    def test_bridge_uses_node_from_command_path_and_hides_launch_metadata(self):
+        directory = self.path.parent
+        node = directory / "node"
+        node.touch(mode=0o755)
+        self.manager.runner = LocalRunner(project_dir=str(directory))
+        with patch.object(self.manager.runner, "_command_env", return_value={"PATH": "."}), \
+             patch("agent_manage.adapters.openclaw.codex_auth.subprocess.Popen") as spawn:
+            self.manager._codex_bridge_process({"_bridge": "/bridge.mjs", "_binary": "/pinned/openclaw", "action": "inspect"})
+        self.assertEqual(spawn.call_args.args[0], [str(node), "/bridge.mjs"])
+        self.assertEqual(spawn.call_args.kwargs["cwd"], directory)
+        self.assertEqual(json.loads(spawn.return_value.stdin.write.call_args.args[0]), {"action": "inspect"})
 
     def test_status_reports_expiry_and_is_fast_without_network_or_model_calls(self):
         self.job(expires_at=0, user_code="EXPIRED")

@@ -239,15 +239,16 @@ def create_app(service, platform_pool=None, platform_release=None):
                     continue
                 if item_generation != generation:
                     continue
-                current = service.auth.authenticate(lease.token)
                 if event["type"] == "sessions.changed":
                     if (event["runtimeId"], None) not in subscriptions:
                         continue
-                    service.authorize(current, "sessions.subscribe", {"runtimeId": event["runtimeId"]})
+                    current = service.authorize(lease, "sessions.subscribe", {"runtimeId": event["runtimeId"]})
                 elif event.get("threadId"):
                     if (event["runtimeId"], event["threadId"]) not in subscriptions:
                         continue
-                    service.authorize(current, "events.subscribe", {"runtimeId": event["runtimeId"], "threadId": event["threadId"]})
+                    current = service.authorize(lease, "events.subscribe", {"runtimeId": event["runtimeId"], "threadId": event["threadId"]})
+                else:
+                    current = service.auth.authenticate(lease.token)
                 await send({**event, "authContext": current.public()}, item_generation, current)
 
         async def handle(frame, captured_lease, captured_generation):

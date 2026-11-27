@@ -4,7 +4,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import shutil
 import stat
 import subprocess
 import sys
@@ -13,7 +12,7 @@ import time
 import uuid
 from pathlib import Path
 
-from .version import implementation, load_implementation, package_directory, package_metadata, package_version
+from .version import executable_path, implementation, load_implementation, package_metadata, package_version
 from ...file_io import atomic_write_bytes as _atomic_bytes, write_private_json as _private_json
 
 GLOBAL_PROFILE = "openai:agent-manage-global"
@@ -46,10 +45,11 @@ class CodexAuthMixin:
         return agents
 
     def _codex_bridge_input(self, action, **extra):
-        package = package_directory(self.bin, path=self.runner._command_env().get("PATH"),
-                                    cwd=self.runner.project_dir)
-        if package is None:
+        binary = executable_path(self.bin, path=self.runner._command_env().get("PATH"),
+                                 cwd=self.runner.project_dir)
+        if binary is None:
             raise FileNotFoundError("OpenClaw executable was not found")
+        package = binary.parent
         metadata = package / "package.json"
         if not metadata.is_file():
             raise ValueError("Cannot locate the server OpenClaw package from its executable")
@@ -72,24 +72,25 @@ class CodexAuthMixin:
             for directory in restore.get("agent_dirs", []):
                 if not any(agent["dir"] == directory for agent in agents):
                     agents.append({"id": Path(directory).parent.name, "dir": directory})
-        return {"_bridge": str(bridge), "action": action, "package": str(package), "main": str(root / "agents/main/agent"),
+        return {"_bridge": str(bridge), "_binary": str(binary), "action": action, "package": str(package), "main": str(root / "agents/main/agent"),
                 "agents": agents, "order": config.get("auth", {}).get("order", {}).get("openai"),
                 "backup_path": str(self._codex_auth_path("transaction")), **extra}
 
     def _codex_bridge_process(self, payload):
-        node = shutil.which("node")
+        env = self.runner._command_env()
+        cwd = self.runner.project_dir
+        node = executable_path("node", path=env.get("PATH"), cwd=cwd)
         if not node:
             raise FileNotFoundError("Node.js is required by the server OpenClaw authentication SDK")
-        env = self.runner._command_env()
         env.update(OPENCLAW_STATE_DIR=str(self.config_path.parent), OPENCLAW_CONFIG_PATH=str(self.config_path))
         # Do not inherit overrides that could redirect the native canonical auth store.
         for key in ("OPENCLAW_AGENT_DIR", "PI_CODING_AGENT_DIR", "OPENCLAW_AUTH_STORE_READONLY"):
             env.pop(key, None)
-        process = subprocess.Popen([node, payload["_bridge"]],
+        process = subprocess.Popen([str(node), payload["_bridge"]],
                                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                                   text=True, env=env)
+                                   text=True, env=env, cwd=cwd)
         try:
-            process.stdin.write(json.dumps({key: value for key, value in payload.items() if key != "_bridge"}))
+            process.stdin.write(json.dumps({key: value for key, value in payload.items() if key not in {"_bridge", "_binary"}}))
             process.stdin.close()
         except Exception:
             if process.poll() is None:
@@ -132,10 +133,14 @@ class CodexAuthMixin:
                 "login": job, "models_switched": self._codex_models_active(), "activation_verified": False,
                 "restart_required": False, "gateway_restarted": False}
 
-    def _codex_launch_worker(self, job):
+    def _codex_launch_worker(self, job, binary):
         env = self.runner._command_env()
         env["PYTHONPATH"] = str(Path(__file__).resolve().parents[3]) + os.pathsep + env.get("PYTHONPATH", "")
-        process = subprocess.Popen([sys.executable, "-m", "agent_manage.codex_auth", str(self.config_path), self.bin, job["id"]],
+        argv = [sys.executable, "-m", "agent_manage.codex_auth", str(self.config_path), binary, job["id"]]
+        # Pass project cwd as data; Python must not import the worker from that directory.
+        if self.runner.project_dir is not None:
+            argv.append(str(self.runner.project_dir))
+        process = subprocess.Popen(argv,
                                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                    start_new_session=True, env=env, close_fds=True)
         # Reap workers when embedded in a long-lived API process; CLI exit still detaches them.
@@ -159,12 +164,12 @@ class CodexAuthMixin:
             if auth["canonical_auth_available"]:
                 return self._codex_finish_login_locked()
             # Resolve/validate the server SDK before starting an asynchronous task.
-            self._codex_bridge_input("device-login")
+            binary = self._codex_bridge_input("device-login")["_binary"]
             job = {"config_path": str(self.config_path), "id": uuid.uuid4().hex, "status": "starting",
                    "expires_at": int(time.time() * 1000) + 30000}
             _private_json(self._codex_auth_path("job"), job)
             try:
-                self._codex_launch_worker(job)
+                self._codex_launch_worker(job, binary)
             except Exception:
                 job.update(status="failed", error_code="CODEX_WORKER_START_FAILED")
                 _private_json(self._codex_auth_path("job"), job)
@@ -294,10 +299,10 @@ class CodexAuthMixin:
                     "pending_login_cancelled": bool(job), "server_session_revoked": False}
 
 
-def run_login_worker(config_path, binary, job_id):
+def run_login_worker(config_path, binary, job_id, project_dir=None):
     from .local import LocalRunner
     from .orchestrator import InstanceManagerV2
-    manager = InstanceManagerV2(LocalRunner(openclaw_bin=binary), config_path=config_path)
+    manager = InstanceManagerV2(LocalRunner(openclaw_bin=binary, project_dir=project_dir), config_path=config_path)
     process = None
     try:
         payload = manager._codex_bridge_input("device-login", job_path=str(manager._codex_auth_path("job")), job_id=job_id)

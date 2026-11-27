@@ -44,9 +44,13 @@ SCOPED_NATIVE_READS = {"commands.list", "tasks.list", "tasks.get", "sessions.usa
 HOST_INSTANCE_ONLY = SCOPED_NATIVE_READS | {"chat.sidebar", "tasks.cancel", "sessions.subscribe", "sessions.unsubscribe",
                                            "resources.get", "threads.thinking.get", "threads.thinking.update"}
 HOST_CHAT_METHODS |= HOST_INSTANCE_ONLY
-NATIVE_CAPABILITIES = {**NATIVE, "threads.thinking.get": "sessions.describe",
-                       **{method: method for method in (SCOPED_NATIVE_READS - {"sessions.usage.logs"})
-                          | {"sessions.subscribe", "tasks.cancel"}}}
+NATIVE_CAPABILITIES = {method: (native,) for method, native in NATIVE.items()}
+NATIVE_CAPABILITIES.update({method: (method,) for method in (SCOPED_NATIVE_READS - {"sessions.usage.logs"})
+                            | {"sessions.subscribe", "tasks.cancel"}})
+NATIVE_CAPABILITIES.update({
+    "threads.thinking.get": ("sessions.describe",),
+    "threads.models.list": ("sessions.describe", "models.list"),
+})
 
 
 class OpenClawAdapter(RuntimeAdapter):
@@ -118,7 +122,7 @@ class OpenClawAdapter(RuntimeAdapter):
                 readiness = "not_connected" if self.gateway else "not_configured"
                 if native_methods is not None:
                     readiness = "ready"
-                    if NATIVE_CAPABILITIES[method] not in native_methods:
+                    if any(required not in native_methods for required in NATIVE_CAPABILITIES[method]):
                         support, readiness = "unsupported", "unavailable"
             methods[method] = {"support": support, "readiness": readiness}
         return {"runtimeId": self.runtime_id, "engine": "openclaw", "engineVersion": self.version,
